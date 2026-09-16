@@ -685,43 +685,44 @@ struct PlayerPage {
           .textAlign(TextAlign.Center)
       }
 
-      // 进度条
-      Slider({
-        value: this.positionMs,
-        min: 0,
-        max: this.sliderMax(),
-        step: 100,
-        style: SliderStyle.OutSet
-      })
-        .width('100%')
-        .selectedColor(this.colors().brandPrimary)
-        .trackColor(this.colors().overlayControl)
-        .trackThickness(4)
-        .blockSize({ width: 12, height: 12 })
-        .onChange((value: number) => {
-          const v: number = Math.floor(value);
-          if (this.avPlayer !== null) {
-            this.avPlayer.seek(v);
-          }
-          this.positionMs = v;
-          this.revealControls();
-        })
-
-      // 时间显示 + 倍速
-      Row() {
+      // 进度条 + 时间：同一行呈现（已播时间在左、总时长在右），比"进度条独占一行 + 时间另起一行"
+      // 更紧凑，也让时间与进度在视觉上直接对应；倍速不再重复显示文字（下方已有倍速 chip）。
+      Row({ space: 12 }) {
         Text(this.formatTime(this.positionMs))
           .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().onOverlayMuted)
-        Blank()
-        Text(`${this.playbackSpeed}x`)
-          .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().onOverlayMuted)
-          .margin({ right: 8 })
+          .fontColor(this.colors().onOverlay)
+          .fontWeight(FontWeight.Medium)
+          .width(72)
+          .textAlign(TextAlign.Start)
+        Slider({
+          value: this.positionMs,
+          min: 0,
+          max: this.sliderMax(),
+          step: 100,
+          style: SliderStyle.OutSet
+        })
+          .layoutWeight(1)
+          .selectedColor(this.colors().brandPrimary)
+          .trackColor(this.colors().overlayControl)
+          .trackThickness(4)
+          .blockSize({ width: 14, height: 14 })
+          .blockColor(this.colors().onOverlay)
+          .onChange((value: number) => {
+            const v: number = Math.floor(value);
+            if (this.avPlayer !== null) {
+              this.avPlayer.seek(v);
+            }
+            this.positionMs = v;
+            this.revealControls();
+          })
         Text(this.durationMs > 0 ? this.formatTime(this.durationMs) : '--:--')
           .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
+          .width(72)
+          .textAlign(TextAlign.End)
       }
       .width('100%')
+      .alignItems(VerticalAlign.Center)
 
       // 控制按钮行
       Row({ space: 8 }) {
