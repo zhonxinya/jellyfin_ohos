@@ -5,38 +5,31 @@ import { MediaCard } from './MediaCard';
 import { LibraryTile } from './LibraryTile';
 import { SectionHeader } from './SectionHeader';
 import { WindowLayout } from '../common/WindowLayout';
+import { AppIconButton } from './AppIconButton';
 
 @Component
 export struct MediaViewToggle {
   @Prop mode: string = 'grid';
   onChange: (mode: string) => void = (_mode: string) => {};
 
-  @Builder
-  ToggleButton(icon: Resource, value: string) {
-    Button() {
-      SymbolGlyph(icon)
-        .fontSize(22)
-        .fontColor([this.mode === value ? this.colors().primary : this.colors().onSurfaceVariant])
-    }
-      .width(40)
-      .height(40)
-      .padding(0)
-      .backgroundColor(Color.Transparent)
-      .onClick(() => {
-        this.onChange(value);
-      })
-  }
+  /**
+   * 单个图标按钮切换网格/列表 —— 对齐参考项目 `BookViewToggleButton`：
+   * 图标表示"点击后切到的模式"（网格模式显示列表图标，反之亦然），40vp ghost 圆形按钮。
+   */
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
   }
 
   build() {
-    Row({ space: 4 }) {
-      this.ToggleButton($r('sys.symbol.square_grid_2x2'), 'grid')
-      this.ToggleButton($r('sys.symbol.list_bullet'), 'list')
-    }
-    .height(40)
+    AppIconButton({
+      icon: this.mode === 'list' ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.list_bullet'),
+      variant: 'ghost',
+      iconSize: 20,
+      onTap: () => {
+        this.onChange(this.mode === 'list' ? 'grid' : 'list');
+      }
+    })
   }
 }
 
