@@ -11,7 +11,8 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
  */
 @Component
 export struct PrimaryButton {
-  @Prop label: string = '';
+  /** 文案既支持普通字符串，也支持 `$r('app.string.*')` 资源 */
+  @Prop label: ResourceStr = '';
   @Prop buttonEnabled: boolean = true;
   @Prop fullWidth: boolean = true;
   onTap: () => void = () => {};
