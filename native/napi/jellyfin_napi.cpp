@@ -1202,7 +1202,11 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
                 surfaceId = 0;
             }
             if (surfaceId != 0) {
-                if (renderMode == "texture") {
+                if (SoftRenderer().isReady()) {
+                    // 已就绪（例如刚被 renderTargetProbe 初始化过）时复用，避免二次初始化同一 surface
+                    renderReady = true;
+                    out["renderReused"] = true;
+                } else if (renderMode == "texture") {
                     // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
                     renderReady = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId),
                                                                  renderError,
@@ -1342,14 +1346,28 @@ napi_value SoftPlayDumpFrame(napi_env env, napi_callback_info info)
     if (!ok && error.empty()) {
         // 退化路径：导出最近一帧解码结果（便于区分"没渲染"与"没解码"）
         std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
-        if (!SoftLastFrame().empty()) {
-            const int w = 480;
-            const int h = static_cast<int>(SoftLastFrame().size() / 4 / static_cast<size_t>(w));
-            if (w > 0 && h > 0) {
-                ok = WriteRgbaPng(SoftLastFrame(), w, h, path, error);
-                out["source"] = "last-decoded-frame";
-                out["width"] = w;
-                out["height"] = h;
+        if (!SoftLastFrame().empty() && SoftLastFrameWidth() > 0 && SoftLastFrameHeight() > 0) {
+            ok = WriteRgbaPng(SoftLastFrame(), SoftLastFrameWidth(), SoftLastFrameHeight(), path,
+                              error);
+            out["source"] = "last-decoded-frame";
+            out["width"] = SoftLastFrameWidth();
+            out["height"] = SoftLastFrameHeight();
+        }
+    }
+    // 对照导出：无论上面成功与否，都把"最近解码帧"另存一份，
+    // 从而能区分"解码出来就是黑"与"解码正常但绘制/回读没出内容"（本轮排查所需）。
+    {
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        if (!SoftLastFrame().empty() && SoftLastFrameWidth() > 0 && SoftLastFrameHeight() > 0) {
+            const std::string decodedPath = path + ".decoded.png";
+            std::string decodedError;
+            if (WriteRgbaPng(SoftLastFrame(), SoftLastFrameWidth(), SoftLastFrameHeight(), decodedPath,
+                             decodedError)) {
+                out["decodedFramePath"] = decodedPath;
+                out["decodedFrameWidth"] = SoftLastFrameWidth();
+                out["decodedFrameHeight"] = SoftLastFrameHeight();
+            } else {
+                out["decodedFrameError"] = decodedError;
             }
         }
     }
@@ -1434,6 +1452,9 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
     out["ok"] = renderable;
     out["renderable"] = renderable;
     out["report"] = report;
+    // 探测是一次性的：测完立刻销毁 EGL/NativeImage，避免它与随后软解播放的初始化叠加。
+    // （实测：对同一个 textureId 重复 OH_NativeImage_Create 会让后续 eglSwapBuffers 报 0x12301）
+    SoftRenderer().destroy();
     return ToNapiJson(env, MakeResult(true, 200, "ok", out));
 }
 

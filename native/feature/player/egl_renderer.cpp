@@ -195,9 +195,18 @@ bool EglRenderer::buildProgram(std::string &error)
         return false;
     }
     program_ = program;
-    attribPos_ = 0;
-    attribUv_ = 1;
+    // 按名字查询 attribute 位置：不能假定 layout(location=…) 一定生效，
+    // 否则 glVertexAttribPointer 绑到无效位置 → 绘制变成空操作（画面全黑但 GL 无错误）。
+    attribPos_ = glGetAttribLocation(program, "aPos");
+    attribUv_ = glGetAttribLocation(program, "aUv");
     uniformTex_ = glGetUniformLocation(program, "uTex");
+    if (attribPos_ < 0 || attribUv_ < 0) {
+        error = "着色器 attribute 未找到（aPos=" + std::to_string(attribPos_) + ", aUv="
+                + std::to_string(attribUv_) + "）";
+        glDeleteProgram(program);
+        program_ = 0;
+        return false;
+    }
     return true;
 }
 
@@ -235,12 +244,21 @@ bool EglRenderer::redrawAndReadback(const uint8_t *rgba, int width, int height,
                                     std::vector<uint8_t> &out, int &outWidth, int &outHeight,
                                     std::string &error)
 {
+    if (nativeImage_ != nullptr) {
+        // TEXTURE 路径的内容在 XComponent 的纹理里，没有可回读的帧缓冲；
+        // 如实报错，让上层改用截图或"导出解码帧"来验证（不给出误导性的黑图）。
+        error = "TEXTURE 路径不支持帧缓冲回读（内容在 XComponent 纹理中）";
+        return false;
+    }
     if (!drawFrame(rgba, width, height, error)) {
         return false;
     }
     glFinish();
     return readbackRgba(out, outWidth, outHeight, error);
 }
+
+/** 渲染缓冲最大宽度：软件 GL（模拟器）无法承受全屏尺寸的每帧交换，限制到视频量级 */
+constexpr int32_t kMaxRenderWidth = 640;
 
 /** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
 bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::string &error)
@@ -249,6 +267,41 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
         error = "渲染器未就绪或帧无效";
         return false;
     }
+    eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
+                   static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
+
+    if (nativeImage_ != nullptr) {
+        // TEXTURE 路径也走"四边形绘制"：先把解码帧上传到自己的纹理（texture_），
+        // 再绘制到 NativeImage 的 window surface，最后 swap + 发布。
+        glBindTexture(GL_TEXTURE_2D, texture_);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        const GLenum texErr = glGetError();
+        if (texErr != GL_NO_ERROR) {
+            error = "上传解码帧纹理失败（0x" + std::to_string(texErr) + "，帧 "
+                    + std::to_string(width) + "x" + std::to_string(height) + "）";
+            return false;
+        }
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(program_);
+        glUniform1i(uniformTex_, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glEnableVertexAttribArray(static_cast<GLuint>(attribPos_));
+        glVertexAttribPointer(static_cast<GLuint>(attribPos_), 2, GL_FLOAT, GL_FALSE,
+                              4 * sizeof(float), reinterpret_cast<void *>(0));
+        glEnableVertexAttribArray(static_cast<GLuint>(attribUv_));
+        glVertexAttribPointer(static_cast<GLuint>(attribUv_), 2, GL_FLOAT, GL_FALSE,
+                              4 * sizeof(float), reinterpret_cast<void *>(2 * sizeof(float)));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        const GLenum drawErr = glGetError();
+        if (drawErr != GL_NO_ERROR) {
+            error = "绘制失败（0x" + std::to_string(drawErr) + "）";
+            return false;
+        }
+        return true;
+    }
+
     if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
         eglQuerySurface(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
                         EGL_WIDTH, &surfaceWidth_);
@@ -267,6 +320,13 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     glBindTexture(GL_TEXTURE_2D, texture_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    GLenum glErr = glGetError();
+    if (glErr != GL_NO_ERROR) {
+        // 不检查 GL 错误会让"上传失败 → 整幅黑"看起来像"渲染成功"
+        error = "glTexImage2D 失败（0x" + std::to_string(glErr) + "，帧 " + std::to_string(width) + "x"
+                + std::to_string(height) + "）";
+        return false;
+    }
     glUniform1i(uniformTex_, 0);
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -277,6 +337,11 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     glVertexAttribPointer(static_cast<GLuint>(attribUv_), 2, GL_FLOAT, GL_FALSE,
                           4 * sizeof(float), reinterpret_cast<void *>(2 * sizeof(float)));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glErr = glGetError();
+    if (glErr != GL_NO_ERROR) {
+        error = "glDrawArrays 失败（0x" + std::to_string(glErr) + "）";
+        return false;
+    }
     return true;
 }
 
@@ -354,15 +419,46 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
     int32_t bufW = 0;
     int32_t bufH = 0;
     OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY, &bufW, &bufH);
-    if (requestedWidth_ > 0 && requestedHeight_ > 0) {
-        OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, requestedWidth_,
-                                             requestedHeight_);
-        bufW = requestedWidth_;
-        bufH = requestedHeight_;
+    (void)bufW;
+    (void)bufH;
+    // 渲染缓冲**不跟随组件全尺寸**：模拟器的 GL 是软件光栅化（日志可见 DGLES
+    // `d_eglSwapBuffers_special ... speed 531k/s`），让它每帧交换 1260x2619（330 万像素）
+    // 会直接失败（实测 eglSwapBuffers 0x12301）。这里按视频尺寸量级限制缓冲（默认 ≤640 宽，
+    // 保持宽高比），由 ArkUI 把该内容放大到 XComponent 尺寸。
+    int32_t w = requestedWidth_;
+    int32_t h = requestedHeight_;
+    if (w > kMaxRenderWidth) {
+        h = static_cast<int32_t>(static_cast<int64_t>(h) * kMaxRenderWidth / w);
+        w = kMaxRenderWidth;
     }
+    if (w <= 0 || h <= 0) {
+        w = 640;
+        h = 360;
+    }
+    OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, w, h);
+    bufW = w;
+    bufH = h;
     geometryAtInit_ = std::to_string(bufW) + "x" + std::to_string(bufH);
 
-    EGLSurface surface = eglCreateWindowSurface(display, config,
+    // TEXTURE 路径采用 OH_NativeImage 的标准用法：window surface（取自 NativeImage 的窗口）
+    // → 绘制 → eglSwapBuffers → OH_NativeImage_UpdateSurfaceImage 发布。
+    // 注意：swap 与 UpdateSurfaceImage 必须成对（见 selfTest 注释中的踩坑记录）。
+    // 曾试过"pbuffer + 直接把帧写进 XComponent 纹理"的简化方案，实测 UpdateSurfaceImage
+    // 返回 NATIVE_ERROR_NO_BUFFER(40601000)（没有可发布的 buffer），故回到 window surface 模式。
+    xcomponentTextureId_ = textureId;
+    const EGLint winConfigAttribs[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE
+    };
+    EGLConfig winConfig = nullptr;
+    EGLint winCount = 0;
+    if (eglChooseConfig(display, winConfigAttribs, &winConfig, 1, &winCount) != EGL_TRUE ||
+        winCount < 1) {
+        error = "eglChooseConfig(window, 纹理路径) 失败";
+        destroy();
+        return false;
+    }
+    EGLSurface surface = eglCreateWindowSurface(display, winConfig,
                                                 reinterpret_cast<EGLNativeWindowType>(window), nullptr);
     if (surface == EGL_NO_SURFACE) {
         error = "eglCreateWindowSurface(纹理路径) 失败";
@@ -371,7 +467,7 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
     }
     surface_ = surface;
     const EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttribs);
+    EGLContext context = eglCreateContext(display, winConfig, EGL_NO_CONTEXT, contextAttribs);
     if (context == EGL_NO_CONTEXT || eglMakeCurrent(display, surface, surface, context) != EGL_TRUE) {
         error = "EGL 上下文创建/切换失败（纹理路径）";
         destroy();
@@ -425,6 +521,12 @@ bool EglRenderer::selfTest(std::string &report)
     const EGLBoolean swapped = eglSwapBuffers(static_cast<EGLDisplay>(display_),
                                               static_cast<EGLSurface>(surface_));
     const EGLint swapErr = eglGetError();
+    // TEXTURE 路径：swap 之后**必须**发布（UpdateSurfaceImage），否则 OH_NativeImage 的
+    // 生产者/消费者会失配，之后渲染循环里的每次 swap 都失败（实测 0x12301）。
+    // 该失配是本类上一版在自检里"裸 swap 不发布"造成的，务必保持两者成对。
+    if (nativeImage_ != nullptr && swapped == EGL_TRUE) {
+        OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
+    }
 
     report = "几何 " + std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_)
              + "；清屏(红)后中心像素 rgba=(" + std::to_string(pixel[0]) + "," + std::to_string(pixel[1])

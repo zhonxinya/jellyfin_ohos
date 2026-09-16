@@ -68,6 +68,9 @@ public:
     void destroy();
     bool isReady() const { return ready_; }
 
+    /** 是否走 TEXTURE 路径（OH_NativeImage：帧直接上传到 XComponent 纹理并发布，不做 swap） */
+    bool isTexturePath() const { return nativeImage_ != nullptr; }
+
 private:
     /** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
     bool drawFrame(const uint8_t *rgba, int width, int height, std::string &error);
@@ -79,6 +82,7 @@ private:
     void *display_ = nullptr;   // EGLDisplay
     void *context_ = nullptr;   // EGLContext
     void *surface_ = nullptr;   // EGLSurface
+    unsigned int xcomponentTextureId_ = 0;   // TEXTURE 路径：XComponent 提供的纹理 id
     unsigned int program_ = 0;
     unsigned int texture_ = 0;
     unsigned int vbo_ = 0;

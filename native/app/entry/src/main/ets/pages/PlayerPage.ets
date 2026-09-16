@@ -267,8 +267,9 @@ struct PlayerPage {
     }
     this.softPulling = true;
     try {
-      // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）
-      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(0);
+      // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）。
+      // 帧宽限制 640：模拟器 GL 为软件光栅化，上传 1920x1080 大纹理会明显拖慢甚至失败。
+      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(640);
       if (frame === null) {
         return;
       }
