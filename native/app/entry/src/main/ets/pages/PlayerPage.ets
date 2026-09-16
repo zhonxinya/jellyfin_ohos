@@ -193,6 +193,16 @@ struct PlayerPage {
       + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
       + (renderError.length > 0 ? `（${renderError}）` : '');
     this.startSoftTimer();
+    // 启动即自检（清屏为红并回读）：把"渲染目标是否可用"的判定一次性落到 softDiag，
+    // 不依赖再点一次按钮（避免自动化/人工都容易错过的时序）
+    const selfRaw: string = JellyfinNative.softPlaySelfTest();
+    const selfResult: NativeResult = JellyfinNative.parseResult(selfRaw);
+    if (selfResult.ok && selfResult.data !== null) {
+      const passed: boolean = JsonUtil.getBoolean(selfResult.data as ESObject, 'ok', false);
+      const report: string = JsonUtil.getString(selfResult.data as ESObject, 'report',
+        JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
+      this.softDiag = `渲染自检${passed ? '通过' : '未通过'}：${report}`;
+    }
   }
 
   /** XComponent 的像素尺寸：优先用组件实测尺寸，未拿到时退化为整屏像素 */
