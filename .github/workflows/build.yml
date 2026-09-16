@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          INC="-I native/core -I native/core/api -I native/player -I native/third_party -I native/third_party/nlohmann"
+          INC="-I native/core -I native/core/api -I native/feature/player -I native/third_party -I native/third_party/nlohmann"
           OUT="$(mktemp -d)"
           fail=0
 
@@ -47,7 +47,9 @@ jobs:
               test_playback_resolve)
                 extra="native/core/api/playback_resolve.cpp native/core/url_util.cpp" ;;
               test_player_engine)
-                extra="native/player/engine.cpp native/player/hw_decoder.cpp native/player/ffmpeg_decoder.cpp native/player/subtitle.cpp native/player/playback_policy.cpp native/core/url_util.cpp" ;;
+                extra="native/feature/player/engine.cpp native/feature/player/hw_decoder.cpp native/feature/player/ffmpeg_decoder.cpp native/feature/player/subtitle.cpp native/feature/player/playback_policy.cpp native/core/url_util.cpp" ;;
+              test_range_cache)
+                extra="native/feature/player/range_cache.cpp native/feature/player/range_fetcher.cpp" ;;
               *)
                 echo "::error::新增的测试 $name 尚未在本工作流登记编译源文件"
                 fail=1
