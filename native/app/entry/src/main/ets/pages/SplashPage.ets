@@ -165,12 +165,12 @@ struct SplashPage {
   Splash() {
     Column({ space: 16 }) {
       Text($r('app.string.app_name'))
-        .fontSize(28)
+        .fontSize(ThemeConstants.TITLE_DISPLAY)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
       Text(this.message)
-        .fontSize(14)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontColor(this.colors().textSecondary)
       if (this.status === UiState.ERROR) {
         Button($r('app.string.action_retry'))
           .backgroundColor(this.colors().primary)

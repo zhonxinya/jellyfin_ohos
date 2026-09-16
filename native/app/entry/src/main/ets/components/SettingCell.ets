@@ -57,7 +57,7 @@ export struct SettingCell {
           .padding({ left: 6, right: 6, top: 2, bottom: 2 })
         if (this.showChevron) {
           SymbolGlyph($r('sys.symbol.chevron_right'))
-            .fontSize(16)
+            .fontSize(ThemeConstants.ICON_SMALL)
             .fontColor([this.colors().textTertiary])
         }
       } else if (this.valueText.length > 0) {
@@ -68,7 +68,7 @@ export struct SettingCell {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       } else if (this.showChevron) {
         SymbolGlyph($r('sys.symbol.chevron_right'))
-          .fontSize(16)
+          .fontSize(ThemeConstants.ICON_SMALL)
           .fontColor([this.colors().textTertiary])
       }
     }

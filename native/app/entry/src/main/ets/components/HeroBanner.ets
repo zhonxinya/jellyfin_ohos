@@ -108,7 +108,7 @@ export struct HeroBanner {
       Row({ space: 12 }) {
         Column({ space: 4 }) {
           Text(this.bannerItem.name)
-            .fontSize(21)
+            .fontSize(ThemeConstants.TITLE_XLARGE)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.colors().onOverlay)
             .maxLines(2)
@@ -130,7 +130,7 @@ export struct HeroBanner {
               .fontSize(ThemeConstants.ICON_MEDIUM)
               .fontColor([this.colors().onBrand])
             Text('播放')
-              .fontSize(15)
+              .fontSize(ThemeConstants.TITLE_MEDIUM)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.colors().onBrand)
           }

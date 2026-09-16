@@ -136,13 +136,13 @@ export struct ThemeSettingsPage {
   SectionHead(iconRes: Resource, title: string, subtitle: string) {
     Row({ space: 8 }) {
       SymbolGlyph(iconRes)
-        .fontSize(18)
-        .fontColor([this.colors().primary])
-      Column({ space: 2 }) {
+        .fontSize(ThemeConstants.ICON_MEDIUM)
+        .fontColor([this.colors().brandPrimary])
+      Column({ space: 4 }) {
         Text(title)
-          .fontSize(ThemeConstants.TITLE_SMALL)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().textPrimary)
         Text(subtitle)
           .fontSize(ThemeConstants.LABEL_SMALL)
           .fontColor(this.colors().onSurfaceVariant)

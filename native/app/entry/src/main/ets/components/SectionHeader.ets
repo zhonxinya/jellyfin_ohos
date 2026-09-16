@@ -33,7 +33,7 @@ export struct SectionHeader {
         .borderRadius(2)
         .backgroundColor(this.colors().brandPrimary)
       Text(this.title)
-        .fontSize(17)
+        .fontSize(ThemeConstants.TITLE_SECTION)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.colors().textPrimary)
         .maxLines(1)

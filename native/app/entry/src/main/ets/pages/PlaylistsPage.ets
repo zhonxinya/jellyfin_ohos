@@ -8,6 +8,7 @@ import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
 import { AsyncStateView } from '../components/AsyncStateView';
 import { MediaCollectionView } from '../components/MediaCollectionView';
+import { TextButton } from '../components/TextButton';
 
 @Entry
 @Component
@@ -61,12 +62,14 @@ struct PlaylistsPage {
             .fontSize(ThemeConstants.LABEL_SMALL)
             .fontColor(this.colors().onSurfaceVariant)
             .layoutWeight(1)
-          Button('刷新')
-            .height(32)
-            .fontSize(12)
-            .backgroundColor(this.colors().surfaceElevated)
-            .fontColor(this.colors().onSurface)
-            .onClick(() => { this.reload(); })
+          // 刷新入口改用参考项目 TextButton（13fp Medium 品牌色 + 按下态），
+          // 原来是 32vp/12fp 的临时小按钮
+          TextButton({
+            label: '刷新',
+            onTap: () => {
+              this.reload();
+            }
+          })
         }
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 8 })

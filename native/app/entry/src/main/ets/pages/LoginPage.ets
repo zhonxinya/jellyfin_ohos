@@ -99,7 +99,7 @@ struct LoginPage {
         Column() {
           Row() {
             SymbolGlyph($r('sys.symbol.film'))
-              .fontSize(56)
+              .fontSize(ThemeConstants.ICON_LOGO)
               .fontColor([this.colors().brandPrimary])
           }
           .width('100%')

@@ -47,13 +47,16 @@ export struct SearchBar {
           this.onSearch();
         })
       if (this.showClear && this.keyword.length > 0) {
-        Button('\u2715')
+        // 清除按钮：原来用 '✕' 文本字符当图标，改用系统符号
+        Button({ type: ButtonType.Circle, stateEffect: false }) {
+          SymbolGlyph($r('sys.symbol.xmark_circle_fill'))
+            .fontSize(ThemeConstants.ICON_MEDIUM)
+            .fontColor([this.colors().textTertiary])
+        }
           .width(32)
           .height(32)
-          .fontSize(16)
           .padding(0)
           .backgroundColor(Color.Transparent)
-          .fontColor(this.colors().textTertiary)
           .stateStyles({
             pressed: {
               .backgroundColor(this.colors().surfacePressed)

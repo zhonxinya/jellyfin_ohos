@@ -38,7 +38,7 @@ export struct SectionCard {
         Row({ space: 8 }) {
           if (this.showHeaderIcon) {
             SymbolGlyph(this.icon)
-              .fontSize(18)
+              .fontSize(ThemeConstants.ICON_MEDIUM)
               .fontColor([this.colors().brandPrimary])
           }
           Text(this.title)

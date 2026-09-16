@@ -177,11 +177,15 @@ export class ThemeConstants {
   static readonly CARD_STACK_SPACE: number = 12;
 
   // ── 字号阶梯（参考项目字面量，此处收敛为令牌）────────────────────────
+  /** 启动页应用名等展示型标题 */
+  static readonly TITLE_DISPLAY: number = 28;
   /** 页面/顶栏标题 */
   static readonly TITLE_XLARGE: number = 21;
   /** 封面角标/徽标（参考项目 9fp） */
   static readonly BADGE_LABEL: number = 9;
   static readonly TITLE_LARGE: number = 20;
+  /** 区块标题（参考项目 SectionTitle 为 17fp Medium） */
+  static readonly TITLE_SECTION: number = 17;
   /** 区块标题、列表项标题、设置行标题 */
   static readonly TITLE_MEDIUM: number = 16;
   /** 正文 */
@@ -203,6 +207,8 @@ export class ThemeConstants {
   static readonly ICON_XLARGE: number = 22;
   static readonly ICON_XXL: number = 28;
   static readonly ICON_HERO: number = 40;
+  /** 启动页品牌标识（唯一一处超大图标） */
+  static readonly ICON_LOGO: number = 56;
   /** 空态/加载态主文案 */
   static readonly STATE_TITLE: number = 16;
   /** 空态说明文案 */

@@ -276,11 +276,11 @@ export struct SubtitleSettingsPage {
   CardHead(iconRes: Resource, title: string) {
     Row({ space: 8 }) {
       SymbolGlyph(iconRes)
-        .fontSize(18)
-        .fontColor([this.colors().primary])
+        .fontSize(ThemeConstants.ICON_MEDIUM)
+        .fontColor([this.colors().brandPrimary])
       Text(title)
-        .fontSize(ThemeConstants.TITLE_SMALL)
-        .fontWeight(FontWeight.Bold)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontWeight(FontWeight.Medium)
         .fontColor(this.colors().onSurface)
     }
     .width('100%')

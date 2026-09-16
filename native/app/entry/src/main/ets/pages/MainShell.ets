@@ -78,7 +78,7 @@ struct MainShell {
   DrawerItem(label: string, icon: Resource, onTap: () => void) {
     Row({ space: 14 }) {
       SymbolGlyph(icon)
-        .fontSize(20)
+        .fontSize(ThemeConstants.ICON_LARGE)
         .fontColor([this.colors().textSecondary])
         .width(28)
       Text(label)
@@ -111,7 +111,7 @@ struct MainShell {
     Column() {
       Row({ space: 12 }) {
         SymbolGlyph($r('sys.symbol.play_circle'))
-          .fontSize(26)
+          .fontSize(ThemeConstants.ICON_XXL)
           .fontColor([this.colors().brandPrimary])
         Text('Jellyfin')
           .fontSize(ThemeConstants.TITLE_LARGE)
