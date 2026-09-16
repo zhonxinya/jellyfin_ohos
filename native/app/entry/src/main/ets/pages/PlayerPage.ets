@@ -15,6 +15,8 @@ import { ChipButton } from '../components/ChipButton';
 struct PlayerPage {
   @State private itemId: string = '';
   @State private title: string = '播放';
+  /** 集数/季信息文案：参数解析时一次性算好，不在 build 里调用 getter（见下方稳定性修复说明） */
+  @State private typeLabel: string = '';
   @State private playUrl: string = '';
   @State private stateText: string = 'idle';
   @State private positionMs: number = 0;
@@ -70,6 +72,7 @@ struct PlayerPage {
         this.playbackOptions = optsVal;
       }
     }
+    this.typeLabel = this.computeTypeLabel();
     this.openPlayer();
     this.timerId = setInterval(() => {
       if (this.isPlaying) {
@@ -279,20 +282,31 @@ struct PlayerPage {
     return WindowLayout.screenWidth();
   }
 
-  private get itemTypeLabel(): string {
-    // 解析从 DetailPage 传入的播放选项，提取集数/季信息
+  /**
+   * 计算集数/季信息文案。
+   *
+   * 稳定性修复（设备实测发现的崩溃）：原实现是 `private get itemTypeLabel()`，
+   * 里面直接 `const album: string = opts['album']; ... album.length > 0`，
+   * 当 DetailPage 未传 album 时 `opts['album']` 为 undefined，`album.length` 抛
+   * `TypeError: Cannot read property length of undefined`；而 ArkTS 会把 getter 内联进
+   * build，getter 里的 try/catch 拦不住，导致**进入播放页即崩溃**（jscrash 日志
+   * PlayerPage.ets:320）。现在改为：字段值先做类型判断 + 结果缓存到 @State，build 里只读状态。
+   */
+  private computeTypeLabel(): string {
     try {
       const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
-      const seasonNum: number = opts['seasonNumber'] as number;
-      const episodeNum: number = opts['episodeNumber'] as number;
-      const album: string = opts['album'] as string;
+      const seasonNum: number = typeof opts['seasonNumber'] === 'number' ? opts['seasonNumber'] as number : 0;
+      const episodeNum: number = typeof opts['episodeNumber'] === 'number' ? opts['episodeNumber'] as number : 0;
+      const albumRaw: string = typeof opts['album'] === 'string' ? opts['album'] as string : '';
       if (seasonNum > 0 && episodeNum > 0) {
         return `第${seasonNum}季 第${episodeNum}集`;
       }
-      if (album.length > 0) {
-        return album;
+      if (albumRaw.length > 0) {
+        return albumRaw;
       }
-    } catch (_) {}
+    } catch (_e) {
+      // 参数不是合法 JSON 时忽略
+    }
     return '';
   }
 
@@ -317,8 +331,8 @@ struct PlayerPage {
             .fontColor(this.colors().onOverlay)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (this.itemTypeLabel.length > 0) {
-            Text(this.itemTypeLabel)
+          if (this.typeLabel.length > 0) {
+            Text(this.typeLabel)
               .fontSize(11)
               .fontColor(this.colors().onOverlayMuted)
           }
