@@ -432,7 +432,13 @@ struct PlayerPage {
         this.flushStop();
       });
       session.on('seek', (timeMs: number) => {
-        this.onSeek(timeMs - this.positionMs);
+        // AVSession 的 seek 回调给的是**绝对时间**（毫秒），不是偏移量。
+        // 之前写成 onSeek(timeMs - this.positionMs) 是错的：会把绝对位置当作增量再叠加一次。
+        this.positionMs = timeMs;
+        if (this.avPlayer !== null) {
+          this.avPlayer.seek(timeMs);
+        }
+        this.appendProbeFile('player_avsession.txt', `sessionSeek to=${timeMs}\n`);
       });
       await session.activate();
       // 把播放状态同步进系统会话（通知栏/锁屏媒体控件据此显示播放/暂停与进度）
