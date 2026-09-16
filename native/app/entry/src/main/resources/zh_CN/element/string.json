@@ -10,11 +10,11 @@
     },
     {
       "name": "EntryAbility_label",
-      "value": "Jellyfin HMOS"
+      "value": "Jellyfin 客户端（非官方）"
     },
     {
       "name": "app_name",
-      "value": "Jellyfin"
+      "value": "Jellyfin 客户端（非官方）"
     },
     {
       "name": "server_title",
