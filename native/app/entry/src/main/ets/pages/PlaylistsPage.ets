@@ -6,7 +6,8 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { MediaCollectionView } from '../components/MediaCollectionView';
 import { TextButton } from '../components/TextButton';
 
@@ -49,13 +50,17 @@ struct PlaylistsPage {
     Column() {
       PageHeader({ title: '播放列表', onBack: () => { router.back(); } })
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          emptyHint: '暂无播放列表',
-          minHeight: 260,
-          onRetry: () => { this.reload(); }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => { this.reload(); }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无播放列表' })
+        }
       } else {
         Row() {
           Text(`${this.items.length} 个播放列表`)

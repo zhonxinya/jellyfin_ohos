@@ -3,7 +3,8 @@ import { JellyfinNative, NativeResult } from '../../plugins/JellyfinNative';
 import { UiState } from '../../common/UiState';
 import { JsonUtil } from '../../common/JsonUtil';
 import { AdminConfigEditor, AdminConfigField, AdminConfigValue } from '../../components/AdminConfigEditor';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 import { PageHeader } from '../../components/PageHeader';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
@@ -77,7 +78,17 @@ struct StreamingPage {
     Column() {
       PageHeader({ title: '流媒体', onBack: () => { router.back(); } })
       if (this.status !== UiState.SUCCESS || this.draft === null) {
-        AsyncStateView({ status: this.status, message: '无法加载流媒体配置', onRetry: () => { this.reload(); } })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: '无法加载流媒体配置',
+            actionLabel: '重试',
+            onAction: () => { this.reload(); }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无数据' })
+        }
       } else {
         Scroll() {
           Column() {
