@@ -322,9 +322,9 @@ struct DetailPage {
       ForEach(this.mediaInfoLabels(), (text: string) => {
         Text(text)
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor(this.colors().surfaceElevated)
+          .backgroundColor(this.colors().surfacePressed)
           .borderRadius(8)
           .margin({ right: 8, bottom: 4 })
       }, (text: string) => text)
@@ -529,7 +529,7 @@ struct DetailPage {
                 .fontSize(ThemeConstants.BADGE_LABEL)
                 .fontColor(this.colors().brandPrimary)
                 .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-                .backgroundColor(this.colors().surfaceElevated)
+                .backgroundColor(this.colors().surfacePressed)
                 .borderRadius(5)
               Text(entry.codec)
                 .fontSize(ThemeConstants.META_SMALL)
@@ -566,7 +566,7 @@ struct DetailPage {
     Column() {
       Text('\u6f14\u804c\u4eba\u5458')
         .fontSize(ThemeConstants.TITLE_SMALL)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
         .padding({ left: 16, top: 8, bottom: 8 })
         .width('100%')
       List({ space: 12 }) {
@@ -582,7 +582,7 @@ struct DetailPage {
               })
               Text(this.personName(p))
                 .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontColor(this.colors().onSurface)
+                .fontColor(this.colors().textPrimary)
                 .maxLines(1)
                 .width(72)
                 .textAlign(TextAlign.Center)
@@ -623,7 +623,7 @@ struct DetailPage {
         }
         .width('100%')
         .height('100%')
-        .backgroundColor(this.colors().background)
+        .backgroundColor(this.colors().pageBackground)
       } else {
         Scroll() {
           Column() {
@@ -641,7 +641,7 @@ struct DetailPage {
                 .height('100%')
                 .linearGradient({
                   angle: 180,
-                  colors: [[this.colors().posterScrim, 0.0], [this.colors().background, 1.0]]
+                  colors: [[this.colors().posterScrim, 0.0], [this.colors().pageBackground, 1.0]]
                 })
             }
             .width('100%')
@@ -665,13 +665,13 @@ struct DetailPage {
               Column({ space: 8 }) {
                 Text(this.item.name)
                   .fontSize(ThemeConstants.TITLE_LARGE)
-                  .fontColor(this.colors().onSurface)
+                  .fontColor(this.colors().textPrimary)
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%')
                 Text(this.item.metaLine())
                   .fontSize(ThemeConstants.LABEL_SMALL)
-                  .fontColor(this.colors().onSurfaceVariant)
+                  .fontColor(this.colors().textSecondary)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%')
@@ -679,18 +679,18 @@ struct DetailPage {
                   if (this.item.type.length > 0) {
                     Text(this.item.typeLabel())
                       .fontSize(ThemeConstants.LABEL_SMALL)
-                      .fontColor(this.colors().onSurface)
+                      .fontColor(this.colors().textPrimary)
                       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                      .backgroundColor(this.colors().surfaceElevated)
+                      .backgroundColor(this.colors().surfacePressed)
                       .borderRadius(8)
                       .margin({ right: 8, bottom: 4 })
                   }
                   ForEach(this.item.genres.slice(0, 3), (genre: string) => {
                     Text(genre)
                       .fontSize(ThemeConstants.LABEL_SMALL)
-                      .fontColor(this.colors().onSurface)
+                      .fontColor(this.colors().textPrimary)
                       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                      .backgroundColor(this.colors().surfaceElevated)
+                      .backgroundColor(this.colors().surfacePressed)
                       .borderRadius(8)
                       .margin({ right: 8, bottom: 4 })
                   }, (genre: string) => genre)
@@ -776,28 +776,28 @@ struct DetailPage {
               Column() {
                 Text('\u97f3\u9891 / \u5b57\u5e55')
                   .fontSize(ThemeConstants.LABEL_SMALL)
-                  .fontColor(this.colors().onSurfaceVariant)
+                  .fontColor(this.colors().textSecondary)
                   .padding({ left: 16, bottom: 4 })
                   .width('100%')
                 Row({ space: 12 }) {
                   // 音频轨选择
                   Select(this.audioOptions())
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
+                    .backgroundColor(this.colors().surfacePressed)
+                    .fontColor(this.colors().textPrimary)
                     .height(40)
                     .layoutWeight(1)
-                    .border({ width: 1, color: this.colors().outline, radius: 4 })
+                    .border({ width: 1, color: this.colors().divider, radius: 4 })
                     .padding({ left: 12, right: 12 })
                     .onSelect((index: number, _value: string) => {
                       this.audioStreamIndex = this.streamIndexAt(index);
                     })
                   // 字幕轨选择
                   Select(this.subtitleOptions())
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
+                    .backgroundColor(this.colors().surfacePressed)
+                    .fontColor(this.colors().textPrimary)
                     .height(40)
                     .layoutWeight(1)
-                    .border({ width: 1, color: this.colors().outline, radius: 4 })
+                    .border({ width: 1, color: this.colors().divider, radius: 4 })
                     .padding({ left: 12, right: 12 })
                     .onSelect((index: number, _value: string) => {
                       this.subtitleStreamIndex = index === 0 ? -1 : this.streamIndexAt(index - 1);
@@ -813,7 +813,7 @@ struct DetailPage {
             if (this.item.overview.length > 0) {
               Text(this.item.overview)
                 .fontSize(ThemeConstants.BODY_MEDIUM)
-                .fontColor(this.colors().onSurface)
+                .fontColor(this.colors().textPrimary)
                 .lineHeight(22)
                 .padding({ left: 16, right: 16, top: 4, bottom: 16 })
                 .width('100%')
@@ -834,7 +834,7 @@ struct DetailPage {
               Column() {
                 Text('\u5b63\u4e0e\u96c6')
                   .fontSize(ThemeConstants.TITLE_SMALL)
-                  .fontColor(this.colors().onSurface)
+                  .fontColor(this.colors().textPrimary)
                   .padding({ left: 16, top: 8, bottom: 8 })
                   .width('100%')
                 ForEach(this.seasons, (season: MediaItem) => {
@@ -842,7 +842,7 @@ struct DetailPage {
                     Row() {
                       Text(season.name)
                         .fontSize(ThemeConstants.BODY_MEDIUM)
-                        .fontColor(this.colors().onSurface)
+                        .fontColor(this.colors().textPrimary)
                         .layoutWeight(1)
                       SymbolGlyph(this.expandedSeasonId === season.id
                         ? $r('sys.symbol.chevron_down')
@@ -852,7 +852,7 @@ struct DetailPage {
                     }
                     .width('100%')
                     .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-                    .backgroundColor(this.colors().surface)
+                    .backgroundColor(this.colors().cardBackground)
                     .onClick(() => {
                       this.loadEpisodes(season.id);
                     })
@@ -871,11 +871,11 @@ struct DetailPage {
                               Column({ space: 4 }) {
                                 Text(ep.displayTitle())
                                   .fontSize(ThemeConstants.BODY_MEDIUM)
-                                  .fontColor(this.colors().onSurface)
+                                  .fontColor(this.colors().textPrimary)
                                   .maxLines(2)
                                 Text(ep.metaLine())
                                   .fontSize(ThemeConstants.LABEL_SMALL)
-                                  .fontColor(this.colors().onSurfaceVariant)
+                                  .fontColor(this.colors().textSecondary)
                               }
                               .alignItems(HorizontalAlign.Start)
                               .layoutWeight(1)
