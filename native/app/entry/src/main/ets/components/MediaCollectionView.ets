@@ -65,8 +65,9 @@ export struct MediaCollectionView {
     return WindowLayout.cardWidth(this.resolvedColumns());
   }
 
+  /** 海报 0.7 宽高比 + 文案块高度（标题 2 行 + 间隙 + 元信息） */
   private gridItemHeight(): number {
-    return this.cardWidthForColumns() * 1.5 + 52;
+    return Math.floor(this.cardWidthForColumns() / ThemeConstants.POSTER_RATIO) + 60;
   }
 
   private columnsTemplate(): string {
@@ -103,7 +104,7 @@ export struct MediaCollectionView {
   build() {
     Column() {
       if (this.viewMode === 'list') {
-        List() {
+        List({ space: ThemeConstants.LIST_SPACE }) {
           ForEach(this.items, (item: MediaItem) => {
             ListItem() {
               MediaCard({
@@ -114,6 +115,7 @@ export struct MediaCollectionView {
                 }
               })
             }
+            .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING })
           }, (item: MediaItem) => item.id)
           if (this.hasMore) {
             ListItem() {
@@ -136,6 +138,7 @@ export struct MediaCollectionView {
         }
         .layoutWeight(1)
         .width('100%')
+        .cachedCount(8)
         .scrollBar(BarState.Auto)
       } else {
         Scroll() {
@@ -157,9 +160,10 @@ export struct MediaCollectionView {
             }
           }
           .columnsTemplate(this.columnsTemplate())
-          .columnsGap(ThemeConstants.CARD_GAP)
-          .rowsGap(ThemeConstants.GRID_MAIN_SPACING)
-          .padding({ left: 16, right: 16, top: 8, bottom: 16 })
+          .columnsGap(ThemeConstants.GRID_COLUMN_GAP)
+          .rowsGap(ThemeConstants.GRID_ROW_GAP)
+          .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: ThemeConstants.PAGE_PADDING })
+          .cachedCount(12)
           .width('100%')
         }
         .layoutWeight(1)
