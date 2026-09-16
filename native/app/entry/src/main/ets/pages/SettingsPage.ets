@@ -6,6 +6,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { PageHeader } from '../components/PageHeader';
 import { JsonUtil } from '../common/JsonUtil';
+import { SessionUtil } from '../services/SessionUtil';
 
 interface SettingsItem {
   /** 系统符号名，映射见 iconResource()；info 行忽略 */
@@ -45,6 +46,9 @@ export struct SettingsPage {
   @State private message: string = '';
   @State private status: string = UiState.INITIAL;
   @State private serverVersion: string = '';
+  /** 服务器名称与地址：来自活跃会话（权威来源），避免显示陈旧的持久化值 */
+  @State private serverName: string = '';
+  @State private serverAddress: string = '';
   @State private showLogoutConfirm: boolean = false;
   @State private showChangeServerConfirm: boolean = false;
   @State private showClearDataConfirm: boolean = false;
@@ -67,6 +71,18 @@ export struct SettingsPage {
     const sys: NativeResult = JellyfinNative.parseResult(sysRaw);
     if (sys.ok && sys.data !== null) {
       this.serverVersion = JsonUtil.getString(sys.data, 'Version', '');
+      // 服务器名称取自服务端信息（会话里的 serverName 可能为空，此前该行错误地显示成地址）
+      const nameFromServer: string = JsonUtil.getString(sys.data, 'ServerName', '');
+      if (nameFromServer.length > 0) {
+        this.serverName = nameFromServer;
+      }
+    }
+    // 会话中的 baseUrl / serverName 是权威值（API 客户端实际使用）
+    const sessionRaw: string = SessionUtil.exportSessionJson();
+    const sessionObj: ESObject | null = JsonUtil.parseObject(sessionRaw);
+    if (sessionObj !== null) {
+      this.serverAddress = JsonUtil.getString(sessionObj, 'baseUrl', '');
+      this.serverName = JsonUtil.getString(sessionObj, 'serverName', '');
     }
     const prefsRaw: string = JellyfinNative.getPreferences();
     const prefs: NativeResult = JellyfinNative.parseResult(prefsRaw);
@@ -448,6 +464,20 @@ export struct SettingsPage {
     router.replaceUrl({ url: 'pages/ServerPage' });
   }
 
+  private serverNameText(): string {
+    if (this.serverName.length > 0) {
+      return this.serverName;
+    }
+    return AppViewModel.getInstance().serverUrl.length > 0 ? AppViewModel.getInstance().serverUrl : '未知';
+  }
+
+  private serverAddressText(): string {
+    if (this.serverAddress.length > 0) {
+      return this.serverAddress;
+    }
+    return AppViewModel.getInstance().serverUrl.length > 0 ? AppViewModel.getInstance().serverUrl : '未配置';
+  }
+
   private onSectionItemTap(child: SettingsItem): void {
     const route: string = child.route === undefined ? '' : child.route;
     const action: string = child.action === undefined ? '' : child.action;
@@ -679,10 +709,9 @@ export struct SettingsPage {
 
           // 服务器（Flutter：名称 InfoTile + 地址 + 版本）
           this.SectionCard('\u670d\u52a1\u5668', 'externaldrive', [
-            { icon: '', title: '\u670d\u52a1\u5668\u540d\u79f0', subtitle: AppViewModel.getInstance().serverUrl.length > 0 ?
-              AppViewModel.getInstance().serverUrl : '\u672a\u77e5', info: true },
-            { icon: 'chevron_right', title: '\u670d\u52a1\u5668\u5730\u5740', subtitle: AppViewModel.getInstance().serverUrl.length > 0 ?
-              AppViewModel.getInstance().serverUrl : '\u672a\u914d\u7f6e', route: '' },
+            // 名称行原来错误地显示了地址；地址行改用会话权威值（原为可能陈旧的 VM 值）
+            { icon: '', title: '\u670d\u52a1\u5668\u540d\u79f0', subtitle: this.serverNameText(), info: true },
+            { icon: '', title: '\u670d\u52a1\u5668\u5730\u5740', subtitle: this.serverAddressText(), info: true },
             { icon: '', title: '\u670d\u52a1\u5668\u7248\u672c', subtitle: this.serverVersion.length > 0 ? this.serverVersion : '\u52a0\u8f7d\u4e2d...', info: true },
           ])
 

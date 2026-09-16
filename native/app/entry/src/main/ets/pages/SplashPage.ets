@@ -87,6 +87,15 @@ struct SplashPage {
       if (normalized.length > 0 && normalized !== sessionJson) {
         await SessionStore.saveSession(normalized);
       }
+      // 会话里的 baseUrl 才是 API 客户端实际使用的地址；持久化的 serverUrl 可能陈旧
+      // （设备实测：应用连的是 :8097，设置页却显示旧的 :80），这里以会话为准并回写持久化
+      const sessionBaseUrl: string = JsonUtil.getString(session.data, 'baseUrl',
+        JsonUtil.getString(session.data, 'BaseUrl', ''));
+      if (sessionBaseUrl.length > 0 && sessionBaseUrl !== serverUrl) {
+        vm.setServer(sessionBaseUrl);
+        await SessionStore.saveServerUrl(sessionBaseUrl);
+        await JellyfinNative.configureServer(sessionBaseUrl);
+      }
       const userName: string = JsonUtil.getString(session.data, 'userName',
         JsonUtil.getString(session.data, 'UserName', '用户'));
       const isAdmin: boolean = JsonUtil.getBoolean(session.data, 'isAdmin', false);
