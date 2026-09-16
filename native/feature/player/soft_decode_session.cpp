@@ -1,5 +1,6 @@
 #include "soft_decode_session.h"
 
+#include "range_cache.h"
 #include "range_fetcher.h"
 
 #include <algorithm>
@@ -33,164 +34,8 @@ std::string AvErrorStr(int code)
     return std::string(buf);
 }
 
-/** 从 Content-Range: bytes 0-0/12345 解析总长度 */
-int64_t ParseTotalFromContentRange(const std::string &value)
-{
-    const size_t slash = value.rfind('/');
-    if (slash == std::string::npos) {
-        return -1;
-    }
-    const std::string tail = value.substr(slash + 1);
-    if (tail.empty() || tail == "*") {
-        return -1;
-    }
-    try {
-        return std::stoll(tail);
-    } catch (...) {
-        return -1;
-    }
-}
-
-/**
- * HTTP Range 分页读流：把"读字节"翻译成按需 Range 请求，并缓存最近一块。
- * chunk 默认 1 MiB —— 过多小请求会拖慢解码，过大则增加等待。
- */
-class HttpRangeReader {
-public:
-    HttpRangeReader(std::string url, size_t chunkBytes = 1024 * 1024)
-        : url_(std::move(url)), chunk_(chunkBytes)
-    {
-    }
-
-    /**
-     * 预取首个分片并尽力推断总长度：
-     *  - 服务器返回 206（支持 Range）→ 总长度未知，按需继续 Range 读取，读到空响应即 EOF
-     *  - 服务器忽略 Range 返回 200（整片）→ 总长度 = body 大小
-     * 首个分片会直接放进缓存，避免紧接着的 read 重复请求同一块。
-     */
-    int64_t probeSize()
-    {
-        const RangeResponse resp = FetchRange(url_, 0, static_cast<int64_t>(chunk_) - 1);
-        if (resp.status >= 400 || resp.body.empty()) {
-            const RangeResponse plain = FetchRange(url_, 0, -1);
-            if (plain.status >= 400 || plain.body.empty()) {
-                return 0;
-            }
-            bytesFetched_ += static_cast<int64_t>(plain.body.size());
-            cache_.assign(plain.body.begin(), plain.body.end());
-            cacheStart_ = 0;
-            size_ = static_cast<int64_t>(cache_.size());
-            return size_;
-        }
-        bytesFetched_ += static_cast<int64_t>(resp.body.size());
-        cache_.assign(resp.body.begin(), resp.body.end());
-        cacheStart_ = 0;
-        if (resp.status == 200) {
-            // 服务器忽略了 Range：这就是整片内容
-            size_ = static_cast<int64_t>(cache_.size());
-        }
-        return size_;
-    }
-
-    int64_t size() const { return size_; }
-    int64_t bytesFetched() const { return bytesFetched_; }
-
-    /** 读取最多 bufSize 字节到 buf；返回实际字节数，0 表示 EOF，-1 表示错误 */
-    int read(uint8_t *buf, int bufSize, std::string &error)
-    {
-        if (bufSize <= 0) {
-            return 0;
-        }
-        if (size_ >= 0 && pos_ >= size_) {
-            return 0;
-        }
-        if (!inCache(pos_)) {
-            if (!fillCache(pos_, error)) {
-                return -1;
-            }
-        }
-        const int64_t cacheEnd = cacheStart_ + static_cast<int64_t>(cache_.size());
-        const int64_t avail = cacheEnd - pos_;
-        if (avail <= 0) {
-            return 0;
-        }
-        const int n = static_cast<int>(std::min<int64_t>(bufSize, avail));
-        std::memcpy(buf, cache_.data() + static_cast<size_t>(pos_ - cacheStart_), static_cast<size_t>(n));
-        pos_ += n;
-        return n;
-    }
-
-    /** 定位（不预取；下次 read 时按需拉取） */
-    int64_t seek(int64_t offset)
-    {
-        if (offset < 0) {
-            return -1;
-        }
-        if (size_ >= 0) {
-            offset = std::min(offset, size_);
-        }
-        pos_ = offset;
-        return pos_;
-    }
-
-private:
-    bool inCache(int64_t pos) const
-    {
-        return !cache_.empty() && pos >= cacheStart_ &&
-               pos < cacheStart_ + static_cast<int64_t>(cache_.size());
-    }
-
-    bool fillCache(int64_t pos, std::string &error)
-    {
-        if (size_ >= 0 && pos >= size_) {
-            return false;
-        }
-        const int64_t end = (size_ >= 0) ? std::min<int64_t>(pos + static_cast<int64_t>(chunk_) - 1, size_ - 1)
-                                         : pos + static_cast<int64_t>(chunk_) - 1;
-        const RangeResponse resp = FetchRange(url_, pos, end);
-        if (resp.status >= 400 || resp.body.empty()) {
-            // 服务器可能不支持 Range：退回整段请求（仅首次可用）
-            if (pos == 0) {
-                const RangeResponse plain = FetchRange(url_, 0, -1);
-                if (plain.status >= 400 || plain.body.empty()) {
-                    error = plain.error.empty()
-                                ? ("取流失败：HTTP " + std::to_string(plain.status))
-                                : ("取流失败：" + plain.error);
-                    return false;
-                }
-                bytesFetched_ += static_cast<int64_t>(plain.body.size());
-                cache_.assign(plain.body.begin(), plain.body.end());
-                cacheStart_ = 0;
-                if (size_ < 0) {
-                    size_ = static_cast<int64_t>(cache_.size());
-                }
-                return true;
-            }
-            error = resp.error.empty() ? ("取流失败：HTTP " + std::to_string(resp.status))
-                                       : ("取流失败：" + resp.error);
-            return false;
-        }
-        bytesFetched_ += static_cast<int64_t>(resp.body.size());
-        cache_.assign(resp.body.begin(), resp.body.end());
-        cacheStart_ = pos;
-        if (size_ < 0 && resp.status == 200) {
-            // 服务器忽略了 Range，返回整片
-            size_ = static_cast<int64_t>(cache_.size());
-        }
-        return true;
-    }
-
-    std::string url_;
-    size_t chunk_;
-    std::string cache_;
-    int64_t cacheStart_ = 0;
-    int64_t pos_ = 0;
-    int64_t size_ = -1;
-    int64_t bytesFetched_ = 0;
-};
-
 struct AvioBridge {
-    HttpRangeReader *reader = nullptr;
+    RangeCache *reader = nullptr;
     std::string error;
 };
 
@@ -235,7 +80,7 @@ int64_t BridgeSeek(void *opaque, int64_t offset, int whence)
 
 struct SoftDecodeSession::Impl {
 #if defined(JELLYFIN_HAS_FFMPEG)
-    std::unique_ptr<HttpRangeReader> reader;
+    std::unique_ptr<RangeCache> reader;
     AvioBridge bridge;
     AVIOContext *avio = nullptr;
     AVFormatContext *fmt = nullptr;
@@ -293,8 +138,8 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
         error = "URL 为空";
         return false;
     }
-    impl_->reader.reset(new HttpRangeReader(url));
-    const int64_t size = impl_->reader->probeSize();
+    impl_->reader.reset(new RangeCache(url));
+    const int64_t size = impl_->reader->probe();
     if (size == 0) {
         error = "取流失败：服务器返回空内容";
         impl_->reader.reset();

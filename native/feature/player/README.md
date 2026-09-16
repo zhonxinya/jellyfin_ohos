@@ -7,6 +7,7 @@
 | 文件 | 职责 |
 |---|---|
 | `soft_decode_session.{h,cpp}` | **流式软解会话**：HTTP Range 分页取流（自定义 AVIO）→ libavformat 解容器 → 软件解码 → `swscale` 转 RGBA 逐帧输出；支持 seek |
+| `range_cache.{h,cpp}` | **Range 分页缓存**：把顺序读翻译成按需 Range 请求并缓存最近一块；不依赖 FFmpeg 与任何 HTTP 实现，**可在主机上单测**（`native/core/tests/test_range_cache.cpp`，29 项断言） |
 | `ffmpeg_decoder.{h,cpp}` | 一次性**内存探测**：解析容器/编码/宽高/像素格式，可导出首帧 PNG（用于能力检测与诊断） |
 | `egl_renderer.{h,cpp}` | **EGL/GLES 渲染**：surfaceId → native window → EGL surface/context → 纹理上传 RGBA 并绘制；含 `readbackRgba()`（glReadPixels 回读，用于验证渲染结果） |
 | `range_fetcher.{h,cpp}` | **取流抽象**：宿主注入 `RangeFetchFn`，本目录不依赖任何具体 HTTP 实现 |
@@ -77,5 +78,12 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   换机型/换类型前先跑 `selfTest()`（或宿主的 `renderTargetProbe`）判定，能省下大量盲调时间。
 - **TEXTURE 路径的调用顺序**：`eglSwapBuffers()` **之后**才调用 `OH_NativeImage_UpdateSurfaceImage()`；
   顺序颠倒会返回 `NATIVE_ERROR_NO_BUFFER (40601000)`（"还没有 buffer 可发布"）。
+- **导出"渲染结果"必须先重绘再回读**：`eglSwapBuffers()` 之后后台缓冲内容未定义，
+  直接 `glReadPixels` 会得到**全黑**（实测踩过，一度误判为渲染失败）；
+  正确做法是重绘最近一帧 → `glFinish` → 在 swap **之前**回读（见 `redrawAndReadback()`）。
+- **EOF 的判定（`RangeCache`）**：HTTP `416` 与"2xx 且响应体为空"都应视为**读到末尾**而非错误，
+  否则 libavformat 会在末尾收到 `EIO`；而"status=0 / 带 error"必须报错，不能静默当 EOF。
+  另注意：服务器支持 Range 且每次返回整块时**无法**推断总长度（响应经回调返回、不含响应头），
+  此时 `size()` 为 -1 属正常，长度会在读到末尾时补上。
 - **音频**：本目录尚未包含音频输出（需宿主接 `OH_AudioRenderer`）。
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。
