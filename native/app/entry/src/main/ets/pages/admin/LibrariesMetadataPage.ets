@@ -49,7 +49,7 @@ struct LibrariesMetadataPage {
   PathItem(path: string) {
     Row({ space: 12 }) {
       Text('📁')
-        .fontSize(20)
+        .fontSize(ThemeConstants.TITLE_LARGE)
         .fontColor(this.colors().primary)
         .width(28)
       Text(path)
@@ -93,7 +93,7 @@ struct LibrariesMetadataPage {
             Blank()
             Button('刷新')
               .height(28)
-              .fontSize(12)
+              .fontSize(ThemeConstants.META_SMALL)
               .padding({ left: 10, right: 10 })
               .backgroundColor(this.colors().surfaceElevated)
               .fontColor(this.colors().onSurface)

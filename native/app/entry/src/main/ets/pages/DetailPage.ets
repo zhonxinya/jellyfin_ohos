@@ -269,7 +269,7 @@ struct DetailPage {
     Flex({ wrap: FlexWrap.Wrap }) {
       ForEach(this.mediaInfoLabels(), (text: string) => {
         Text(text)
-          .fontSize(11)
+          .fontSize(ThemeConstants.LABEL_SMALL)
           .fontColor(this.colors().onSurface)
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
           .backgroundColor(this.colors().surfaceElevated)
@@ -318,17 +318,17 @@ struct DetailPage {
           ListItem() {
             Row() {
               Text(entry.type)
-                .fontSize(11)
+                .fontSize(ThemeConstants.LABEL_SMALL)
                 .fontColor(this.colors().primary)
                 .padding({ left: 6, right: 6, top: 2, bottom: 2 })
                 .backgroundColor(this.colors().surfaceElevated)
                 .borderRadius(4)
               Text(entry.codec)
-                .fontSize(11)
+                .fontSize(ThemeConstants.LABEL_SMALL)
                 .fontColor(this.colors().onSurface)
                 .margin({ left: 8 })
               Text(entry.sizeLabel)
-                .fontSize(11)
+                .fontSize(ThemeConstants.LABEL_SMALL)
                 .fontColor(entry.sizeLabel.length > 0 ? this.colors().onSurfaceVariant : Color.Transparent)
                 .margin({ left: 8 })
             }
@@ -375,7 +375,7 @@ struct DetailPage {
                 placeholderIcon: 'person'
               })
               Text(this.personName(p))
-                .fontSize(11)
+                .fontSize(ThemeConstants.LABEL_SMALL)
                 .fontColor(this.colors().onSurface)
                 .maxLines(1)
                 .width(72)
@@ -472,7 +472,7 @@ struct DetailPage {
                 Flex({ wrap: FlexWrap.Wrap }) {
                   if (this.item.type.length > 0) {
                     Text(this.item.typeLabel())
-                      .fontSize(11)
+                      .fontSize(ThemeConstants.LABEL_SMALL)
                       .fontColor(this.colors().onSurface)
                       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
                       .backgroundColor(this.colors().surfaceElevated)
@@ -481,7 +481,7 @@ struct DetailPage {
                   }
                   ForEach(this.item.genres.slice(0, 3), (genre: string) => {
                     Text(genre)
-                      .fontSize(11)
+                      .fontSize(ThemeConstants.LABEL_SMALL)
                       .fontColor(this.colors().onSurface)
                       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
                       .backgroundColor(this.colors().surfaceElevated)
@@ -640,7 +640,7 @@ struct DetailPage {
                       SymbolGlyph(this.expandedSeasonId === season.id
                         ? $r('sys.symbol.chevron_down')
                         : $r('sys.symbol.chevron_right'))
-                        .fontSize(16)
+                        .fontSize(ThemeConstants.TITLE_MEDIUM)
                         .fontColor([this.colors().textTertiary])
                     }
                     .width('100%')

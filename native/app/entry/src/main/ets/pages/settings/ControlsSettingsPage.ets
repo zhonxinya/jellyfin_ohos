@@ -62,7 +62,7 @@ export struct ControlsSettingsPage {
     onChange: (v: boolean) => void) {
     Row({ space: 12 }) {
       SymbolGlyph(iconRes)
-        .fontSize(20)
+        .fontSize(ThemeConstants.TITLE_LARGE)
         .fontColor([this.colors().onSurfaceVariant])
         .width(28)
       Column({ space: 2 }) {
@@ -107,7 +107,7 @@ export struct ControlsSettingsPage {
             Column() {
               Row({ space: 8 }) {
                 SymbolGlyph($r('sys.symbol.gamecontroller'))
-                  .fontSize(18)
+                  .fontSize(ThemeConstants.ICON_MEDIUM)
                   .fontColor([this.colors().primary])
                 Text('\u64cd\u63a7')
                   .fontSize(ThemeConstants.TITLE_SMALL)
@@ -138,7 +138,7 @@ export struct ControlsSettingsPage {
                       .color(this.colors().onPrimary)
                   } else {
                     SymbolGlyph($r('sys.symbol.save'))
-                      .fontSize(18)
+                      .fontSize(ThemeConstants.ICON_MEDIUM)
                       .fontColor([this.colors().onPrimary])
                   }
                   Text(this.saving ? '\u4fdd\u5b58\u4e2d...' : '\u4fdd\u5b58')

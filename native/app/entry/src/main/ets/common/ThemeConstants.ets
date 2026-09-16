@@ -178,6 +178,9 @@ export class ThemeConstants {
 
   // ── 字号阶梯（参考项目字面量，此处收敛为令牌）────────────────────────
   /** 页面/顶栏标题 */
+  static readonly TITLE_XLARGE: number = 21;
+  /** 封面角标/徽标（参考项目 9fp） */
+  static readonly BADGE_LABEL: number = 9;
   static readonly TITLE_LARGE: number = 20;
   /** 区块标题、列表项标题、设置行标题 */
   static readonly TITLE_MEDIUM: number = 16;
@@ -193,6 +196,13 @@ export class ThemeConstants {
   static readonly TAB_LABEL: number = 10;
   /** 空态图标 */
   static readonly EMPTY_ICON_SIZE: number = 48;
+  // 图标字号梯度（SymbolGlyph 用；与文字字号分开，避免"图标当文字用"）
+  static readonly ICON_SMALL: number = 16;
+  static readonly ICON_MEDIUM: number = 18;
+  static readonly ICON_LARGE: number = 20;
+  static readonly ICON_XLARGE: number = 22;
+  static readonly ICON_XXL: number = 28;
+  static readonly ICON_HERO: number = 40;
   /** 空态/加载态主文案 */
   static readonly STATE_TITLE: number = 16;
   /** 空态说明文案 */

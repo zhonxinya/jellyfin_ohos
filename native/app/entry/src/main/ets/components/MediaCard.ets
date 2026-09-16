@@ -49,7 +49,7 @@ export struct MediaCard {
           Row() {
             if (this.item.isPlayed) {
               SymbolGlyph($r('sys.symbol.checkmark_circle_fill'))
-                .fontSize(16)
+                .fontSize(ThemeConstants.TITLE_MEDIUM)
                 .fontColor([this.colors().onOverlay])
             }
             Blank()
@@ -79,7 +79,7 @@ export struct MediaCard {
 
         if (this.item.type.length > 0) {
           Text(this.item.typeLabel())
-            .fontSize(9)
+            .fontSize(ThemeConstants.BADGE_LABEL)
             .fontWeight(FontWeight.Medium)
             .fontColor(Color.White)
             .padding({ left: 5, right: 5, top: 2, bottom: 2 })
@@ -159,7 +159,7 @@ export struct MediaCard {
       .alignItems(HorizontalAlign.Start)
 
       SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor([this.colors().textTertiary])
     }
     .width('100%')

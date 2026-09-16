@@ -127,7 +127,7 @@ export struct HeroBanner {
         Button({ type: ButtonType.Normal, stateEffect: false }) {
           Row({ space: 6 }) {
             SymbolGlyph($r('sys.symbol.play'))
-              .fontSize(18)
+              .fontSize(ThemeConstants.ICON_MEDIUM)
               .fontColor([this.colors().onBrand])
             Text('播放')
               .fontSize(15)

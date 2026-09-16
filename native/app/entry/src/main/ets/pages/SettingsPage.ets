@@ -225,7 +225,7 @@ export struct SettingsPage {
     Column() {
       Column({ space: 16 }) {
         Text(title)
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.colors().onSurface)
           .width('100%')
@@ -278,7 +278,7 @@ export struct SettingsPage {
     Column() {
       Column({ space: 12 }) {
         Text('\u9009\u62e9\u9ed8\u8ba4\u64ad\u653e\u5668')
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.colors().onSurface)
           .width('100%')
@@ -347,14 +347,14 @@ export struct SettingsPage {
           .fill(this.colors().surfaceElevated)
         Text(AppViewModel.getInstance().userName.length > 0 ?
           AppViewModel.getInstance().userName.substring(0, 1).toUpperCase() : '?')
-          .fontSize(22)
+          .fontSize(ThemeConstants.TITLE_XLARGE)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.colors().onSurface)
       }
       Column({ space: 4 }) {
         Text(AppViewModel.getInstance().userName.length > 0 ?
           AppViewModel.getInstance().userName : '\u672a\u767b\u5f55')
-          .fontSize(16)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.colors().onSurface)
           .maxLines(1)
@@ -387,7 +387,7 @@ export struct SettingsPage {
   MenuTile(icon: string, title: string, subtitle: string, onTap: () => void) {
     Row({ space: 12 }) {
       SymbolGlyph(this.iconResource(icon))
-        .fontSize(20)
+        .fontSize(ThemeConstants.TITLE_LARGE)
         .fontColor([this.colors().brandPrimary])
         .width(28)
       Column({ space: 4 }) {
@@ -405,7 +405,7 @@ export struct SettingsPage {
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor([this.colors().textTertiary])
     }
     .width('100%')
@@ -484,7 +484,7 @@ export struct SettingsPage {
     Column() {
       Row({ space: 8 }) {
         SymbolGlyph(this.iconResource(icon))
-          .fontSize(18)
+          .fontSize(ThemeConstants.ICON_MEDIUM)
           .fontColor([this.colors().primary])
         Text(title)
           .fontSize(ThemeConstants.TITLE_MEDIUM)
@@ -565,7 +565,7 @@ export struct SettingsPage {
           } else {
             // M3 AppBar 语义：56 高，titleLarge(22) 左对齐
             Text($r('app.string.settings_title'))
-              .fontSize(22)
+              .fontSize(ThemeConstants.TITLE_XLARGE)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.colors().onSurface)
               .width('100%')

@@ -195,7 +195,7 @@ struct LoginTextInput {
     Row({ space: 0 }) {
       Row() {
         SymbolGlyph(this.icon)
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontColor([this.colors().textTertiary])
       }
         .width(ThemeConstants.INPUT_HEIGHT)
@@ -239,7 +239,7 @@ struct SecurePasswordInput {
     Row({ space: 0 }) {
       Row() {
         SymbolGlyph($r('sys.symbol.lock'))
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontColor([this.colors().textTertiary])
       }
         .width(ThemeConstants.INPUT_HEIGHT)
@@ -263,7 +263,7 @@ struct SecurePasswordInput {
         })
       Button() {
         SymbolGlyph(this.obscure ? $r('sys.symbol.eye') : $r('sys.symbol.eye_slash'))
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontColor([this.colors().textTertiary])
       }
         .width(ThemeConstants.INPUT_HEIGHT)

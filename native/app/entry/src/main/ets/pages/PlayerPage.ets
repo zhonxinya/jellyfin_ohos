@@ -339,7 +339,7 @@ struct PlayerPage {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           if (this.typeLabel.length > 0) {
             Text(this.typeLabel)
-              .fontSize(11)
+              .fontSize(ThemeConstants.LABEL_SMALL)
               .fontColor(this.colors().onOverlayMuted)
           }
         }
@@ -367,7 +367,7 @@ struct PlayerPage {
       if (this.showVolumeBar) {
         Row() {
           SymbolGlyph($r('sys.symbol.speaker_wave_2'))
-            .fontSize(16)
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
             .fontColor([this.colors().onOverlay])
           Slider({
             value: this.volume,
@@ -429,15 +429,15 @@ struct PlayerPage {
       // 时间显示 + 倍速
       Row() {
         Text(this.formatTime(this.positionMs))
-          .fontSize(12)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
         Blank()
         Text(`${this.playbackSpeed}x`)
-          .fontSize(12)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
           .margin({ right: 8 })
         Text(this.durationMs > 0 ? this.formatTime(this.durationMs) : '--:--')
-          .fontSize(12)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
       }
       .width('100%')
@@ -454,7 +454,7 @@ struct PlayerPage {
           })
         Button({ type: ButtonType.Circle, stateEffect: false }) {
           SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause') : $r('sys.symbol.play'))
-            .fontSize(22)
+            .fontSize(ThemeConstants.TITLE_XLARGE)
             .fontColor([this.colors().onBrand])
         }
           .layoutWeight(1)
@@ -499,11 +499,11 @@ struct PlayerPage {
   CompletedOverlay() {
     Column() {
       Text('播放结束')
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onOverlayMuted)
       Button({ type: ButtonType.Circle, stateEffect: false }) {
         SymbolGlyph($r('sys.symbol.arrow_2_circlepath'))
-          .fontSize(28)
+          .fontSize(ThemeConstants.ICON_XXL)
           .fontColor([this.colors().onBrand])
       }
         .width(72)
@@ -535,10 +535,10 @@ struct PlayerPage {
   LockedOverlay() {
     Column() {
       SymbolGlyph($r('sys.symbol.lock'))
-        .fontSize(28)
+        .fontSize(ThemeConstants.ICON_XXL)
         .fontColor([this.colors().onOverlay])
       Text('已锁定，点击解锁')
-        .fontSize(12)
+        .fontSize(ThemeConstants.META_SMALL)
         .fontColor(this.colors().onOverlayMuted)
         .margin({ top: 4 })
     }
@@ -568,10 +568,10 @@ struct PlayerPage {
   GestureFeedback() {
     Column() {
       SymbolGlyph(this.gestureSymbol())
-        .fontSize(40)
+        .fontSize(ThemeConstants.ICON_HERO)
         .fontColor([this.colors().onOverlay])
       Text(this.gestureFeedback)
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onOverlay)
         .margin({ top: 8 })
       if (this.gestureRatio >= 0) {
@@ -743,7 +743,7 @@ struct PlayerPage {
       if (this.status === UiState.ERROR) {
         Column() {
           Text('\u26A0\uFE0F')
-            .fontSize(48)
+            .fontSize(ThemeConstants.EMPTY_ICON_SIZE)
             .fontColor(this.colors().error)
           Text(this.errorMsg)
             .fontSize(ThemeConstants.BODY_MEDIUM)
