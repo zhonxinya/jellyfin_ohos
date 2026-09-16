@@ -435,8 +435,14 @@ struct PlayerPage {
         this.onSeek(timeMs - this.positionMs);
       });
       await session.activate();
+      // 把播放状态同步进系统会话（通知栏/锁屏媒体控件据此显示播放/暂停与进度）
+      await session.setAVPlaybackState({
+        state: avSession.PlaybackState.PLAYBACK_STATE_PLAY,
+        position: { elapsedTime: 0, updateTime: Date.now() }
+      });
       this.avSessionRef = session;
-      this.appendProbeFile('player_avsession.txt', `created+activated item=${this.itemId}\n`);
+      this.appendProbeFile('player_avsession.txt',
+        `created+activated+statePlay item=${this.itemId}\n`);
     } catch (err) {
       this.appendProbeFile('player_avsession.txt',
         `error ${(err as Error).message}\n`);
