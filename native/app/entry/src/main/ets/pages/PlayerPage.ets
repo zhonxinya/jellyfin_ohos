@@ -65,6 +65,9 @@ struct PlayerPage {
   /** 软解播放：最近一次进度上报时刻（节流用）与当前位置 */
   private lastProgressReportAt: number = 0;
   private softPositionMs: number = 0;
+  /** 长按 2× 快进：计时器与"是否处于长按加速中"（主流播放器标配的手势） */
+  private longPressTimerId: number = -1;
+  private longPressBoosting: boolean = false;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   private seekDragMs: number = 0;
@@ -430,6 +433,52 @@ struct PlayerPage {
     } catch (err) {
       // 诊断写入失败忽略
     }
+  }
+
+  /**
+   * 长按 2× 快进：按住 600ms 未松开即把播放速度临时设为 2×，松手恢复。
+   * 这是主流播放器的标准手势；对硬解与软解都有效（AVPlayer 走 setSpeed，
+   * 软解路径由帧循环的节流上报体现位置推进速度）。
+   */
+  private startLongPressBoost(): void {
+    this.cancelLongPressTimer();
+    this.longPressTimerId = setTimeout(() => {
+      this.longPressTimerId = -1;
+      if (this.controlsLocked || this.avPlayer === null) {
+        return;
+      }
+      if (!this.isPlaying) {
+        return;
+      }
+      this.longPressBoosting = true;
+      this.avPlayer.setSpeed(2);
+      this.gestureFeedback = '2× 快进';
+      this.gestureIcon = 'seek';
+      this.gestureRatio = -1;
+      this.showFeedback = true;
+      this.appendProbeFile('player_gesture.txt', 'longPressBoost start speed=2\n');
+    }, 600);
+  }
+
+  private cancelLongPressTimer(): void {
+    if (this.longPressTimerId >= 0) {
+      clearTimeout(this.longPressTimerId);
+      this.longPressTimerId = -1;
+    }
+  }
+
+  private stopLongPressBoost(): void {
+    this.cancelLongPressTimer();
+    if (!this.longPressBoosting) {
+      return;
+    }
+    this.longPressBoosting = false;
+    if (this.avPlayer !== null) {
+      this.avPlayer.setSpeed(this.playbackSpeed);
+    }
+    this.appendProbeFile('player_gesture.txt',
+      `longPressBoost stop restore=${this.playbackSpeed}\n`);
+    this.dismissFeedback();
   }
 
   private pad2(v: number): string {
@@ -1108,6 +1157,8 @@ struct PlayerPage {
               this.brightnessLastY = touch.y;
               this.volumeBase = this.volume;
               this.volumeLastY = touch.y;
+              // 长按 2× 快进：按住 600ms 未松开即临时加速，松手恢复原速
+              this.startLongPressBoost();
             } else if (event.type === TouchType.Move) {
               const deltaX: number = touch.x - this.seekLastX;
               const deltaY: number = touch.y - (isLeftSide ? this.brightnessLastY : this.volumeLastY);
@@ -1155,11 +1206,13 @@ struct PlayerPage {
               if (Math.abs(this.seekDragMs) > 100 && this.avPlayer !== null) {
                 this.avPlayer.seek(this.positionMs);
               }
+              // 松手结束长按加速（无论是否已进入加速态）
+              this.stopLongPressBoost();
               // 文件探针：手势结束时记录一次结果，便于设备验证直接确认"手势确实被识别"
               // （进度条/浮层这类瞬时 UI 无法用读屏稳定观察）
               this.appendProbeFile('player_gesture.txt',
                 `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
-                + ` positionMs=${this.positionMs}\n`);
+                + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
               this.seekDragMs = 0;
               this.dismissFeedback();
             }
