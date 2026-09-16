@@ -15,6 +15,7 @@ import { formatSeconds } from '../common/format';
 import { AppIconButton } from '../components/AppIconButton';
 import { ChipButton } from '../components/ChipButton';
 import { EmptyState } from '../components/EmptyState';
+import { PlaybackState } from '../common/PlaybackState';
 
 /** 控制条自动隐藏延时（毫秒）：给用户留出"看到并点中控件"的时间 */
 const kControlsAutoHideMs: number = 5000;
@@ -408,6 +409,8 @@ struct PlayerPage {
       return;
     }
     this.lastProgressReportAt = now;
+    // 记录"正在播放"，供 Ability.onDestroy 在应用退出时上报 stopped（会话卫生）
+    PlaybackState.set(this.itemId, Math.floor(ptsSec * 10000000));
     const raw: string = await JellyfinNative.reportPlaybackProgress(this.itemId,
       Math.floor(ptsSec * 10000000), false);
     // 文件探针：便于设备验证时直接确认"软解路径确实上报了、服务端是否接受"

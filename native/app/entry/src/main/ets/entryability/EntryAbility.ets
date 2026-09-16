@@ -7,6 +7,7 @@ import hilog from '@ohos.hilog';
 import fs from '@ohos.file.fs';
 import { SessionStore } from '../services/SessionStore';
 import { JellyfinNative } from '../plugins/JellyfinNative';
+import { PlaybackState } from '../common/PlaybackState';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 
 const DOMAIN: number = 0x0000;
@@ -43,6 +44,13 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'Ability onDestroy');
+    // 退出/被回收时结束播放会话：否则服务端会留下"看起来还在播"的会话，
+    // 污染观看记录、继续观看与设备列表（实测 /Sessions 曾堆积到 60 条）。
+    const itemId: string = PlaybackState.take();
+    if (itemId.length > 0) {
+      hilog.info(DOMAIN, TAG, 'onDestroy: report playback stopped for %{public}s', itemId);
+      JellyfinNative.reportPlaybackStopped(itemId, PlaybackState.positionTicks());
+    }
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
