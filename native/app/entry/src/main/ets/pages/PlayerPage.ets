@@ -16,6 +16,9 @@ import { AppIconButton } from '../components/AppIconButton';
 import { ChipButton } from '../components/ChipButton';
 import { EmptyState } from '../components/EmptyState';
 
+/** 控制条自动隐藏延时（毫秒）：给用户留出"看到并点中控件"的时间 */
+const kControlsAutoHideMs: number = 5000;
+
 @Entry
 @Component
 struct PlayerPage {
@@ -136,11 +139,13 @@ struct PlayerPage {
     if (this.controlsLocked || !this.showControls) {
       return;
     }
+    // 自动隐藏时间：3s → 5s。3 秒对"找到并点中某个控件"偏紧（用户与自动化都容易错过），
+    // 5 秒是主流播放器的常见取值；播放中控件仍会自动让位给画面。
     this.hideTimerId = setTimeout(() => {
       if (this.isPlaying && !this.controlsLocked) {
         this.showControls = false;
       }
-    }, 3000);
+    }, kControlsAutoHideMs);
   }
 
   private revealControls(): void {

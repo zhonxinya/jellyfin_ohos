@@ -1488,9 +1488,10 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
     out["ok"] = renderable;
     out["renderable"] = renderable;
     out["report"] = report;
-    // 探测是一次性的：测完立刻销毁 EGL/NativeImage，避免它与随后软解播放的初始化叠加。
-    // （实测：对同一个 textureId 重复 OH_NativeImage_Create 会让后续 eglSwapBuffers 报 0x12301）
-    SoftRenderer().destroy();
+    // 探测**不销毁**渲染器：保留它已建立好的 EGL surface。
+    // 实测教训：探测跑完 destroy 之后，软解会在同一个 XComponent window 上重建 EGL surface，
+    // 而第二次创建的表面 swap 报 0x12301（首个表面正常）。`softPlayOpen` 已有
+    // "渲染器已就绪则复用" 的分支，因此保留即可安全共用，也避免同一 window 上的二次初始化。
     return ToNapiJson(env, MakeResult(true, 200, "ok", out));
 }
 
