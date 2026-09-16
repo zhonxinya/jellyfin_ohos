@@ -857,6 +857,8 @@ struct PlayerPage {
         ChipButton({
           label: `${this.playbackSpeed}x`,
           selected: this.playbackSpeed !== 1,
+          // 播放页单手操作、误触代价高，触达高度按 48vp 标准放大（全局 token 仍为 34vp）
+          heightOverride: 48,
           onTap: () => {
             this.cycleSpeed();
           }
@@ -865,6 +867,7 @@ struct PlayerPage {
         ChipButton({
           label: '软解',
           selected: this.softPlaying,
+          heightOverride: 48,
           onTap: () => {
             if (this.softPlaying) {
               this.stopSoftPlay();
@@ -879,6 +882,7 @@ struct PlayerPage {
           ChipButton({
             label: '存帧',
             selected: false,
+            heightOverride: 48,
             onTap: () => {
               this.dumpSoftFrame();
             }
