@@ -61,6 +61,9 @@ struct PlayerPage {
   private hideTimerId: number = -1;
   /** 最近一次锁定/解锁时刻：用于屏蔽"同一次点击穿透到覆盖层"造成的立即解锁 */
   private lockChangedAt: number = 0;
+  /** 软解播放：最近一次进度上报时刻（节流用）与当前位置 */
+  private lastProgressReportAt: number = 0;
+  private softPositionMs: number = 0;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   private seekDragMs: number = 0;
@@ -301,12 +304,17 @@ struct PlayerPage {
       const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
       const rendered: boolean = JsonUtil.getBoolean(frame, 'rendered', false);
       const renderError: string = JsonUtil.getString(frame, 'renderError', '');
+      // 软解播放的进度上报（节流）：此前软解只出画面、不向服务端报告进度，
+      // 导致"继续观看"位置、多端同步都不生效。按 5 秒节流，与硬解路径一致。
+      this.softPositionMs = Math.floor(pts * 1000);
+      this.reportSoftProgressThrottled(pts);
       this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
         + ` · 第 ${idx} 帧 · ${(fetched / 1048576).toFixed(1)} MB`
         + ` · ${rendered ? 'EGL 已渲染' : '未渲染'}`
         // 把交互状态也放进常驻诊断行：锁定/控制条这类状态无法靠"看覆盖层"可靠判断
         // （UI 可能被其它层遮挡或自动隐藏），写进文字后一次 dump 即可确知真实状态。
         + ` · 锁定=${this.controlsLocked ? '是' : '否'} 控件=${this.showControls ? '显示' : '隐藏'}`
+        + (this.lastProgressReportAt > 0 ? ' · 已上报进度' : '')
         + (renderError.length > 0 ? `（${renderError}）` : '');
     } catch (err) {
       this.softStatus = `软解异常：${(err as Error).message}`;
@@ -384,6 +392,25 @@ struct PlayerPage {
     }
   }
 
+  /**
+   * 软解播放的进度上报（5 秒节流）。
+   *
+   * 为什么需要：软解路径此前只把画面渲染出来，**从不向服务端上报进度**，
+   * 于是"继续观看"、跨端续播、观看记录都不会更新——功能上等于半成品。
+   * 节流策略与硬解路径保持一致（避免高频请求）。
+   */
+  private reportSoftProgressThrottled(ptsSec: number): void {
+    if (this.itemId.length === 0) {
+      return;
+    }
+    const now: number = Date.now();
+    if (this.lastProgressReportAt > 0 && now - this.lastProgressReportAt < 5000) {
+      return;
+    }
+    this.lastProgressReportAt = now;
+    JellyfinNative.reportPlaybackProgress(this.itemId, Math.floor(ptsSec * 10000000), false);
+  }
+
   private pad2(v: number): string {
     return v < 10 ? `0${v}` : `${v}`;
   }
@@ -404,6 +431,12 @@ struct PlayerPage {
     this.stopSoftTimer();
     JellyfinNative.softPlayClose();
     this.softPlaying = false;
+    // 停止/切换/退出时补发最终进度：只靠节流中的周期上报会丢失最后几秒位置
+    // （与硬解路径的 flushStop 行为保持一致）
+    if (this.itemId.length > 0 && this.lastProgressReportAt > 0) {
+      JellyfinNative.reportPlaybackStopped(this.itemId, this.softPositionMs * 10000);
+      this.lastProgressReportAt = 0;
+    }
   }
 
   private async openPlayer(): Promise<void> {
