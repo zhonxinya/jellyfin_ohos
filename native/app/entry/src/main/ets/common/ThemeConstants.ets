@@ -108,6 +108,8 @@ export class ThemeColors {
   posterGradientStart: string = '#0000009E';
   /** 图片上的格式徽标底（参考项目用 #B3000000） */
   badgeScrim: string = '#B3000000';
+  /** 视频底色（播放器黑底，与明暗主题无关） */
+  videoBackground: string = '#000000';
 }
 
 /**

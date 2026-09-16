@@ -7,6 +7,8 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { WindowLayout } from '../common/WindowLayout';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { formatSeconds } from '../common/format';
+import { AppIconButton } from '../components/AppIconButton';
+import { ChipButton } from '../components/ChipButton';
 
 @Entry
 @Component
@@ -298,17 +300,17 @@ struct PlayerPage {
   TopBar() {
     Column() {
       Row() {
-        Button('\u2039')
-          .width(40)
-          .height(40)
-          .fontSize(22)
-          .backgroundColor(this.colors().overlayControlStrong)
-          .fontColor(this.colors().onOverlay)
-          .borderRadius(20)
-          .onClick(() => {
+        AppIconButton({
+          icon: $r('sys.symbol.chevron_left'),
+          variant: 'ghost',
+          iconSize: 20,
+          backgroundOverride: this.colors().overlayControlStrong,
+          iconColorOverride: this.colors().onOverlay,
+          onTap: () => {
             this.flushStop();
             router.back();
-          })
+          }
+        })
         Column({ space: 2 }) {
           Text(this.title)
             .fontSize(ThemeConstants.BODY_MEDIUM)
@@ -323,28 +325,30 @@ struct PlayerPage {
         }
         .layoutWeight(1)
         .margin({ left: 8 })
-        Button(this.controlsLocked ? '\u{1F512}' : '\u{1F513}')
-          .width(40)
-          .height(40)
-          .backgroundColor(this.colors().overlayControlStrong)
-          .fontColor(this.colors().onOverlay)
-          .borderRadius(20)
-          .onClick(() => {
+        AppIconButton({
+          icon: $r('sys.symbol.lock'),
+          variant: 'ghost',
+          iconSize: 18,
+          backgroundOverride: this.colors().overlayControlStrong,
+          // 锁定态用品牌色高亮（原来用 🔒/🔓 两个 emoji 区分）
+          iconColorOverride: this.controlsLocked ? this.colors().brandPrimary : this.colors().onOverlay,
+          onTap: () => {
             this.controlsLocked = !this.controlsLocked;
             if (this.controlsLocked) {
               this.showControls = false;
             } else {
               this.revealControls();
             }
-          })
+          }
+        })
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 12, bottom: 4 })
       if (this.showVolumeBar) {
         Row() {
-          Text('\u{1F50A}')
-            .fontSize(14)
-            .fontColor(this.colors().onOverlay)
+          SymbolGlyph($r('sys.symbol.speaker_wave_2'))
+            .fontSize(16)
+            .fontColor([this.colors().onOverlay])
           Slider({
             value: this.volume,
             min: 0,
@@ -428,12 +432,20 @@ struct PlayerPage {
           .onClick(() => {
             this.onSeek(-10000);
           })
-        Button(this.isPlaying ? '\u23F8' : '\u25B6')
+        Button({ type: ButtonType.Circle, stateEffect: false }) {
+          SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause') : $r('sys.symbol.play'))
+            .fontSize(22)
+            .fontColor([this.colors().onBrand])
+        }
           .layoutWeight(1)
-          .backgroundColor(this.colors().primary)
-          .fontColor(this.colors().onPrimary)
-          .height(48)
-          .fontSize(20)
+          .backgroundColor(this.colors().brandPrimary)
+          .height(ThemeConstants.BUTTON_HEIGHT)
+          .borderRadius(ThemeConstants.BUTTON_HEIGHT / 2)
+          .stateStyles({
+            pressed: {
+              .backgroundColor(this.colors().brandPrimaryPressed)
+            }
+          })
           .onClick(() => {
             this.onPlayPause();
           })
@@ -445,14 +457,13 @@ struct PlayerPage {
           .onClick(() => {
             this.onSeek(10000);
           })
-        Button(`${this.playbackSpeed}x`)
-          .layoutWeight(1)
-          .backgroundColor(this.colors().overlayControl)
-          .fontColor(this.colors().onOverlay)
-          .height(40)
-          .onClick(() => {
+        ChipButton({
+          label: `${this.playbackSpeed}x`,
+          selected: this.playbackSpeed !== 1,
+          onTap: () => {
             this.cycleSpeed();
-          })
+          }
+        })
       }
       .width('100%')
     }
@@ -470,13 +481,25 @@ struct PlayerPage {
       Text('播放结束')
         .fontSize(16)
         .fontColor(this.colors().onOverlayMuted)
-      Button('\u{1F501}')
+      Button({ type: ButtonType.Circle, stateEffect: false }) {
+        SymbolGlyph($r('sys.symbol.arrow_2_circlepath'))
+          .fontSize(28)
+          .fontColor([this.colors().onBrand])
+      }
         .width(72)
         .height(72)
-        .fontSize(36)
-        .backgroundColor(this.colors().overlayControlStrong)
-        .fontColor(this.colors().onOverlay)
-        .borderRadius(36)
+        .backgroundColor(this.colors().brandPrimary)
+        .shadow({
+          radius: 12,
+          color: this.colors().buttonShadow,
+          offsetX: 0,
+          offsetY: 4
+        })
+        .stateStyles({
+          pressed: {
+            .backgroundColor(this.colors().brandPrimaryPressed)
+          }
+        })
         .margin({ top: 8 })
         .onClick(() => {
           this.onPlayPause();
@@ -491,9 +514,9 @@ struct PlayerPage {
   @Builder
   LockedOverlay() {
     Column() {
-      Text('\u{1F512}')
+      SymbolGlyph($r('sys.symbol.lock'))
         .fontSize(28)
-        .fontColor(this.colors().onOverlay)
+        .fontColor([this.colors().onOverlay])
       Text('已锁定，点击解锁')
         .fontSize(12)
         .fontColor(this.colors().onOverlayMuted)
@@ -510,12 +533,23 @@ struct PlayerPage {
     })
   }
 
+  /** 手势反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
+  private gestureSymbol(): Resource {
+    if (this.gestureIcon === 'seek') {
+      return this.lastSeekForward ? $r('sys.symbol.chevron_right') : $r('sys.symbol.chevron_left');
+    }
+    if (this.gestureIcon === 'brightness') {
+      return $r('sys.symbol.bolt');
+    }
+    return $r('sys.symbol.speaker_wave_2');
+  }
+
   @Builder
   GestureFeedback() {
     Column() {
-      Text(this.gestureIcon)
+      SymbolGlyph(this.gestureSymbol())
         .fontSize(40)
-        .fontColor(this.colors().onOverlay)
+        .fontColor([this.colors().onOverlay])
       Text(this.gestureFeedback)
         .fontSize(16)
         .fontColor(this.colors().onOverlay)
@@ -542,7 +576,7 @@ struct PlayerPage {
       XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE })
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000')
+        .backgroundColor(this.colors().videoBackground)
         .onLoad(() => {
           // XComponent surface is created after load; bind to AVPlayer if available
           if (this.avPlayer !== null && this.surfaceId.length > 0) {
@@ -580,7 +614,7 @@ struct PlayerPage {
                 this.positionMs = clamped;
                 this.lastSeekForward = deltaX >= 0;
                 this.gestureFeedback = this.lastSeekForward ? `+${this.formatTime(Math.abs(this.seekDragMs))}` : `-${this.formatTime(Math.abs(this.seekDragMs))}`;
-                this.gestureIcon = this.lastSeekForward ? '\u{23E9}' : '\u{23EA}';
+                this.gestureIcon = 'seek';
                 this.gestureRatio = total > 0 ? clamped / total : 0;
                 this.showFeedback = true;
               } else if (Math.abs(deltaY) > 3) {
@@ -591,7 +625,7 @@ struct PlayerPage {
                   const newBrightness: number = Math.max(0, Math.min(1, this.brightnessBase + delta));
                   // 鸿蒙暂不支持程序化调节系统亮度，显示反馈
                   this.gestureFeedback = `${Math.round(newBrightness * 100)}%`;
-                  this.gestureIcon = '\u{1F506}';
+                  this.gestureIcon = 'brightness';
                   this.gestureRatio = newBrightness;
                   this.showFeedback = true;
                   this.brightnessLastY = touch.y;
@@ -604,7 +638,7 @@ struct PlayerPage {
                     this.avPlayer.setVolume(newVolume);
                   }
                   this.gestureFeedback = `${Math.round(newVolume * 100)}%`;
-                  this.gestureIcon = '\u{1F50A}';
+                  this.gestureIcon = 'volume';
                   this.gestureRatio = newVolume;
                   this.showFeedback = true;
                   this.volumeLastY = touch.y;
@@ -683,7 +717,7 @@ struct PlayerPage {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor('#000000')
+        .backgroundColor(this.colors().videoBackground)
       }
 
       if (this.status === UiState.ERROR) {
@@ -709,11 +743,11 @@ struct PlayerPage {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor('#000000')
+        .backgroundColor(this.colors().videoBackground)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#000000')
+    .backgroundColor(this.colors().videoBackground)
   }
 }
