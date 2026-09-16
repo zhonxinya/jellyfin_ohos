@@ -1,6 +1,7 @@
 import router from '@ohos.router';
 import common from '@ohos.app.ability.common';
 import media from '@ohos.multimedia.media';
+import display from '@ohos.display';
 import image from '@ohos.multimedia.image';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
@@ -58,6 +59,9 @@ struct PlayerPage {
   private surfaceId: string = '';
   /** XComponent 控制器：surface 就绪后用它拿到 surfaceId（软解 EGL 渲染与 AVPlayer 共用） */
   private surfaceController: XComponentController = new XComponentController();
+  /** XComponent 组件像素尺寸（vp → px），用于 EGL 缓冲几何 */
+  private surfaceWidthPx: number = 0;
+  private surfaceHeightPx: number = 0;
 
   // 支持倍速列表
   static readonly SPEEDS: number[] = [0.5, 1.0, 1.25, 1.5, 2.0];
@@ -165,7 +169,9 @@ struct PlayerPage {
     this.softStatus = '正在打开软解会话…';
     // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
     this.softStopAvPlayer();
-    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, this.playbackOptions);
+    const pxSize: number[] = this.surfacePixelSize();
+    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, pxSize[0],
+                                                          pxSize[1], this.playbackOptions);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.softStatus = `软解打开失败：${result.message}`;
@@ -184,6 +190,19 @@ struct PlayerPage {
       + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
       + (renderError.length > 0 ? `（${renderError}）` : '');
     this.startSoftTimer();
+  }
+
+  /** XComponent 的像素尺寸：优先用组件实测尺寸，未拿到时退化为整屏像素 */
+  private surfacePixelSize(): number[] {
+    if (this.surfaceWidthPx > 0 && this.surfaceHeightPx > 0) {
+      return [this.surfaceWidthPx, this.surfaceHeightPx];
+    }
+    try {
+      const d: display.Display = display.getDefaultDisplaySync();
+      return [d.width, d.height];
+    } catch (err) {
+      return [0, 0];
+    }
   }
 
   /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + PixelMap 创建的开销决定上限） */
@@ -760,6 +779,11 @@ struct PlayerPage {
         .width('100%')
         .height('100%')
         .backgroundColor(this.colors().videoBackground)
+        .onAreaChange((_oldArea: Area, newArea: Area) => {
+          const density: number = display.getDefaultDisplaySync().densityPixels;
+          this.surfaceWidthPx = Math.round(Number(newArea.width) * density);
+          this.surfaceHeightPx = Math.round(Number(newArea.height) * density);
+        })
         .onLoad(() => {
           // 关键：surfaceId 必须由 controller 取回；否则 AVPlayer 与软解 EGL 都拿不到视频面
           this.surfaceId = this.surfaceController.getXComponentSurfaceId();

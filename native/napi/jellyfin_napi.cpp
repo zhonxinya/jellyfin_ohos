@@ -1108,17 +1108,21 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
     }
     std::string itemId;
     std::string surfaceIdText;
+    int64_t surfaceWidth = 0;
+    int64_t surfaceHeight = 0;
     ReadStringArg(env, info, 0, itemId);
     ReadStringArg(env, info, 1, surfaceIdText);
+    ReadIntArg(env, info, 2, surfaceWidth);
+    ReadIntArg(env, info, 3, surfaceHeight);
     if (itemId.empty()) {
         return ToNapiJson(env, MakeResult(false, 0, "itemId required"));
     }
     nlohmann::json optionsJson;
-    ReadJsonArg(env, info, 2, optionsJson);
+    ReadJsonArg(env, info, 4, optionsJson);
     const auto options = ParsePlaybackOptionsJson(optionsJson);
     const std::string userId = session.userId();
 
-    return RunAsync(env, [userId, itemId, surfaceIdText, options]() {
+    return RunAsync(env, [userId, itemId, surfaceIdText, surfaceWidth, surfaceHeight, options]() {
         nlohmann::json out;
         out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
         auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
@@ -1152,7 +1156,8 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
                 surfaceId = 0;
             }
             if (surfaceId != 0) {
-                renderReady = SoftRenderer().init(surfaceId, renderError);
+                renderReady = SoftRenderer().init(surfaceId, renderError, static_cast<int>(surfaceWidth),
+                                                  static_cast<int>(surfaceHeight));
             }
         }
         out["renderReady"] = renderReady;

@@ -61,6 +61,8 @@ private:
     int surfaceHeight_ = 0;
     int requestedWidth_ = 0;
     int requestedHeight_ = 0;
+    /** 初始化时从 native window 读到的缓冲几何（诊断用） */
+    std::string geometryAtInit_;
     bool ready_ = false;
 };
 

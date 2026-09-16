@@ -460,10 +460,12 @@ export class JellyfinNative {
    * 软解播放会话：打开流式软解（FFmpeg Range 取流 + 逐帧 RGBA），供逐帧渲染使用。
    * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 SoftPlayOpen。
    */
-  static async softPlayOpen(itemId: string, surfaceId: string = '',
+  static async softPlayOpen(itemId: string, surfaceId: string = '', surfaceWidth: number = 0,
+                            surfaceHeight: number = 0,
                             optionsJson: string = '{}'): Promise<string> {
     try {
-      return await jellyfinNative.softPlayOpen(itemId, surfaceId, optionsJson);
+      return await jellyfinNative.softPlayOpen(itemId, surfaceId, surfaceWidth, surfaceHeight,
+                                              optionsJson);
     } catch (error) {
       return JellyfinNative.fail('softPlayOpen', error);
     }

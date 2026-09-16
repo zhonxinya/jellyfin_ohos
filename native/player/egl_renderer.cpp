@@ -99,6 +99,21 @@ bool EglRenderer::init(uint64_t surfaceId, std::string &error, int requestedWidt
         return false;
     }
 
+    // 关键：先落实缓冲几何再用它创建 EGL surface。
+    // 几何为 0 时 OHOS 的 eglSwapBuffers 会失败（实测 0x12301，非标准 EGL 错误码）。
+    int32_t bufW = 0;
+    int32_t bufH = 0;
+    OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY, &bufW, &bufH);
+    // 实测该值可能宽高转置（2619x1260 vs 实际 1260x2619），导致 eglSwapBuffers 失败；
+    // 因此只要调用方给了组件真实像素尺寸，就以它为准强制重设几何。
+    if (requestedWidth_ > 0 && requestedHeight_ > 0) {
+        OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, requestedWidth_,
+                                             requestedHeight_);
+        bufW = requestedWidth_;
+        bufH = requestedHeight_;
+    }
+    geometryAtInit_ = std::to_string(bufW) + "x" + std::to_string(bufH);
+
     EGLSurface surface = eglCreateWindowSurface(display, config,
                                                 reinterpret_cast<EGLNativeWindowType>(window), nullptr);
     if (surface == EGL_NO_SURFACE) {
@@ -121,20 +136,9 @@ bool EglRenderer::init(uint64_t surfaceId, std::string &error, int requestedWidt
     }
     eglQuerySurface(display, surface, EGL_WIDTH, &surfaceWidth_);
     eglQuerySurface(display, surface, EGL_HEIGHT, &surfaceHeight_);
-    // surface 刚创建时几何可能还是 0：从 native window 读缓冲几何，必要时用 ArkTS 侧传入的组件尺寸设置
     if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
-        int32_t bufW = 0;
-        int32_t bufH = 0;
-        OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY, &bufW, &bufH);
-        if (bufW > 0 && bufH > 0) {
-            surfaceWidth_ = bufW;
-            surfaceHeight_ = bufH;
-        } else if (requestedWidth_ > 0 && requestedHeight_ > 0) {
-            OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, requestedWidth_,
-                                                 requestedHeight_);
-            surfaceWidth_ = requestedWidth_;
-            surfaceHeight_ = requestedHeight_;
-        }
+        surfaceWidth_ = bufW;
+        surfaceHeight_ = bufH;
     }
 
     if (!buildProgram(error)) {
@@ -232,7 +236,9 @@ bool EglRenderer::renderRgba(const uint8_t *rgba, int width, int height, std::st
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) != EGL_TRUE) {
-        error = "eglSwapBuffers 失败（0x" + std::to_string(eglGetError()) + "）";
+        error = "eglSwapBuffers 失败（EGL 0x" + std::to_string(eglGetError()) + "，几何 "
+                + std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_)
+                + "，初始化时几何 " + geometryAtInit_ + "）";
         return false;
     }
     return true;
