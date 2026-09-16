@@ -199,6 +199,36 @@ struct DetailPage {
     });
   }
 
+  /**
+   * 播放动作统一入口。
+   *
+   * 剧集（Series）**不能直接播放**：设备实测服务端对 `/Items/{seriesId}/PlaybackInfo`
+   * 返回 **HTTP 500**（同一服务器对剧集条目 `/Items/{episodeId}/PlaybackInfo` 返回 200 并给出播放地址）。
+   * 因此这里先解析出"第一季第一集"再交给播放器，与各 Jellyfin 客户端的行为一致。
+   */
+  private async startPlayback(): Promise<void> {
+    if (this.item.type !== 'Series') {
+      this.playItem(this.item.id);
+      return;
+    }
+    if (this.seasons.length === 0) {
+      this.errorMsg = '该剧集暂无可播放的分集';
+      return;
+    }
+    const raw: string = await JellyfinNative.getSeasonEpisodes(this.item.id, this.seasons[0].id);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok) {
+      this.errorMsg = result.message.length > 0 ? result.message : '加载分集失败';
+      return;
+    }
+    const episodes: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    if (episodes.length === 0) {
+      this.errorMsg = '该剧集暂无可播放的分集';
+      return;
+    }
+    this.playItem(episodes[0].id);
+  }
+
   private mediaInfoLabels(): string[] {
     const info: string[] = [];
     for (let i = 0; i < this.mediaStreams.length; i++) {
@@ -691,7 +721,8 @@ struct DetailPage {
                     })
                     .margin({ right: 4, bottom: 4 })
                     .onClick(() => {
-                      this.playItem(this.item.id);
+                      // 走统一入口：剧集会先解析分集（系列条目本身无法直接播放）
+                      this.startPlayback();
                     })
                   AppIconButton({
                     icon: $r('sys.symbol.chevron_down'),
