@@ -1,4 +1,16 @@
 declare module 'libjellyfin_native.so' {
+  /** 软解逐帧结果：pixels 为 RGBA_8888 ArrayBuffer（ok 为 true 时存在） */
+  interface SoftFrameResult {
+    ok: boolean;
+    width: number;
+    height: number;
+    ptsSec: number;
+    frameIndex: number;
+    bytesFetched: number;
+    error?: string;
+    pixels?: ArrayBuffer;
+  }
+
   interface JellyfinNativeModule {
     getVersion(): string;
     configureServer(serverUrl: string): string;
@@ -31,6 +43,14 @@ declare module 'libjellyfin_native.so' {
     reportPlaybackProgress(itemId: string, positionTicks: number, isPaused: boolean): string;
     reportPlaybackStopped(itemId: string, positionTicks: number): string;
     playerOpen(itemId: string, optionsJson: string): string;
+    playerSoftDecodeProbe(itemId: string, cacheDir: string, optionsJson: string): string;
+    softPlayOpen(itemId: string, surfaceId: string, surfaceWidth: number, surfaceHeight: number, renderMode: string, optionsJson: string): string;
+    softPlayNextFrame(maxWidth: number): SoftFrameResult;
+    softPlayStatus(): string;
+    softPlayClose(): string;
+    softPlayDumpFrame(path: string): string;
+    softPlaySelfTest(): string;
+    renderTargetProbe(surfaceId: string, width: number, height: number, renderMode: string): string;
     playerPlay(): string;
     playerPause(): string;
     playerSeek(positionTicks: number): string;
@@ -48,6 +68,8 @@ declare module 'libjellyfin_native.so' {
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;
     setImageCacheDir(dir: string): string;
+    setCaBundlePath(path: string): string;
+    hasCaBundle(): string;
     loadImage(url: string): string;
     clearImageCache(): string;
   }

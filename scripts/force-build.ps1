@@ -76,12 +76,19 @@ Invoke-CompileAndRun -Name "test_image_url" -Sources @(
 
 Invoke-CompileAndRun -Name "test_player_engine" -Sources @(
     (Join-Path $Core "tests\test_player_engine.cpp"),
-    (Join-Path $RepoRoot "native\player\engine.cpp"),
-    (Join-Path $RepoRoot "native\player\ffmpeg_decoder.cpp"),
-    (Join-Path $RepoRoot "native\player\hw_decoder.cpp"),
-    (Join-Path $RepoRoot "native\player\subtitle.cpp"),
-    (Join-Path $RepoRoot "native\player\playback_policy.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\engine.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\ffmpeg_decoder.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\hw_decoder.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\subtitle.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\playback_policy.cpp"),
     (Join-Path $Core "url_util.cpp")
+)
+
+# RangeCache：软解取流的 Range 分页/缓存逻辑（不依赖 FFmpeg，故可主机单测）
+Invoke-CompileAndRun -Name "test_range_cache" -Sources @(
+    (Join-Path $Core "tests\test_range_cache.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\range_cache.cpp"),
+    (Join-Path $RepoRoot "native\feature\player\range_fetcher.cpp")
 )
 
 Write-Host "All native core tests finished." -ForegroundColor Green

@@ -307,6 +307,19 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * FFmpeg 软解码探测：解析播放地址 → 取前缀字节 → 软解出前若干帧（可落盘首帧 PNG）。
+   * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 PlayerSoftDecodeProbe。
+   */
+  static async playerSoftDecodeProbe(itemId: string, cacheDir: string,
+                                     optionsJson: string = '{}'): Promise<string> {
+    try {
+      return await jellyfinNative.playerSoftDecodeProbe(itemId, cacheDir, optionsJson);
+    } catch (error) {
+      return JellyfinNative.fail('playerSoftDecodeProbe', error);
+    }
+  }
+
   static playerPlay(): string {
     try {
       return jellyfinNative.playerPlay();
@@ -440,6 +453,92 @@ export class JellyfinNative {
       return jellyfinNative.setImageCacheDir(dir);
     } catch (error) {
       return JellyfinNative.fail('setImageCacheDir', error);
+    }
+  }
+
+  /**
+   * 软解播放会话：打开流式软解（FFmpeg Range 取流 + 逐帧 RGBA），供逐帧渲染使用。
+   * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 SoftPlayOpen。
+   */
+  static async softPlayOpen(itemId: string, surfaceId: string = '', surfaceWidth: number = 0,
+                            surfaceHeight: number = 0, renderMode: string = 'surface',
+                            optionsJson: string = '{}'): Promise<string> {
+    try {
+      return await jellyfinNative.softPlayOpen(itemId, surfaceId, surfaceWidth, surfaceHeight,
+                                              renderMode, optionsJson);
+    } catch (error) {
+      return JellyfinNative.fail('softPlayOpen', error);
+    }
+  }
+
+  /** 取下一帧（同步）：返回 {ok,width,height,ptsSec,frameIndex,pixels} */
+  static softPlayNextFrame(maxWidth: number): ESObject | null {
+    try {
+      return jellyfinNative.softPlayNextFrame(maxWidth) as ESObject;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  static softPlayStatus(): string {
+    try {
+      return jellyfinNative.softPlayStatus();
+    } catch (error) {
+      return JellyfinNative.fail('softPlayStatus', error);
+    }
+  }
+
+  /** 回读当前渲染缓冲并写成 PNG（验证渲染结果，与系统截图无关） */
+  static softPlayDumpFrame(path: string): string {
+    try {
+      return jellyfinNative.softPlayDumpFrame(path);
+    } catch (error) {
+      return JellyfinNative.fail('softPlayDumpFrame', error);
+    }
+  }
+
+  /** 渲染自检：清屏为红并回读（判断 surface 能否作为 GL 渲染目标） */
+  static softPlaySelfTest(): string {
+    try {
+      return jellyfinNative.softPlaySelfTest();
+    } catch (error) {
+      return JellyfinNative.fail('softPlaySelfTest', error);
+    }
+  }
+
+  /** 渲染目标判定：给定 surfaceId 即初始化 EGL 并清屏回读（无需开始播放） */
+  static renderTargetProbe(surfaceId: string, width: number, height: number,
+                           renderMode: string = 'texture'): string {
+    try {
+      return jellyfinNative.renderTargetProbe(surfaceId, width, height, renderMode);
+    } catch (error) {
+      return JellyfinNative.fail('renderTargetProbe', error);
+    }
+  }
+
+  static softPlayClose(): string {
+    try {
+      return jellyfinNative.softPlayClose();
+    } catch (error) {
+      return JellyfinNative.fail('softPlayClose', error);
+    }
+  }
+
+  /** 配置 HTTPS 用的 CA 根证书 PEM 路径（未配置则 https 连接会明确失败） */
+  static setCaBundlePath(path: string): string {
+    try {
+      return jellyfinNative.setCaBundlePath(path);
+    } catch (error) {
+      return JellyfinNative.fail('setCaBundlePath', error);
+    }
+  }
+
+  /** 查询 CA 根证书是否已加载（诊断用） */
+  static hasCaBundle(): string {
+    try {
+      return jellyfinNative.hasCaBundle();
+    } catch (error) {
+      return JellyfinNative.fail('hasCaBundle', error);
     }
   }
 

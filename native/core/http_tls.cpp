@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include <sys/socket.h>
@@ -17,6 +18,41 @@
 #include <mbedtls/x509_crt.h>
 
 namespace jellyfin {
+namespace {
+
+/** 进程级 CA 根证书（由宿主通过 SetCaBundlePath 加载一次，多连接复用） */
+mbedtls_x509_crt g_caBundle;
+std::mutex g_caMutex;
+bool g_caInited = false;
+bool g_caLoaded = false;
+
+} // namespace
+
+bool TlsSession::SetCaBundlePath(const std::string &pemPath)
+{
+    std::lock_guard<std::mutex> lock(g_caMutex);
+    if (!g_caInited) {
+        mbedtls_x509_crt_init(&g_caBundle);
+        g_caInited = true;
+    }
+    g_caLoaded = false;
+    if (pemPath.empty()) {
+        return false;
+    }
+    const int rc = mbedtls_x509_crt_parse_file(&g_caBundle, pemPath.c_str());
+    if (rc < 0) {
+        return false;
+    }
+    g_caLoaded = g_caBundle.next != nullptr;
+    return g_caLoaded;
+}
+
+bool TlsSession::HasCaBundle()
+{
+    std::lock_guard<std::mutex> lock(g_caMutex);
+    return g_caLoaded;
+}
+
 namespace {
 
 int BioSend(void *ctx, const unsigned char *buf, size_t len)
@@ -117,9 +153,19 @@ bool TlsSession::open(int socketFd, const std::string &host, std::string &error)
         return false;
     }
 
-    mbedtls_ssl_conf_authmode(&impl_->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    // 证书校验：要求校验（含主机名）。CA 根证书来自宿主在启动时加载的 Mozilla bundle；
+    // 未加载则明确失败——绝不静默跳过校验。
+    {
+        std::lock_guard<std::mutex> lock(g_caMutex);
+        if (!g_caLoaded) {
+            error = "HTTPS 不可用：未加载 CA 根证书（请确认应用启动时已配置 cacert.pem）";
+            close();
+            return false;
+        }
+        mbedtls_ssl_conf_authmode(&impl_->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_ca_chain(&impl_->conf, &g_caBundle, nullptr);
+    }
     mbedtls_ssl_conf_rng(&impl_->conf, mbedtls_ctr_drbg_random, &impl_->ctrDrbg);
-    mbedtls_ssl_conf_ca_chain(&impl_->conf, &impl_->caChain, nullptr);
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
     mbedtls_ssl_conf_session_tickets(&impl_->conf, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
 #endif

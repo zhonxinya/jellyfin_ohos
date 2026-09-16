@@ -1,5 +1,10 @@
 import router from '@ohos.router';
+import common from '@ohos.app.ability.common';
 import media from '@ohos.multimedia.media';
+import display from '@ohos.display';
+import image from '@ohos.multimedia.image';
+import componentSnapshot from '@ohos.arkui.componentSnapshot';
+import fs from '@ohos.file.fs';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -24,6 +29,13 @@ struct PlayerPage {
   @State private durationMs: number = 0;
   @State private isPlaying: boolean = false;
   @State private status: string = UiState.INITIAL;
+  /** FFmpeg 软解回放状态：逐帧拉取并用 PixelMap 渲染（硬解不支持的编码走这条路） */
+  @State private softPlaying: boolean = false;
+  @State private softStatus: string = '';
+  /** 诊断结果（渲染自检/存帧），独立于逐帧状态，避免被 70ms 刷新覆盖 */
+  @State private softDiag: string = '';
+  private softTimerId: number = -1;
+  private softPulling: boolean = false;
   @State private errorMsg: string = '';
   @State private showControls: boolean = true;
   @State private playbackSpeed: number = 1.0;
@@ -49,6 +61,11 @@ struct PlayerPage {
   private lastSeekForward: boolean = true;
   private avPlayer: media.AVPlayer | null = null;
   private surfaceId: string = '';
+  /** XComponent 控制器：surface 就绪后用它拿到 surfaceId（软解 EGL 渲染与 AVPlayer 共用） */
+  private surfaceController: XComponentController = new XComponentController();
+  /** XComponent 组件像素尺寸（vp → px），用于 EGL 缓冲几何 */
+  private surfaceWidthPx: number = 0;
+  private surfaceHeightPx: number = 0;
 
   // 支持倍速列表
   static readonly SPEEDS: number[] = [0.5, 1.0, 1.25, 1.5, 2.0];
@@ -88,6 +105,8 @@ struct PlayerPage {
   }
 
   aboutToDisappear(): void {
+    // 离开播放页必须停掉软解会话（解码线程 + 取流都要释放）
+    this.stopSoftPlay();
     if (this.timerId >= 0) {
       clearInterval(this.timerId);
       this.timerId = -1;
@@ -142,6 +161,237 @@ struct PlayerPage {
 
   private formatTime(ms: number): string {
     return formatSeconds(Math.max(0, Math.floor(ms / 1000)));
+  }
+
+  /**
+   * 启动 FFmpeg 软解回放：打开流式软解会话，然后由定时器逐帧拉取并用 PixelMap 渲染。
+   *
+   * 为什么需要：系统 AVPlayer 只走硬解，模拟器/部分设备解不了 HEVC 等编码；
+   * 软解用 FFmpeg 在 CPU 上解码，虽然帧率有限，但能把这些内容放出来。
+   */
+  private async startSoftPlay(): Promise<void> {
+    this.softStatus = '正在打开软解会话…';
+    // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
+    this.softStopAvPlayer();
+    const pxSize: number[] = this.surfacePixelSize();
+    // XComponent 为 TEXTURE 类型：surfaceId 是 GL 纹理 id，原生侧走 OH_NativeImage 渲染并发布
+    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, pxSize[0],
+                                                          pxSize[1], 'texture', this.playbackOptions);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      this.softStatus = `软解打开失败：${result.message}`;
+      return;
+    }
+    const data: ESObject = result.data as ESObject;
+    if (!JsonUtil.getBoolean(data, 'ok', false)) {
+      this.softStatus = `软解打开失败：${JsonUtil.getString(data, 'error', '未知错误')}`;
+      return;
+    }
+    this.softPlaying = true;
+    const renderReady: boolean = JsonUtil.getBoolean(data, 'renderReady', false);
+    const renderError: string = JsonUtil.getString(data, 'renderError', '');
+    this.softStatus = `软解中：${JsonUtil.getString(data, 'videoCodec', '?')} `
+      + `${JsonUtil.getNumber(data, 'width', 0)}x${JsonUtil.getNumber(data, 'height', 0)}`
+      + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
+      + (renderError.length > 0 ? `（${renderError}）` : '');
+    this.startSoftTimer();
+    // 启动即自检（清屏为红并回读）：把"渲染目标是否可用"的判定一次性落到 softDiag，
+    // 不依赖再点一次按钮（避免自动化/人工都容易错过的时序）
+    const selfRaw: string = JellyfinNative.softPlaySelfTest();
+    const selfResult: NativeResult = JellyfinNative.parseResult(selfRaw);
+    if (selfResult.ok && selfResult.data !== null) {
+      const passed: boolean = JsonUtil.getBoolean(selfResult.data as ESObject, 'ok', false);
+      const report: string = JsonUtil.getString(selfResult.data as ESObject, 'report',
+        JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
+      this.softDiag = `渲染自检${passed ? '通过' : '未通过'}：${report}`;
+    }
+    // 渲染跑起来后自动导出一次帧缓冲（真实视频帧），无需再点任何按钮
+    setTimeout(() => {
+      if (this.softPlaying) {
+        this.autoDumpRenderedFrame();
+      }
+    }, 10000);
+  }
+
+  /** XComponent 的像素尺寸：优先用组件实测尺寸，未拿到时退化为整屏像素 */
+  private surfacePixelSize(): number[] {
+    if (this.surfaceWidthPx > 0 && this.surfaceHeightPx > 0) {
+      return [this.surfaceWidthPx, this.surfaceHeightPx];
+    }
+    try {
+      const d: display.Display = display.getDefaultDisplaySync();
+      return [d.width, d.height];
+    } catch (err) {
+      return [0, 0];
+    }
+  }
+
+  /** surface 就绪即判定渲染目标可用性，结果写入常驻 softDiag（诊断入口，与播放状态无关） */
+  private async probeRenderTarget(): Promise<void> {
+    try {
+      const pxSize: number[] = this.surfacePixelSize();
+      const raw: string = JellyfinNative.renderTargetProbe(this.surfaceId, pxSize[0], pxSize[1],
+        'texture');
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        this.softDiag = `渲染目标判定失败：${result.message}`;
+        return;
+      }
+      const data: ESObject = result.data as ESObject;
+      const ok: boolean = JsonUtil.getBoolean(data, 'ok', false);
+      const report: string = JsonUtil.getString(data, 'report',
+        JsonUtil.getString(data, 'error', ''));
+      const mode: string = JsonUtil.getString(data, 'mode', '');
+      this.softDiag = `渲染目标(${mode}) ${ok ? '可用' : '不可用'}：${report}`;
+    } catch (err) {
+      this.softDiag = `渲染目标判定异常：${(err as Error).message}`;
+    }
+  }
+
+  /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + PixelMap 创建的开销决定上限） */
+  private startSoftTimer(): void {
+    this.stopSoftTimer();
+    this.softTimerId = setInterval(() => {
+      this.pullSoftFrame();
+    }, 70);
+  }
+
+  private stopSoftTimer(): void {
+    if (this.softTimerId !== -1) {
+      clearInterval(this.softTimerId);
+      this.softTimerId = -1;
+    }
+  }
+
+  private async pullSoftFrame(): Promise<void> {
+    if (this.softPulling || !this.softPlaying) {
+      return;
+    }
+    this.softPulling = true;
+    try {
+      // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）。
+      // 帧宽限制 640：模拟器 GL 为软件光栅化，上传 1920x1080 大纹理会明显拖慢甚至失败。
+      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(640);
+      if (frame === null) {
+        return;
+      }
+      const ok: boolean = JsonUtil.getBoolean(frame, 'ok', false);
+      if (!ok) {
+        const reason: string = JsonUtil.getString(frame, 'error', '');
+        if (reason === 'eof') {
+          this.softStatus = '软解播放结束';
+          this.stopSoftPlay();
+        } else if (reason.length > 0) {
+          this.softStatus = `软解失败：${reason}`;
+          this.stopSoftPlay();
+        }
+        return;
+      }
+      const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
+      const idx: number = JsonUtil.getNumber(frame, 'frameIndex', 0);
+      const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
+      const rendered: boolean = JsonUtil.getBoolean(frame, 'rendered', false);
+      const renderError: string = JsonUtil.getString(frame, 'renderError', '');
+      this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
+        + ` · 第 ${idx} 帧 · ${(fetched / 1048576).toFixed(1)} MB`
+        + ` · ${rendered ? 'EGL 已渲染' : '未渲染'}`
+        + (renderError.length > 0 ? `（${renderError}）` : '');
+    } catch (err) {
+      this.softStatus = `软解异常：${(err as Error).message}`;
+    } finally {
+      this.softPulling = false;
+    }
+  }
+
+  /**
+   * 诊断：软解运行一段时间后**自动**导出一次渲染缓冲（不含清屏自检，故回读到的是真实视频帧）。
+   *
+   * 为什么要自动：手动点「存帧」需要控制条处于显示状态，设备自动化下时序很难对齐；
+   * 这条路径只要软解在跑就必然产出文件，便于确证"软解画面确实渲染到了帧缓冲"。
+   */
+  private async autoDumpRenderedFrame(): Promise<void> {
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      // ① 组件级快照：XComponent(TEXTURE) 的内容由 ArkUI 合成，
+      //    componentSnapshot 能抓到组件真实显示结果（系统 snapshot_display 未必包含）。
+      const capturePath: string = `${ctx.cacheDir}/softcapture.png`;
+      try {
+        const shot: image.PixelMap = await componentSnapshot.get('softVideoArea');
+        const packer: image.ImagePacker = image.createImagePacker();
+        const buf: ArrayBuffer = await packer.packing(shot, { format: 'image/png', quality: 100 });
+        const file = fs.openSync(capturePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+        fs.writeSync(file.fd, buf);
+        fs.closeSync(file);
+        this.softDiag = `已组件快照 → ${capturePath}`;
+      } catch (snapErr) {
+        this.softDiag = `组件快照失败：${(snapErr as Error).message}`;
+      }
+      // ② 原生渲染缓冲回读（TEXTURE 路径不支持时会明确报错，不再给误导性黑图）
+      const path: string = `${ctx.cacheDir}/softrender_frame.png`;
+      const raw: string = JellyfinNative.softPlayDumpFrame(path);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (result.ok && result.data !== null) {
+        const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
+        const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
+        const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
+        this.softDiag = `${this.softDiag}\n已自动存帧：${source} ${w}x${h}`;
+      } else {
+        this.softDiag = `${this.softDiag}\n自动存帧：${result.message}`;
+      }
+    } catch (err) {
+      this.softDiag = `自动存帧异常：${(err as Error).message}`;
+    }
+  }
+
+  /** 诊断：先做 EGL 渲染自检（清屏为红并回读），再把渲染缓冲回读成 PNG */
+  private async dumpSoftFrame(): Promise<void> {
+    try {
+      // 自检结果直接进状态栏：能判别"surface 不可作为 GL 目标"与"绘制路径有 bug"
+      const selfRaw: string = JellyfinNative.softPlaySelfTest();
+      const selfResult: NativeResult = JellyfinNative.parseResult(selfRaw);
+      if (selfResult.ok && selfResult.data !== null) {
+        const ok: boolean = JsonUtil.getBoolean(selfResult.data as ESObject, 'ok', false);
+        const report: string = JsonUtil.getString(selfResult.data as ESObject, 'report',
+          JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
+        this.softDiag = `自检${ok ? '通过' : '未通过'}：${report}`;
+      }
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const path: string = `${ctx.cacheDir}/softplay_frame.png`;
+      const raw: string = JellyfinNative.softPlayDumpFrame(path);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (result.ok && result.data !== null) {
+        const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
+        const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
+        const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
+        this.softDiag = `${this.softDiag}\n已存帧：${source} ${w}x${h} → ${path}`;
+      } else {
+        this.softDiag = `${this.softDiag}\n存帧失败：${result.message}`;
+      }
+    } catch (err) {
+      this.softDiag = `存帧异常：${(err as Error).message}`;
+    }
+  }
+
+  private pad2(v: number): string {
+    return v < 10 ? `0${v}` : `${v}`;
+  }
+
+  private softStopAvPlayer(): void {
+    if (this.avPlayer !== null) {
+      try {
+        this.avPlayer.stop();
+        this.avPlayer.release();
+      } catch (err) {
+        // 忽略：AVPlayer 已在错误态
+      }
+      this.avPlayer = null;
+    }
+  }
+
+  private stopSoftPlay(): void {
+    this.stopSoftTimer();
+    JellyfinNative.softPlayClose();
+    this.softPlaying = false;
   }
 
   private async openPlayer(): Promise<void> {
@@ -485,6 +735,29 @@ struct PlayerPage {
             this.cycleSpeed();
           }
         })
+        // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
+        ChipButton({
+          label: '软解',
+          selected: this.softPlaying,
+          onTap: () => {
+            if (this.softPlaying) {
+              this.stopSoftPlay();
+              this.softStatus = '已停止软解';
+            } else {
+              this.startSoftPlay();
+            }
+          }
+        })
+        // 诊断：回读 EGL 渲染缓冲并写成 PNG（验证"确实渲染出来了"，不依赖系统截图是否含 surface）
+        if (this.softPlaying) {
+          ChipButton({
+            label: '存帧',
+            selected: false,
+            onTap: () => {
+              this.dumpSoftFrame();
+            }
+          })
+        }
       }
       .width('100%')
     }
@@ -594,15 +867,26 @@ struct PlayerPage {
 
   build() {
     Stack() {
-      XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE })
+      // XComponent 始终存在：软解时 EGL 直接渲染到它的 surface（不再走 PixelMap 逐帧刷新）
+      XComponent({ id: 'jellyfin_player', type: XComponentType.TEXTURE, controller: this.surfaceController })
+        .id('softVideoArea')
         .width('100%')
         .height('100%')
         .backgroundColor(this.colors().videoBackground)
+        .onAreaChange((_oldArea: Area, newArea: Area) => {
+          const density: number = display.getDefaultDisplaySync().densityPixels;
+          this.surfaceWidthPx = Math.round(Number(newArea.width) * density);
+          this.surfaceHeightPx = Math.round(Number(newArea.height) * density);
+        })
         .onLoad(() => {
-          // XComponent surface is created after load; bind to AVPlayer if available
+          // 关键：surfaceId 必须由 controller 取回；否则 AVPlayer 与软解 EGL 都拿不到视频面
+          this.surfaceId = this.surfaceController.getXComponentSurfaceId();
           if (this.avPlayer !== null && this.surfaceId.length > 0) {
             this.avPlayer.surfaceId = this.surfaceId;
           }
+          // surface 一就绪就判定"该设备能否把它当 GL 渲染目标"（清屏为红 + 回读），
+          // 结果进常驻 softDiag：打开播放页即可看到结论，无需任何播放/控制条交互
+          this.probeRenderTarget();
         })
         .onTouch((event: TouchEvent) => {
           if (this.controlsLocked) {
@@ -742,7 +1026,7 @@ struct PlayerPage {
       }
 
       if (this.status === UiState.ERROR) {
-        Column() {
+        Column({ space: 16 }) {
           // 错误态复用 EmptyState（参考项目约定：错误不另造组件，配"重试"动作）
           EmptyState({
             message: this.errorMsg.length > 0 ? this.errorMsg : '播放出错',
@@ -752,12 +1036,58 @@ struct PlayerPage {
               this.openPlayer();
             }
           })
+          // 硬解不支持该编码（如 HEVC）时，提供 FFmpeg 软解回放
+          if (this.softStatus.length > 0) {
+            Text(this.softStatus)
+              .fontSize(ThemeConstants.META_MEDIUM)
+              .fontColor(this.colors().onOverlayMuted)
+              .textAlign(TextAlign.Center)
+          }
+          Button(this.softPlaying ? '停止软解' : '用 FFmpeg 软解播放',
+            { type: ButtonType.Normal, stateEffect: false })
+            .height(ThemeConstants.BUTTON_HEIGHT)
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontColor(this.colors().onBrand)
+            .backgroundColor(this.colors().brandPrimary)
+            .borderRadius(ThemeConstants.BUTTON_RADIUS)
+            .stateStyles({
+              pressed: {
+                .backgroundColor(this.colors().brandPrimaryPressed)
+              }
+            })
+            .onClick(() => {
+              if (this.softPlaying) {
+                this.stopSoftPlay();
+              } else {
+                this.startSoftPlay();
+              }
+            })
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
         .backgroundColor(this.colors().videoBackground)
+      }
+
+      // 软解状态常驻浮层（不随控制条自动隐藏，便于用户与诊断查看进度）
+      if (this.softDiag.length > 0) {
+        Text(this.softDiag)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlay)
+          .backgroundColor(this.colors().badgeScrim)
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(ThemeConstants.BADGE_RADIUS)
+          .margin({ top: 110 })
+      }
+      if (this.softStatus.length > 0) {
+        Text(this.softStatus)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlay)
+          .backgroundColor(this.colors().badgeScrim)
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(ThemeConstants.BADGE_RADIUS)
+          .margin({ top: 72 })
       }
     }
     .width('100%')

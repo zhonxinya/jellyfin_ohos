@@ -7,8 +7,11 @@ namespace jellyfin {
 
 /**
  * Wraps a connected TCP socket with TLS (mbedTLS) for HTTPS.
- * Peer verification is enabled with system/default CA bundle when available;
- * self-signed Jellyfin certs may require user to use http:// on LAN.
+ *
+ * 证书校验：默认**要求**校验（MBEDTLS_SSL_VERIFY_REQUIRED）并同时校验主机名。
+ * CA 根证书由宿主（ArkTS）在启动时通过 `SetCaBundlePath()` 指定一个 PEM 文件路径
+ * （应用内自带 Mozilla CA bundle，脱机可用）；未配置或加载失败时 https 连接会**失败并报错**，
+ * 而不是静默跳过校验（旧实现用 VERIFY_OPTIONAL + 空 CA 链，等于不校验，可被中间人攻击）。
  */
 class TlsSession {
 public:
@@ -17,6 +20,15 @@ public:
 
     TlsSession(const TlsSession &) = delete;
     TlsSession &operator=(const TlsSession &) = delete;
+
+    /**
+     * 设置 CA 根证书 PEM 文件路径（进程级，一次即可）。
+     * @return 是否成功解析出至少一张证书
+     */
+    static bool SetCaBundlePath(const std::string &pemPath);
+
+    /** 当前是否已加载 CA 根证书（供状态查询/诊断） */
+    static bool HasCaBundle();
 
     /** Perform TLS handshake over an already-connected TCP socket fd. */
     bool open(int socketFd, const std::string &host, std::string &error);

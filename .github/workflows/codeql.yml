@@ -6,7 +6,7 @@
 #
 # 语言与构建模式：
 # - `actions`：扫描本仓库的 GitHub Actions 工作流；
-# - `c-cpp`：扫描 `native/core`、`native/player`、`native/napi`；
+# - `c-cpp`：扫描 `native/core`、`native/feature/player`、`native/napi`；
 # - `javascript-typescript`：扫描 hvigor 配置脚本（`*.ts`）与仓库内脚本。
 # 三种语言均不构建（`build-mode: none`）：本项目为 HarmonyOS/hvigor 工程，
 # 编译需要鸿蒙 NDK 与命令行工具链，CodeQL 无法直接驱动其构建流程。

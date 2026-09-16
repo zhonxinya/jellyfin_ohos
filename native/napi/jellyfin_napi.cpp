@@ -9,6 +9,8 @@
 #include "api/user_items_api.h"
 #include "api_client.h"
 #include "engine.h"
+#include "http_client.h"
+#include "http_tls.h"
 #include "image_cache.h"
 #include "image_url.h"
 #include "playback_policy.h"
@@ -17,7 +19,16 @@
 #include "version.h"
 
 // Player version header shares the name version.h; include via relative path.
-#include "../player/version.h"
+#include "../feature/player/version.h"
+// ── feature/player（可移植的播放能力）──────────────────────────────────
+// 取流由本工程注入：CDN/鉴权/https 都走 core 的 HttpClient
+#include "../feature/player/range_fetcher.h"
+// FFmpeg 软解码器（未链接 FFmpeg 时其 available() 返回 false，probe 会如实报错）
+#include "../feature/player/ffmpeg_decoder.h"
+// 流式软解会话（播放用：Range 分页取流 + 逐帧 RGBA 输出）
+#include "../feature/player/soft_decode_session.h"
+// EGL/GLES 渲染（把软解帧直接画进 XComponent surface）
+#include "../feature/player/egl_renderer.h"
 
 #include <cctype>
 #include <functional>
@@ -30,6 +41,33 @@
 namespace {
 
 constexpr const char *kNativeVersion = "0.1.0-native";
+
+
+/**
+ * 向 feature/player 注入取流实现（本工程用 core 的 HttpClient，支持 https 与 Jellyfin 鉴权）。
+ * feature/player 自身不依赖任何 HTTP 实现，换工程时只需替换这里的注入。
+ */
+void EnsureRangeFetcher()
+{
+    static std::once_flag once;
+    std::call_once(once, []() {
+        jellyfin::player::SetRangeFetcher([](const std::string &url, int64_t start, int64_t end) {
+            jellyfin::player::RangeResponse out;
+            jellyfin::HttpClient http;
+            http.setReadTimeoutSec(60);
+            http.setConnectTimeoutSec(10);
+            jellyfin::HttpHeaders headers;
+            if (end >= start) {
+                headers["Range"] = "bytes=" + std::to_string(start) + "-" + std::to_string(end);
+            }
+            const jellyfin::HttpResponse resp = http.get(url, headers);
+            out.status = resp.status;
+            out.body = resp.body;
+            out.error = resp.error;
+            return out;
+        });
+    });
+}
 
 jellyfin::JellyfinApiClient &Api()
 {
@@ -974,6 +1012,594 @@ napi_value ReportPlaybackStopped(napi_env env, napi_callback_info info)
     });
 }
 
+/**
+ * 软解播放会话（流式）：open / nextFrame / close / status。
+ *
+ * 用途：系统硬解不支持的编码（如模拟器上的 HEVC）用 FFmpeg 软解逐帧出图，
+ * 由 ArkTS 定时器拉帧并渲染（后续可替换为 EGL 直渲以提升帧率）。
+ */
+std::unique_ptr<jellyfin::player::SoftDecodeSession> &SoftSession()
+{
+    static std::unique_ptr<jellyfin::player::SoftDecodeSession> session;
+    return session;
+}
+
+/** 软解渲染器（EGL）：与软解会话配对，把解码帧直接渲染到 XComponent surface */
+jellyfin::player::EglRenderer &SoftRenderer()
+{
+    static jellyfin::player::EglRenderer renderer;
+    return renderer;
+}
+
+/** 最近一帧的 RGBA（回读/导出用），保留引用避免立即释放 */
+std::vector<uint8_t> &SoftLastFrame()
+{
+    static std::vector<uint8_t> frame;
+    return frame;
+}
+
+/** 最近一帧的宽高（导出时需要，帧缓冲是 surface 尺寸、与解码尺寸不同） */
+int &SoftLastFrameWidth()
+{
+    static int width = 0;
+    return width;
+}
+
+int &SoftLastFrameHeight()
+{
+    static int height = 0;
+    return height;
+}
+
+std::mutex &SoftLastFrameMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+/**
+ * 把 RGBA 编码成 PNG 落盘（glReadPixels 回读结果的验证出口）。
+ * 不依赖系统截图是否包含 surface 内容。
+ */
+#if defined(JELLYFIN_HAS_FFMPEG)
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
+}
+#endif
+
+bool WriteRgbaPng(const std::vector<uint8_t> &rgba, int width, int height, const std::string &path,
+                  std::string &error)
+{
+#if defined(JELLYFIN_HAS_FFMPEG)
+    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_PNG);
+    if (codec == nullptr) {
+        error = "本构建未启用 PNG 编码器";
+        return false;
+    }
+    AVCodecContext *enc = avcodec_alloc_context3(codec);
+    enc->width = width;
+    enc->height = height;
+    enc->pix_fmt = AV_PIX_FMT_RGBA;
+    enc->time_base = AVRational{1, 25};
+    if (avcodec_open2(enc, codec, nullptr) < 0) {
+        avcodec_free_context(&enc);
+        error = "打开 PNG 编码器失败";
+        return false;
+    }
+    AVFrame *frame = av_frame_alloc();
+    frame->format = AV_PIX_FMT_RGBA;
+    frame->width = width;
+    frame->height = height;
+    if (av_frame_get_buffer(frame, 32) < 0) {
+        av_frame_free(&frame);
+        avcodec_free_context(&enc);
+        error = "分配帧缓冲失败";
+        return false;
+    }
+    const size_t stride = static_cast<size_t>(width) * 4u;
+    for (int y = 0; y < height; ++y) {
+        std::memcpy(frame->data[0] + static_cast<size_t>(y) * frame->linesize[0],
+                    rgba.data() + static_cast<size_t>(y) * stride, stride);
+    }
+    bool ok = false;
+    if (avcodec_send_frame(enc, frame) < 0) {
+        error = "提交编码帧失败";
+    } else {
+        AVPacket *pkt = av_packet_alloc();
+        const int rc = avcodec_receive_packet(enc, pkt);
+        if (rc < 0) {
+            error = "PNG 编码失败";
+        } else {
+            FILE *fp = std::fopen(path.c_str(), "wb");
+            if (fp == nullptr) {
+                error = "无法写入 " + path;
+            } else {
+                ok = std::fwrite(pkt->data, 1, static_cast<size_t>(pkt->size), fp) ==
+                     static_cast<size_t>(pkt->size);
+                std::fclose(fp);
+                if (!ok) {
+                    error = "PNG 写盘不完整";
+                }
+            }
+        }
+        av_packet_free(&pkt);
+    }
+    av_frame_free(&frame);
+    avcodec_free_context(&enc);
+    return ok;
+#else
+    (void)rgba;
+    (void)width;
+    (void)height;
+    (void)path;
+    error = "本构建未链接 FFmpeg";
+    return false;
+#endif
+}
+
+/**
+ * 打开软解会话并初始化 EGL 渲染器。
+ * @param surfaceId XComponent 的 surface id（字符串形式的 uint64）
+ */
+napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
+{
+    EnsureRangeFetcher();
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string itemId;
+    std::string surfaceIdText;
+    int64_t surfaceWidth = 0;
+    int64_t surfaceHeight = 0;
+    std::string renderMode;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, surfaceIdText);
+    ReadIntArg(env, info, 2, surfaceWidth);
+    ReadIntArg(env, info, 3, surfaceHeight);
+    ReadStringArg(env, info, 4, renderMode);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "itemId required"));
+    }
+    nlohmann::json optionsJson;
+    ReadJsonArg(env, info, 5, optionsJson);
+    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const std::string userId = session.userId();
+
+    return RunAsync(env, [userId, itemId, surfaceIdText, surfaceWidth, surfaceHeight, renderMode, options]() {
+        nlohmann::json out;
+        out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
+        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        if (!playback.ok()) {
+            out["ok"] = false;
+            out["error"] = "获取播放信息失败：" + playback.error.message;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        if (playback.data.is_object() && !playback.data.contains("ItemId")) {
+            playback.data["ItemId"] = itemId;
+        }
+        auto &sess = jellyfin::SessionManager::instance();
+        jellyfin::player::PlaybackSession pbSession;
+        std::string resolveError;
+        if (!jellyfin::player::ResolvePlaybackSession(playback.data, sess.baseUrl(), sess.accessToken(),
+                                                     pbSession, resolveError)) {
+            out["ok"] = false;
+            out["error"] = resolveError.empty() ? "无法解析播放地址" : resolveError;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        out["playMethod"] = jellyfin::player::PlayMethodToString(pbSession.method);
+
+        // EGL 渲染器：绑定 XComponent surface（失败则退化为仅解码、由 ArkTS 侧决定是否显示）
+        std::string renderError;
+        bool renderReady = false;
+        if (!surfaceIdText.empty()) {
+            uint64_t surfaceId = 0;
+            try {
+                surfaceId = std::stoull(surfaceIdText);
+            } catch (...) {
+                surfaceId = 0;
+            }
+            if (surfaceId != 0) {
+                if (SoftRenderer().isReady()) {
+                    // 已就绪（例如刚被 renderTargetProbe 初始化过）时复用，避免二次初始化同一 surface
+                    renderReady = true;
+                    out["renderReused"] = true;
+                } else if (renderMode == "texture") {
+                    // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
+                    renderReady = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId),
+                                                                 renderError,
+                                                                 static_cast<int>(surfaceWidth),
+                                                                 static_cast<int>(surfaceHeight));
+                } else {
+                    renderReady = SoftRenderer().init(surfaceId, renderError,
+                                                      static_cast<int>(surfaceWidth),
+                                                      static_cast<int>(surfaceHeight));
+                }
+                out["renderMode"] = renderMode.empty() ? "surface" : renderMode;
+            }
+        }
+        out["renderReady"] = renderReady;
+        if (!renderReady && !renderError.empty()) {
+            out["renderError"] = renderError;
+        }
+
+        SoftSession().reset(new jellyfin::player::SoftDecodeSession());
+        std::string error;
+        if (!SoftSession()->openUrl(pbSession.playUrl, error)) {
+            SoftSession().reset();
+            SoftRenderer().destroy();
+            out["ok"] = false;
+            out["error"] = error;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        out["ok"] = true;
+        out["container"] = SoftSession()->container();
+        out["videoCodec"] = SoftSession()->videoCodec();
+        out["width"] = SoftSession()->width();
+        out["height"] = SoftSession()->height();
+        out["durationSec"] = SoftSession()->durationSec();
+        return MakeResult(true, 200, "ok", out).dump();
+    });
+}
+
+/** 取下一帧：解码 → 存最近帧 → （有渲染器时）EGL 渲染上屏 */
+napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
+{
+    if (SoftSession() == nullptr) {
+        return ToNapiJson(env, MakeResult(false, 0, "会话未打开"));
+    }
+    int64_t maxWidth = 0;
+    ReadIntArg(env, info, 0, maxWidth);
+
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+
+    std::vector<uint8_t> rgba;
+    jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
+    const bool ok = SoftSession()->nextFrameRgba(maxWidth > 0 ? maxWidth : 0, rgba, frameInfo);
+
+    napi_value status = nullptr;
+    napi_get_boolean(env, ok, &status);
+    napi_set_named_property(env, result, "ok", status);
+    napi_value w = nullptr;
+    napi_create_int32(env, frameInfo.width, &w);
+    napi_set_named_property(env, result, "width", w);
+    napi_value h = nullptr;
+    napi_create_int32(env, frameInfo.height, &h);
+    napi_set_named_property(env, result, "height", h);
+    napi_value pts = nullptr;
+    napi_create_double(env, frameInfo.ptsSec, &pts);
+    napi_set_named_property(env, result, "ptsSec", pts);
+    napi_value frames = nullptr;
+    napi_create_int64(env, frameInfo.frameIndex, &frames);
+    napi_set_named_property(env, result, "frameIndex", frames);
+    if (!frameInfo.error.empty()) {
+        napi_value err = nullptr;
+        napi_create_string_utf8(env, frameInfo.error.c_str(), NAPI_AUTO_LENGTH, &err);
+        napi_set_named_property(env, result, "error", err);
+    }
+    napi_value bytes = nullptr;
+    napi_create_int64(env, SoftSession()->bytesFetched(), &bytes);
+    napi_set_named_property(env, result, "bytesFetched", bytes);
+
+    bool rendered = false;
+    std::string renderError;
+    if (ok && !rgba.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+            SoftLastFrame() = rgba;
+            SoftLastFrameWidth() = frameInfo.width;
+            SoftLastFrameHeight() = frameInfo.height;
+        }
+        if (SoftRenderer().isReady()) {
+            rendered = SoftRenderer().renderRgba(rgba.data(), frameInfo.width, frameInfo.height, renderError);
+            if (!rendered) {
+                napi_value err = nullptr;
+                napi_create_string_utf8(env, renderError.c_str(), NAPI_AUTO_LENGTH, &err);
+                napi_set_named_property(env, result, "renderError", err);
+            }
+        }
+    }
+    napi_value renderedValue = nullptr;
+    napi_get_boolean(env, rendered, &renderedValue);
+    napi_set_named_property(env, result, "rendered", renderedValue);
+    return result;
+}
+
+/**
+ * 回读当前渲染缓冲并写成 PNG（验证"真的渲染出来了"，与系统截图无关）。
+ *
+ * 关键：**先重绘最近一帧再回读**。`eglSwapBuffers` 之后后台缓冲内容未定义，
+ * 直接读会得到全黑（实测 1260x2619 全黑），会误判为"渲染失败"。
+ * 参数：输出路径。渲染器未就绪时退化为导出最近一帧解码结果。
+ */
+napi_value SoftPlayDumpFrame(napi_env env, napi_callback_info info)
+{
+    std::string path;
+    ReadStringArg(env, info, 0, path);
+    if (path.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "path required"));
+    }
+    nlohmann::json out;
+    std::string error;
+    bool ok = false;
+    if (SoftRenderer().isReady()) {
+        std::vector<uint8_t> pixels;
+        int w = 0;
+        int h = 0;
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        const bool hasFrame = !SoftLastFrame().empty() && SoftLastFrameWidth() > 0 &&
+                              SoftLastFrameHeight() > 0;
+        const bool readOk = hasFrame
+            ? SoftRenderer().redrawAndReadback(SoftLastFrame().data(), SoftLastFrameWidth(),
+                                               SoftLastFrameHeight(), pixels, w, h, error)
+            : SoftRenderer().readbackRgba(pixels, w, h, error);
+        if (readOk) {
+            ok = WriteRgbaPng(pixels, w, h, path, error);
+            out["source"] = hasFrame ? "glReadPixels(after-redraw)" : "glReadPixels(no-frame)";
+            out["width"] = w;
+            out["height"] = h;
+        }
+    }
+    if (!ok && error.empty()) {
+        // 退化路径：导出最近一帧解码结果（便于区分"没渲染"与"没解码"）
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        if (!SoftLastFrame().empty() && SoftLastFrameWidth() > 0 && SoftLastFrameHeight() > 0) {
+            ok = WriteRgbaPng(SoftLastFrame(), SoftLastFrameWidth(), SoftLastFrameHeight(), path,
+                              error);
+            out["source"] = "last-decoded-frame";
+            out["width"] = SoftLastFrameWidth();
+            out["height"] = SoftLastFrameHeight();
+        }
+    }
+    // 对照导出：无论上面成功与否，都把"最近解码帧"另存一份，
+    // 从而能区分"解码出来就是黑"与"解码正常但绘制/回读没出内容"（本轮排查所需）。
+    {
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        if (!SoftLastFrame().empty() && SoftLastFrameWidth() > 0 && SoftLastFrameHeight() > 0) {
+            const std::string decodedPath = path + ".decoded.png";
+            std::string decodedError;
+            if (WriteRgbaPng(SoftLastFrame(), SoftLastFrameWidth(), SoftLastFrameHeight(), decodedPath,
+                             decodedError)) {
+                out["decodedFramePath"] = decodedPath;
+                out["decodedFrameWidth"] = SoftLastFrameWidth();
+                out["decodedFrameHeight"] = SoftLastFrameHeight();
+            } else {
+                out["decodedFrameError"] = decodedError;
+            }
+        }
+    }
+    out["ok"] = ok;
+    if (!error.empty()) {
+        out["error"] = error;
+    }
+    return ToNapiJson(env, MakeResult(ok, ok ? 200 : 0, ok ? "ok" : error, out));
+}
+
+napi_value SoftPlayStatus(napi_env env, napi_callback_info /*info*/)
+{
+    nlohmann::json out;
+    out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
+    if (SoftSession() != nullptr) {
+        out["open"] = SoftSession()->isOpen();
+        out["videoCodec"] = SoftSession()->videoCodec();
+        out["container"] = SoftSession()->container();
+        out["width"] = SoftSession()->width();
+        out["height"] = SoftSession()->height();
+        out["durationSec"] = SoftSession()->durationSec();
+        out["framesDecoded"] = SoftSession()->framesDecoded();
+        out["bytesFetched"] = SoftSession()->bytesFetched();
+    } else {
+        out["open"] = false;
+    }
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
+/**
+ * 渲染目标判定（无需开始播放）：给 surfaceId 就初始化 EGL 并跑一次"清屏为红 + 回读"自检。
+ * 用途：打开播放页即可自动判定该设备/该 XComponent 类型能否作为 GL 渲染目标，
+ * 不依赖任何播放状态与控制条交互（设备自动化下最可靠）。
+ */
+napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
+{
+    std::string surfaceIdText;
+    int64_t width = 0;
+    int64_t height = 0;
+    std::string renderMode;
+    ReadStringArg(env, info, 0, surfaceIdText);
+    ReadIntArg(env, info, 1, width);
+    ReadIntArg(env, info, 2, height);
+    ReadStringArg(env, info, 3, renderMode);
+
+    nlohmann::json out;
+    out["mode"] = renderMode.empty() ? "surface" : renderMode;
+    if (surfaceIdText.empty()) {
+        out["ok"] = false;
+        out["error"] = "surfaceId 为空（surface 尚未就绪）";
+        return ToNapiJson(env, MakeResult(false, 0, "surfaceId required", out));
+    }
+    uint64_t surfaceId = 0;
+    try {
+        surfaceId = std::stoull(surfaceIdText);
+    } catch (...) {
+        surfaceId = 0;
+    }
+    if (surfaceId == 0) {
+        out["ok"] = false;
+        out["error"] = "surfaceId 解析为 0";
+        return ToNapiJson(env, MakeResult(false, 0, "invalid surfaceId", out));
+    }
+
+    std::string initError;
+    bool ready = false;
+    if (out["mode"] == "texture") {
+        ready = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId), initError,
+                                               static_cast<int>(width), static_cast<int>(height));
+    } else {
+        ready = SoftRenderer().init(surfaceId, initError, static_cast<int>(width),
+                                    static_cast<int>(height));
+    }
+    out["rendererReady"] = ready;
+    if (!ready) {
+        out["ok"] = false;
+        out["error"] = initError.empty() ? "EGL 初始化失败" : initError;
+        return ToNapiJson(env, MakeResult(false, 0, out["error"].get<std::string>(), out));
+    }
+    std::string report;
+    const bool renderable = SoftRenderer().selfTest(report);
+    out["ok"] = renderable;
+    out["renderable"] = renderable;
+    out["report"] = report;
+    // 探测是一次性的：测完立刻销毁 EGL/NativeImage，避免它与随后软解播放的初始化叠加。
+    // （实测：对同一个 textureId 重复 OH_NativeImage_Create 会让后续 eglSwapBuffers 报 0x12301）
+    SoftRenderer().destroy();
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
+/** 渲染自检：清屏为红并回读，判断 surface 能否作为 GL 渲染目标 */
+napi_value SoftPlaySelfTest(napi_env env, napi_callback_info /*info*/)
+{
+    nlohmann::json out;
+    out["rendererReady"] = SoftRenderer().isReady();
+    if (!SoftRenderer().isReady()) {
+        out["ok"] = false;
+        out["error"] = "渲染器未就绪（EGL 未初始化）";
+        return ToNapiJson(env, MakeResult(false, 0, "renderer not ready", out));
+    }
+    std::string report;
+    const bool ok = SoftRenderer().selfTest(report);
+    out["ok"] = ok;
+    out["report"] = report;
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
+napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
+{
+    if (SoftSession() != nullptr) {
+        SoftSession()->close();
+        SoftSession().reset();
+    }
+    return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"closed", true}}));
+}
+
+/**
+ * 软解码探测：解析播放地址 → 取文件前缀字节 → 用 FFmpeg 软解出前若干帧。
+ *
+ * 用途：
+ *  - 设备上验证 FFmpeg 软解链路（系统 AVPlayer 解不了的编码，如模拟器上的 HEVC）
+ *  - 为后续"硬解失败自动回落软解"提供能力探测
+ *
+ * 参数：itemId, cacheDir（可写目录，用于落盘首帧 PNG；可为空）, optionsJson（同 playerOpen）
+ * 返回：{ok, ffmpegAvailable, playMethod, httpStatus, bytesFetched,
+ *        container, videoCodec, audioCodec, width, height, pixelFormat,
+ *        durationSec, bitRate, decodedFrames, framePngPath, error}
+ */
+napi_value PlayerSoftDecodeProbe(napi_env env, napi_callback_info info)
+{
+    EnsureRangeFetcher();
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string itemId;
+    std::string cacheDir;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, cacheDir);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "itemId required"));
+    }
+    nlohmann::json optionsJson;
+    ReadJsonArg(env, info, 2, optionsJson);
+    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const std::string userId = session.userId();
+
+    return RunAsync(env, [userId, itemId, cacheDir, options]() {
+        nlohmann::json out;
+        out["ffmpegAvailable"] = jellyfin::player::FfmpegDecoder::available();
+
+        // 1) 解析播放地址（与 playerOpen 走同一条 PlaybackInfo + 策略解析路径）
+        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        if (!playback.ok()) {
+            out["ok"] = false;
+            out["error"] = "获取播放信息失败：" + playback.error.message;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        if (playback.data.is_object() && !playback.data.contains("ItemId")) {
+            playback.data["ItemId"] = itemId;
+        }
+        auto &sess = jellyfin::SessionManager::instance();
+        jellyfin::player::PlaybackSession pbSession;
+        std::string resolveError;
+        if (!jellyfin::player::ResolvePlaybackSession(playback.data, sess.baseUrl(), sess.accessToken(),
+                                                     pbSession, resolveError)) {
+            out["ok"] = false;
+            out["error"] = resolveError.empty() ? "无法解析播放地址" : resolveError;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        out["playMethod"] = jellyfin::player::PlayMethodToString(pbSession.method);
+        out["container"] = pbSession.container;
+        out["videoCodec"] = pbSession.videoCodec;
+        out["audioCodec"] = pbSession.audioCodec;
+
+        // 2) 取文件前缀：探测只需容器头 + 前若干帧，避免整片下载；
+        //    用 Range 请求，失败（如服务器不支持）则退化为普通 GET
+        constexpr size_t kPrefixBytes = 8u * 1024u * 1024u;
+        jellyfin::HttpClient http;
+        http.setReadTimeoutSec(60);
+        jellyfin::HttpHeaders headers;
+        headers["Range"] = "bytes=0-" + std::to_string(kPrefixBytes - 1);
+        jellyfin::HttpResponse resp = http.get(pbSession.playUrl, headers);
+        if (resp.status >= 400 || resp.body.size() < 1024) {
+            jellyfin::HttpResponse plain = http.get(pbSession.playUrl, {});
+            if (plain.status < 400 && plain.body.size() >= 1024) {
+                resp = plain;
+            }
+        }
+        out["httpStatus"] = resp.status;
+        out["bytesFetched"] = static_cast<double>(resp.body.size());
+        if (resp.body.size() < 1024) {
+            out["ok"] = false;
+            out["error"] = resp.error.empty()
+                ? ("取流失败：HTTP " + std::to_string(resp.status) + "，仅取到 " +
+                   std::to_string(resp.body.size()) + " 字节")
+                : ("取流失败：" + resp.error);
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+
+        // 3) FFmpeg 软解
+        std::vector<uint8_t> data(resp.body.begin(), resp.body.end());
+        std::string pngPath;
+        if (!cacheDir.empty()) {
+            pngPath = cacheDir + "/softdecode_probe.png";
+        }
+        jellyfin::player::FfmpegDecoder::ProbeResult result;
+        jellyfin::player::FfmpegDecoder::probeFromMemory(data, pngPath, result, 3);
+
+        out["ok"] = result.ok;
+        out["backend"] = result.backend;
+        out["decodedFrames"] = result.decodedFrames;
+        out["framePngPath"] = result.framePngPath;
+        if (!result.error.empty()) {
+            out["error"] = result.error;
+        }
+        if (result.ok) {
+            out["container"] = result.container.empty() ? out["container"] : nlohmann::json(result.container);
+            out["videoCodec"] = result.videoCodec.empty() ? out["videoCodec"] : nlohmann::json(result.videoCodec);
+            if (!result.audioCodec.empty()) {
+                out["audioCodec"] = result.audioCodec;
+            }
+            out["width"] = result.width;
+            out["height"] = result.height;
+            out["pixelFormat"] = result.pixelFormat;
+            out["durationSec"] = result.durationSec;
+            out["bitRate"] = result.bitRate;
+        }
+        return MakeResult(true, 200, "ok", out).dump();
+    });
+}
+
 napi_value PlayerOpen(napi_env env, napi_callback_info info)
 {
     auto &session = jellyfin::SessionManager::instance();
@@ -995,8 +1621,7 @@ napi_value PlayerOpen(napi_env env, napi_callback_info info)
         if (!playback.ok()) {
             return FromApi(playback).dump();
         }
-        if (playback.data.is_object() && !playback.data.contains("ItemId")) {
-            playback.data["ItemId"] = itemId;
+        if (playback.data.is_object() && !playback.data.contains("ItemId")) {            playback.data["ItemId"] = itemId;
         }
 
         auto &session = jellyfin::SessionManager::instance();
@@ -1319,6 +1944,35 @@ napi_value SetImageCacheDir(napi_env env, napi_callback_info info)
     return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"dir", dir}}));
 }
 
+/**
+ * 配置 HTTPS 用的 CA 根证书 PEM 路径（应用自带 Mozilla CA bundle，脱机可用）。
+ * 未配置时 https 连接会明确失败（TLS 层要求校验证书与主机名），不会静默跳过校验。
+ */
+napi_value SetCaBundlePath(napi_env env, napi_callback_info info)
+{
+    std::string path;
+    ReadStringArg(env, info, 0, path);
+    if (path.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "path required"));
+    }
+    const bool ok = jellyfin::TlsSession::SetCaBundlePath(path);
+    nlohmann::json data = {
+        {"path", path},
+        {"loaded", ok},
+    };
+    if (!ok) {
+        return ToNapiJson(env, MakeResult(false, 0, "CA bundle 解析失败（文件缺失或不是 PEM）", data));
+    }
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
+}
+
+/** 查询 CA 根证书是否已加载（诊断用） */
+napi_value HasCaBundle(napi_env env, napi_callback_info /*info*/)
+{
+    return ToNapiJson(env, MakeResult(true, 200, "ok",
+                                     nlohmann::json{{"loaded", jellyfin::TlsSession::HasCaBundle()}}));
+}
+
 napi_value LoadImage(napi_env env, napi_callback_info info)
 {
     std::string url;
@@ -1351,6 +2005,20 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"setDeviceId", nullptr, SetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"playerSoftDecodeProbe", nullptr, PlayerSoftDecodeProbe, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"softPlayOpen", nullptr, SoftPlayOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"softPlayNextFrame", nullptr, SoftPlayNextFrame, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlayStatus", nullptr, SoftPlayStatus, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlayClose", nullptr, SoftPlayClose, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"softPlayDumpFrame", nullptr, SoftPlayDumpFrame, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlaySelfTest", nullptr, SoftPlaySelfTest, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"renderTargetProbe", nullptr, RenderTargetProbe, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreSession", nullptr, RestoreSession, nullptr, nullptr, nullptr, napi_default,
@@ -1417,6 +2085,9 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getImageUrl", nullptr, GetImageUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setImageCacheDir", nullptr, SetImageCacheDir, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"setCaBundlePath", nullptr, SetCaBundlePath, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"hasCaBundle", nullptr, HasCaBundle, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadImage", nullptr, LoadImage, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearImageCache", nullptr, ClearImageCache, nullptr, nullptr, nullptr, napi_default,
          nullptr},
