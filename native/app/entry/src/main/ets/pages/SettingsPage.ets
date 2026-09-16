@@ -442,7 +442,9 @@ export struct SettingsPage {
   private async clearLocalData(): Promise<void> {
     this.showClearDataConfirm = false;
     await SessionStore.clearAll();
+    // 同时清掉内存中的会话与服务器地址，避免刚清除后界面仍显示上一次的配置
     AppViewModel.getInstance().resetAuth();
+    AppViewModel.getInstance().setServer('');
     router.replaceUrl({ url: 'pages/ServerPage' });
   }
 
