@@ -165,4 +165,17 @@ export class SessionStore {
       return '';
     }
   }
+
+  /** 清除全部本地数据（会话、服务器地址、偏好、隐私同意状态）——上架合规的"数据清除"入口使用 */
+  static async clearAll(): Promise<void> {
+    if (SessionStore.pref === null) {
+      return;
+    }
+    try {
+      await SessionStore.pref.clear();
+      await SessionStore.pref.flush();
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'clearAll failed: %{public}s', JSON.stringify(error));
+    }
+  }
 }

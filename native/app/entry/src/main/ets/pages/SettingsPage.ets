@@ -47,6 +47,7 @@ export struct SettingsPage {
   @State private serverVersion: string = '';
   @State private showLogoutConfirm: boolean = false;
   @State private showChangeServerConfirm: boolean = false;
+  @State private showClearDataConfirm: boolean = false;
   @State private showPlayerPicker: boolean = false;
   @State private defaultPlayer: string = 'native';
   // 服务器用户配置开关
@@ -377,53 +378,72 @@ export struct SettingsPage {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** Flutter _MenuTile：dense ListTile，leading primary 图标，trailing chevron */
+  /**
+   * 设置行（菜单型）—— 对齐 mybooks_ohos 的 `SettingCell`：
+   * 标题 16fp `text_primary`、副标题 12fp `text_secondary`、尾部 chevron 16fp `text_tertiary`、
+   * 四边 16vp 内边距、按下态 `surface_pressed`。
+   */
   @Builder
   MenuTile(icon: string, title: string, subtitle: string, onTap: () => void) {
     Row({ space: 12 }) {
       SymbolGlyph(this.iconResource(icon))
         .fontSize(20)
-        .fontColor([this.colors().primary])
+        .fontColor([this.colors().brandPrimary])
         .width(28)
-      Column({ space: 2 }) {
+      Column({ space: 4 }) {
         Text(title)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
-        Text(subtitle)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
+        if (subtitle.length > 0) {
+          Text(subtitle)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(18)
-        .fontColor([this.colors().onSurfaceVariant])
+        .fontSize(16)
+        .fontColor([this.colors().textTertiary])
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding(ThemeConstants.PAGE_PADDING)
+    .stateStyles({
+      pressed: {
+        .backgroundColor(this.colors().surfacePressed)
+      }
+    })
     .onClick(() => {
       onTap();
     })
   }
 
-  /** Flutter _InfoTile：无图标，label 左、值右对齐 */
+  /** 信息行 —— 对齐参考项目 `SettingCell` 的 valueText 分支（label 16fp 主色、值 14fp 次级） */
   @Builder
   InfoTile(label: string, value: string) {
     Row() {
       Text(label)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
         .layoutWeight(1)
       Text(value)
-        .fontSize(ThemeConstants.LABEL_SMALL)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontColor(this.colors().textSecondary)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding(ThemeConstants.PAGE_PADDING)
+  }
+
+  /** 清除全部本地数据并回到服务器配置页（上架合规入口） */
+  private async clearLocalData(): Promise<void> {
+    this.showClearDataConfirm = false;
+    await SessionStore.clearAll();
+    AppViewModel.getInstance().resetAuth();
+    router.replaceUrl({ url: 'pages/ServerPage' });
   }
 
   private onSectionItemTap(child: SettingsItem): void {
@@ -435,6 +455,8 @@ export struct SettingsPage {
       this.showChangeServerConfirm = true;
     } else if (action === 'defaultPlayer') {
       this.showPlayerPicker = true;
+    } else if (action === 'clearLocalData') {
+      this.showClearDataConfirm = true;
     } else if (route.length > 0) {
       const titleParam: string = child.titleParam === undefined ? '' : child.titleParam;
       const pathParam: string = child.pathParam === undefined ? '' : child.pathParam;
@@ -451,7 +473,10 @@ export struct SettingsPage {
     }
   }
 
-  /** Flutter _SectionCard：头部 icon18 primary + 14 bold 标题；条目间通栏 1px 分隔线 */
+  /**
+   * 设置分组卡片 —— 对齐参考项目：头部「图标 + 标题 16fp Medium」，
+   * 组内行为 `SettingCell` 风格、条目间一律 **0.5vp `divider`**（参考项目全站只有这一种分隔线）。
+   */
   @Builder
   SectionCard(title: string, icon: string, children: SettingsItem[]) {
     Column() {
@@ -460,17 +485,23 @@ export struct SettingsPage {
           .fontSize(18)
           .fontColor([this.colors().primary])
         Text(title)
-          .fontSize(ThemeConstants.TITLE_SMALL)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().textPrimary)
+          .layoutWeight(1)
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 4 })
+      .padding({
+        left: ThemeConstants.PAGE_PADDING,
+        right: ThemeConstants.PAGE_PADDING,
+        top: 14,
+        bottom: 10
+      })
       ForEach(children, (child: SettingsItem, index: number) => {
         if (index > 0) {
           Divider()
-            .color(this.colors().outline)
-            .strokeWidth(1)
+            .color(this.colors().divider)
+            .strokeWidth(0.5)
         }
         if (child.info === true) {
           this.InfoTile(child.title, child.subtitle)
@@ -482,36 +513,40 @@ export struct SettingsPage {
       }, (_child: SettingsItem, index: number) => `${title}_${index}`)
     }
     .width('100%')
-    .backgroundColor(this.colors().surface)
-    .borderRadius(12)
+    .backgroundColor(this.colors().cardBackground)
+    .borderRadius(ThemeConstants.CARD_RADIUS)
     .clip(true)
-    .margin({ left: 16, right: 16, bottom: 8 })
+    .margin({
+      left: ThemeConstants.PAGE_PADDING,
+      right: ThemeConstants.PAGE_PADDING,
+      bottom: ThemeConstants.CARD_STACK_SPACE
+    })
   }
 
-  /** Flutter SwitchListTile：标题 + 副标题 + 尾部 Switch */
+  /** 开关行 —— 对齐参考项目 `SettingCell` 的 toggle 分支（16/12 文案 + 品牌色开关） */
   @Builder
   ToggleRow(title: string, subtitle: string, isOn: boolean, onChange: (v: boolean) => void) {
     Row({ space: 12 }) {
-      Column({ space: 2 }) {
+      Column({ space: 4 }) {
         Text(title)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
         if (subtitle.length > 0) {
           Text(subtitle)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: isOn })
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .onChange((v: boolean) => {
           onChange(v);
         })
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding(ThemeConstants.PAGE_PADDING)
   }
 
   build() {
@@ -578,8 +613,8 @@ export struct SettingsPage {
                 })
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
-            .borderRadius(12)
+            .backgroundColor(this.colors().cardBackground)
+            .borderRadius(ThemeConstants.CARD_RADIUS)
             .clip(true)
             .margin({ left: 16, right: 16, bottom: 8 })
           }
@@ -607,7 +642,7 @@ export struct SettingsPage {
                   this.enableNextEpisodeAutoPlay = v;
                   this.saveUserField('EnableNextEpisodeAutoPlay', v);
                 })
-              Divider().color(this.colors().outline).strokeWidth(1)
+              Divider().color(this.colors().divider).strokeWidth(0.5)
               this.ToggleRow('\u8bb0\u4f4f\u97f3\u9891\u9009\u62e9', '',
                 this.rememberAudioSelections, (v: boolean) => {
                   this.rememberAudioSelections = v;
@@ -615,8 +650,8 @@ export struct SettingsPage {
                 })
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
-            .borderRadius(12)
+            .backgroundColor(this.colors().cardBackground)
+            .borderRadius(ThemeConstants.CARD_RADIUS)
             .clip(true)
             .margin({ left: 16, right: 16, bottom: 8 })
           }
@@ -634,8 +669,8 @@ export struct SettingsPage {
                 })
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
-            .borderRadius(12)
+            .backgroundColor(this.colors().cardBackground)
+            .borderRadius(ThemeConstants.CARD_RADIUS)
             .clip(true)
             .margin({ left: 16, right: 16, bottom: 8 })
           }
@@ -653,6 +688,8 @@ export struct SettingsPage {
           this.SectionCard('\u8d26\u53f7', 'person_2', [
             { icon: 'power', title: '\u9000\u51fa\u767b\u5f55', subtitle: '\u6e05\u9664\u672c\u5730\u8d26\u53f7\u4fe1\u606f\uff0c\u4fdd\u7559\u670d\u52a1\u5668\u5730\u5740', action: 'logout' },
             { icon: 'arrow_2_circlepath', title: '\u66f4\u6362\u670d\u52a1\u5668', subtitle: '\u6e05\u9664\u5168\u90e8\u914d\u7f6e\u5e76\u91cd\u65b0\u8fde\u63a5', action: 'changeServer' },
+            // 上架合规：提供明确的"清除全部本地数据"入口（会话、服务器地址、偏好、隐私同意记录）
+            { icon: 'trash', title: '\u6e05\u9664\u5168\u90e8\u672c\u5730\u6570\u636e', subtitle: '\u5220\u9664\u672c\u673a\u4f1a\u8bdd\u3001\u670d\u52a1\u5668\u5730\u5740\u4e0e\u504f\u597d\uff08\u4e0d\u5f71\u54cd\u670d\u52a1\u5668\u4e0a\u7684\u6570\u636e\uff09', action: 'clearLocalData' },
           ])
 
           // 关于
@@ -674,6 +711,15 @@ export struct SettingsPage {
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
 
+      if (this.showClearDataConfirm) {
+        this.ConfirmDialog('\u6e05\u9664\u5168\u90e8\u672c\u5730\u6570\u636e',
+          '\u5c06\u5220\u9664\u672c\u673a\u4fdd\u5b58\u7684\u4f1a\u8bdd\u3001\u670d\u52a1\u5668\u5730\u5740\u3001\u504f\u597d\u4e0e\u9690\u79c1\u540c\u610f\u8bb0\u5f55\uff0c\u670d\u52a1\u5668\u4e0a\u7684\u6570\u636e\u4e0d\u53d7\u5f71\u54cd\u3002\u786e\u5b9a\u7ee7\u7eed\uff1f',
+          '\u6e05\u9664', () => {
+            this.clearLocalData();
+          }, () => {
+            this.showClearDataConfirm = false;
+          });
+      }
       if (this.showLogoutConfirm) {
         this.ConfirmDialog('\u9000\u51fa\u767b\u5f55', '\u786e\u5b9a\u8981\u9000\u51fa\u5f53\u524d\u8d26\u53f7\u5417\uff1f', '\u9000\u51fa', () => {
           this.onLogout();
