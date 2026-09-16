@@ -697,7 +697,7 @@ struct DetailPage {
             if ((this.item.type === 'Movie' || this.item.type === 'Series') && this.similar.length > 0) {
               HorizontalShelf({
                 title: '\u76f8\u4f3c\u63a8\u8350',
-                icon: '\u{1F3AC}',
+                icon: '',
                 items: this.similar,
                 shelfHeight: 235,
                 onItemTap: (it: MediaItem) => {

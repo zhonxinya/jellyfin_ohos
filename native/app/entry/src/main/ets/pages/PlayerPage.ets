@@ -9,6 +9,7 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 import { formatSeconds } from '../common/format';
 import { AppIconButton } from '../components/AppIconButton';
 import { ChipButton } from '../components/ChipButton';
+import { EmptyState } from '../components/EmptyState';
 
 @Entry
 @Component
@@ -742,22 +743,15 @@ struct PlayerPage {
 
       if (this.status === UiState.ERROR) {
         Column() {
-          Text('\u26A0\uFE0F')
-            .fontSize(ThemeConstants.EMPTY_ICON_SIZE)
-            .fontColor(this.colors().error)
-          Text(this.errorMsg)
-            .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurface)
-            .margin({ top: 16 })
-            .textAlign(TextAlign.Center)
-          Button('重试')
-            .margin({ top: 24 })
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
-            .onClick(() => {
+          // 错误态复用 EmptyState（参考项目约定：错误不另造组件，配"重试"动作）
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '播放出错',
+            actionLabel: '重试',
+            onAction: () => {
               this.stopped = false;
               this.openPlayer();
-            })
+            }
+          })
         }
         .width('100%')
         .height('100%')

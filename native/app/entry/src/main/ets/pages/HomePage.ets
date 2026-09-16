@@ -156,14 +156,14 @@ export struct HomePage {
           HeroBannerLoader()
           // 我的媒体（LibraryShelf 横滑卡片）
           if (this.librariesSection.status === UiState.LOADING) {
-            SectionHeader({ title: $r('app.string.section_libraries'), icon: '\u{1F4DA}' })
+            SectionHeader({ title: $r('app.string.section_libraries'), icon: '' })
             Column() {
               LoadingState({})
             }
             .width('100%')
             .height(ThemeConstants.SHELF_LIBRARY_HEIGHT)
           } else if (this.librariesSection.status === UiState.ERROR) {
-            SectionHeader({ title: $r('app.string.section_libraries'), icon: '\u{1F4DA}' })
+            SectionHeader({ title: $r('app.string.section_libraries'), icon: '' })
             Column() {
               EmptyState({
                 message: this.librariesSection.errorMsg,
@@ -179,27 +179,27 @@ export struct HomePage {
           } else if (this.librariesSection.items.length > 0) {
             LibraryShelf({
               title: $r('app.string.section_libraries'),
-              icon: '\u{1F4DA}',
+              icon: '',
               items: this.librariesSection.items,
               showMore: false,
               onItemTap: (item: MediaItem) => { this.openItem(item); },
               onMore: () => {}
             })
           } else {
-            SectionHeader({ title: $r('app.string.section_libraries'), icon: '\u{1F4DA}' })
+            SectionHeader({ title: $r('app.string.section_libraries'), icon: '' })
             Text('').height(12)
           }
 
           // 继续观看
           if (this.resumeSection.status === UiState.LOADING) {
-            SectionHeader({ title: $r('app.string.section_resume'), icon: '\u25B6\uFE0F' })
+            SectionHeader({ title: $r('app.string.section_resume'), icon: '' })
             Column() {
               LoadingState({})
             }
             .width('100%')
             .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
           } else if (this.resumeSection.status === UiState.ERROR) {
-            SectionHeader({ title: $r('app.string.section_resume'), icon: '\u25B6\uFE0F' })
+            SectionHeader({ title: $r('app.string.section_resume'), icon: '' })
             Column() {
               EmptyState({
                 message: this.resumeSection.errorMsg,
@@ -215,7 +215,7 @@ export struct HomePage {
           } else if (this.resumeSection.items.length > 0) {
             HorizontalShelf({
               title: $r('app.string.section_resume'),
-              icon: '\u25B6\uFE0F',
+              icon: '',
               items: this.resumeSection.items,
               shelfHeight: ThemeConstants.SHELF_MEDIA_HEIGHT,
               cardWidth: ThemeConstants.CARD_WIDTH,
@@ -224,21 +224,21 @@ export struct HomePage {
               onMore: () => { this.openBrowse('resume', '继续观看'); }
             })
           } else {
-            SectionHeader({ title: $r('app.string.section_resume'), icon: '\u25B6\uFE0F', showMore: true,
+            SectionHeader({ title: $r('app.string.section_resume'), icon: '', showMore: true,
               onMore: () => { this.openBrowse('resume', '继续观看'); } })
             Text('').height(12)
           }
 
           // 接下来
           if (this.nextUpSection.status === UiState.LOADING) {
-            SectionHeader({ title: $r('app.string.section_next_up'), icon: '\u{1F4FA}' })
+            SectionHeader({ title: $r('app.string.section_next_up'), icon: '' })
             Column() {
               LoadingState({})
             }
             .width('100%')
             .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
           } else if (this.nextUpSection.status === UiState.ERROR) {
-            SectionHeader({ title: $r('app.string.section_next_up'), icon: '\u{1F4FA}' })
+            SectionHeader({ title: $r('app.string.section_next_up'), icon: '' })
             Column() {
               EmptyState({
                 message: this.nextUpSection.errorMsg,
@@ -254,7 +254,7 @@ export struct HomePage {
           } else if (this.nextUpSection.items.length > 0) {
             HorizontalShelf({
               title: $r('app.string.section_next_up'),
-              icon: '\u{1F4FA}',
+              icon: '',
               items: this.nextUpSection.items,
               shelfHeight: ThemeConstants.SHELF_MEDIA_HEIGHT,
               cardWidth: ThemeConstants.CARD_WIDTH,
@@ -263,21 +263,21 @@ export struct HomePage {
               onMore: () => { this.openBrowse('nextUp', '接下来'); }
             })
           } else {
-            SectionHeader({ title: $r('app.string.section_next_up'), icon: '\u{1F4FA}', showMore: true,
+            SectionHeader({ title: $r('app.string.section_next_up'), icon: '', showMore: true,
               onMore: () => { this.openBrowse('nextUp', '接下来'); } })
             Text('').height(12)
           }
 
           // 最新添加
           if (this.latestSection.status === UiState.LOADING) {
-            SectionHeader({ title: $r('app.string.section_latest'), icon: '\u{1F195}' })
+            SectionHeader({ title: $r('app.string.section_latest'), icon: '' })
             Column() {
               LoadingState({})
             }
             .width('100%')
             .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
           } else if (this.latestSection.status === UiState.ERROR) {
-            SectionHeader({ title: $r('app.string.section_latest'), icon: '\u{1F195}' })
+            SectionHeader({ title: $r('app.string.section_latest'), icon: '' })
             Column() {
               EmptyState({
                 message: this.latestSection.errorMsg,
@@ -293,7 +293,7 @@ export struct HomePage {
           } else if (this.latestSection.items.length > 0) {
             HorizontalShelf({
               title: $r('app.string.section_latest'),
-              icon: '\u{1F195}',
+              icon: '',
               items: this.latestSection.items,
               shelfHeight: ThemeConstants.SHELF_MEDIA_HEIGHT,
               cardWidth: ThemeConstants.CARD_WIDTH,
@@ -302,7 +302,7 @@ export struct HomePage {
               onMore: () => { this.openBrowse('latest', '最新添加'); }
             })
           } else {
-            SectionHeader({ title: $r('app.string.section_latest'), icon: '\u{1F195}', showMore: true,
+            SectionHeader({ title: $r('app.string.section_latest'), icon: '', showMore: true,
               onMore: () => { this.openBrowse('latest', '最新添加'); } })
             Text('').height(12)
           }

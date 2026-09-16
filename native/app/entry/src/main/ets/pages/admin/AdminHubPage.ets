@@ -35,9 +35,9 @@ struct AdminHubPage {
     },
     {
       title: '服务器',
-      icon: '\u{2699}\uFE0F',
+      icon: 'gearshape',
       links: [
-        { title: '系统信息', subtitle: '查看服务器版本和运行环境', icon: '\u{2139}\uFE0F', url: 'pages/admin/SystemInfoPage' },
+        { title: '系统信息', subtitle: '查看服务器版本和运行环境', icon: 'info_circle', url: 'pages/admin/SystemInfoPage' },
         { title: '计划任务', subtitle: '查看和管理后台任务', icon: 'timer', url: 'pages/admin/TasksPage' },
         { title: '日志', subtitle: '查看服务器运行日志', icon: 'doc_text', url: 'pages/admin/LogsPage' },
         { title: '活动', subtitle: '查看服务器活动记录', icon: 'clock', url: 'pages/admin/ActivityPage' },
@@ -51,8 +51,8 @@ struct AdminHubPage {
       icon: 'video',
       links: [
         { title: '媒体库管理', subtitle: '管理虚拟文件夹和媒体路径', icon: 'folder', url: 'pages/admin/LibrariesAdminPage' },
-        { title: '媒体库显示', subtitle: '设置媒体库显示方式', icon: '\u{1F441}\uFE0F', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/library', titleParam: '媒体库显示' },
-        { title: '媒体库设置', subtitle: '配置虚拟媒体库', icon: '\u{1F5C2}\uFE0F', url: 'pages/admin/AdminGenericPage', path: '/Library/VirtualFolders', titleParam: '媒体库设置' },
+        { title: '媒体库显示', subtitle: '设置媒体库显示方式', icon: 'display', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/library', titleParam: '媒体库显示' },
+        { title: '媒体库设置', subtitle: '配置虚拟媒体库', icon: 'folder', url: 'pages/admin/AdminGenericPage', path: '/Library/VirtualFolders', titleParam: '媒体库设置' },
         { title: '用户元数据', subtitle: '管理用户媒体元数据', icon: 'doc_text', url: 'pages/admin/UsersMetadataPage' },
         { title: '媒体库元数据', subtitle: '管理媒体库元数据', icon: 'doc_text', url: 'pages/admin/LibrariesMetadataPage' },
         { title: 'NFO 设置', subtitle: '配置 NFO 元数据选项', icon: 'doc_text', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/nfo', titleParam: 'NFO 设置' }
@@ -60,13 +60,13 @@ struct AdminHubPage {
     },
     {
       title: '播放与转码',
-      icon: '\u{25B6}\uFE0F',
+      icon: 'play_circle',
       links: [
         { title: '流媒体', subtitle: '查看流媒体和连接状态', icon: 'video', url: 'pages/admin/StreamingPage' },
         { title: '转码', subtitle: '配置视频转码参数', icon: 'video', url: 'pages/admin/TranscodingPage' },
-        { title: '播放设置', subtitle: '配置播放和媒体能力', icon: '\u{25B6}\uFE0F', url: 'pages/admin/PlaybackSettingsPage' },
+        { title: '播放设置', subtitle: '配置播放和媒体能力', icon: 'play_circle', url: 'pages/admin/PlaybackSettingsPage' },
         { title: '继续观看', subtitle: '配置继续观看行为', icon: 'arrow_2_circlepath', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration', titleParam: '继续观看' },
-        { title: 'Trickplay', subtitle: '配置预览缩略图选项', icon: '\u{1F39E}\uFE0F', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/trickplay', titleParam: 'Trickplay' }
+        { title: 'Trickplay', subtitle: '配置预览缩略图选项', icon: 'video', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/trickplay', titleParam: 'Trickplay' }
       ]
     },
     {

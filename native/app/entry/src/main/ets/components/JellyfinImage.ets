@@ -16,14 +16,15 @@ export struct JellyfinImage {
     return AppViewModel.getInstance().colors();
   }
 
-  private iconText(): string {
+  /** 占位图标 —— 用系统符号（原来返回 📚/👤/🎬 emoji 文本） */
+  private iconResource(): Resource {
     if (this.placeholderIcon === 'library') {
-      return '\u{1F4DA}';
+      return $r('sys.symbol.folder');
     }
     if (this.placeholderIcon === 'person') {
-      return '\u{1F464}';
+      return $r('sys.symbol.person');
     }
-    return '\u{1F3AC}';
+    return $r('sys.symbol.video');
   }
 
   @Builder
@@ -35,9 +36,9 @@ export struct JellyfinImage {
           .height(24)
           .color(this.colors().primary)
       } else {
-        Text(this.iconText())
+        SymbolGlyph(this.iconResource())
           .fontSize(Math.min(40, Math.max(24, Math.floor(Math.min(this.imgWidth, this.imgHeight) / 4))))
-          .fontColor(this.colors().outline)
+          .fontColor([this.colors().textTertiary])
       }
     }
     .width(this.imgWidth)

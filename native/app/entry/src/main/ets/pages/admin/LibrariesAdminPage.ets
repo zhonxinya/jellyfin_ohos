@@ -227,8 +227,9 @@ struct LibrariesAdminPage {
         Column({ space: 4 }) {
           ForEach(folder.paths, (p: string) => {
             Row() {
-              Text('\u{1F4C1}')
-                .fontSize(ThemeConstants.BODY_MEDIUM)
+              SymbolGlyph($r('sys.symbol.folder'))
+                .fontSize(ThemeConstants.ICON_SMALL)
+                .fontColor([this.colors().textTertiary])
               Text(p)
                 .fontSize(ThemeConstants.META_SMALL)
                 .fontColor(this.colors().textSecondary)

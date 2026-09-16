@@ -126,7 +126,7 @@ struct PersonPage {
   @Builder
   WorksContent() {
     Column() {
-      SectionHeader({ title: $r('app.string.person_works'), icon: '\u{1F3AC}' })
+      SectionHeader({ title: $r('app.string.person_works'), icon: '' })
       if (this.worksStatus === UiState.LOADING) {
         AsyncStateView({ status: UiState.LOADING, minHeight: 120 })
       } else if (this.worksStatus === UiState.ERROR) {
