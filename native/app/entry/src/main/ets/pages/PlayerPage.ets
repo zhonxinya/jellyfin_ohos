@@ -1004,29 +1004,32 @@ struct PlayerPage {
 
   @Builder
   GestureFeedback() {
-    Column() {
+    // 横向 HUD：图标在左、数值与进度在右。
+    // 原来是纵向堆叠且无形状边界，在明暗画面之间观感松散；改成胶囊状 HUD 更聚焦、
+    // 也更符合主流播放器"手势反馈是瞬时浮层"的定位。
+    Row({ space: 12 }) {
       SymbolGlyph(this.gestureSymbol())
         .fontSize(ThemeConstants.ICON_HERO)
         .fontColor([this.colors().onOverlay])
-      Text(this.gestureFeedback)
-        .fontSize(ThemeConstants.TITLE_MEDIUM)
-        .fontColor(this.colors().onOverlay)
-        .margin({ top: 8 })
-      if (this.gestureRatio >= 0) {
-        Progress({ value: this.gestureRatio * 100, total: 100, type: ProgressType.Linear })
-          .width(140)
-          .height(4)
-          .color(this.colors().brandPrimary)
-          .backgroundColor(this.colors().onOverlayMuted)
-          .margin({ top: 8 })
+      Column({ space: 6 }) {
+        Text(this.gestureFeedback)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().onOverlay)
+        if (this.gestureRatio >= 0) {
+          Progress({ value: this.gestureRatio * 100, total: 100, type: ProgressType.Linear })
+            .width(140)
+            .height(4)
+            .color(this.colors().brandPrimary)
+            .backgroundColor(this.colors().onOverlayMuted)
+        }
       }
+      .alignItems(HorizontalAlign.Start)
     }
-    .width(200)
-    .padding(16)
+    .padding({ left: 18, right: 20, top: 14, bottom: 14 })
     .backgroundColor(this.colors().overlayControlStrong)
-    .borderRadius(12)
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
+    .borderRadius(28)
+    .alignItems(VerticalAlign.Center)
   }
 
   build() {
@@ -1130,6 +1133,11 @@ struct PlayerPage {
               if (Math.abs(this.seekDragMs) > 100 && this.avPlayer !== null) {
                 this.avPlayer.seek(this.positionMs);
               }
+              // 文件探针：手势结束时记录一次结果，便于设备验证直接确认"手势确实被识别"
+              // （进度条/浮层这类瞬时 UI 无法用读屏稳定观察）
+              this.appendProbeFile('player_gesture.txt',
+                `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
+                + ` positionMs=${this.positionMs}\n`);
               this.seekDragMs = 0;
               this.dismissFeedback();
             }
