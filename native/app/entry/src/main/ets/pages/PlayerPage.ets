@@ -854,14 +854,29 @@ struct PlayerPage {
 
   @Builder
   LockedOverlay() {
-    Column() {
-      SymbolGlyph($r('sys.symbol.lock'))
-        .fontSize(ThemeConstants.ICON_XXL)
-        .fontColor([this.colors().onOverlay])
-      Text('已锁定，点击解锁')
+    Column({ space: 6 }) {
+      // 圆形解锁按钮：品牌色 + 明确图标，让"下一步该点哪里"一目了然
+      // （原来只有一行小字提示，用户得先读懂文案才知道能点）
+      Button({ type: ButtonType.Circle, stateEffect: true }) {
+        SymbolGlyph($r('sys.symbol.lock'))
+          .fontSize(26)
+          .fontColor([this.colors().onBrand])
+      }
+      .width(64)
+      .height(64)
+      .backgroundColor(this.colors().brandPrimary)
+      .margin({ bottom: 8 })
+      .onClick(() => {
+        this.controlsLocked = false;
+        this.revealControls();
+      })
+      Text('屏幕已锁定')
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontColor(this.colors().onOverlay)
+      Text('点击任意位置解锁')
         .fontSize(ThemeConstants.META_SMALL)
         .fontColor(this.colors().onOverlayMuted)
-        .margin({ top: 4 })
+        .margin({ top: 2 })
     }
     .width('100%')
     .height('100%')
