@@ -102,7 +102,7 @@ export struct ThemeSettingsPage {
           Circle()
             .width(10)
             .height(10)
-            .fill(this.colors().primary)
+            .fill(this.colors().brandPrimary)
         }
       }
       .width(40)
@@ -110,11 +110,11 @@ export struct ThemeSettingsPage {
       Column({ space: 2 }) {
         Text(title)
           .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
         if (subtitle.length > 0) {
           Text(subtitle)
             .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontColor(this.colors().textSecondary)
         }
       }
       .alignItems(HorizontalAlign.Start)
@@ -128,7 +128,7 @@ export struct ThemeSettingsPage {
   }
 
   private selectedStroke(selected: boolean): ResourceColor {
-    return selected ? this.colors().primary : this.colors().onSurfaceVariant;
+    return selected ? this.colors().brandPrimary : this.colors().textSecondary;
   }
 
   /** Flutter _SectionHeader：icon18 primary + 14 bold 标题 + 12 副标题 */
@@ -145,7 +145,7 @@ export struct ThemeSettingsPage {
           .fontColor(this.colors().textPrimary)
         Text(subtitle)
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontColor(this.colors().textSecondary)
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
@@ -167,7 +167,7 @@ export struct ThemeSettingsPage {
         LoadingProgress()
           .width(40)
           .height(40)
-          .color(this.colors().primary)
+          .color(this.colors().brandPrimary)
           .margin({ top: 120 })
       } else {
         Scroll() {
@@ -181,7 +181,7 @@ export struct ThemeSettingsPage {
               }, (mode: ThemeOption) => mode.value)
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
+            .backgroundColor(this.colors().cardBackground)
             .borderRadius(12)
             .clip(true)
             .margin({ left: 16, right: 16 })
@@ -196,7 +196,7 @@ export struct ThemeSettingsPage {
               }, (accent: AccentOption) => accent.value)
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
+            .backgroundColor(this.colors().cardBackground)
             .borderRadius(12)
             .clip(true)
             .margin({ left: 16, right: 16 })
@@ -214,6 +214,6 @@ export struct ThemeSettingsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
   }
 }

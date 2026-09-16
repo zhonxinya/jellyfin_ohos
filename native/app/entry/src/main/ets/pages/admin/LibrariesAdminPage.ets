@@ -204,7 +204,7 @@ struct LibrariesAdminPage {
       Row() {
         Text(collectionLabel(folder.collectionType))
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onPrimary)
+          .fontColor(this.colors().onBrand)
           .padding({ left: 8, right: 8, top: 2, bottom: 2 })
           .backgroundColor(collectionBadgeColor(folder.collectionType, this.colors()))
           .borderRadius(6)
@@ -212,7 +212,7 @@ struct LibrariesAdminPage {
         Text(folder.name)
           .fontSize(ThemeConstants.BODY_MEDIUM)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .layoutWeight(1)
           .margin({ left: 8 })
           .maxLines(1)
@@ -268,7 +268,7 @@ struct LibrariesAdminPage {
           .height(36)
           .padding({ left: 16, right: 16 })
           .backgroundColor(this.colors().destructive)
-          .fontColor(this.colors().onPrimary)
+          .fontColor(this.colors().onBrand)
           .enabled(!this.actionBusy)
           .onClick(() => {
             this.requestDelete(folder);
@@ -319,7 +319,7 @@ struct LibrariesAdminPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.actionMessage.length > 0 && !this.showAddForm && !this.showDeleteConfirm) {
         Text(this.actionMessage)
@@ -333,8 +333,8 @@ struct LibrariesAdminPage {
           .width(56)
           .height(56)
           .fontSize(ThemeConstants.ICON_XXL)
-          .fontColor(this.colors().onPrimary)
-          .backgroundColor(this.colors().primary)
+          .fontColor(this.colors().onBrand)
+          .backgroundColor(this.colors().brandPrimary)
           .borderRadius(28)
           .position({ x: '90%', y: '85%' })
           .enabled(!this.actionBusy)
@@ -349,7 +349,7 @@ struct LibrariesAdminPage {
           Column({ space: 12 }) {
             Text('添加媒体库')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             TextInput({ text: this.libraryName, placeholder: '媒体库名称' })
               .width('100%')
@@ -375,16 +375,16 @@ struct LibrariesAdminPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showAddForm = false;
                   this.actionMessage = '';
                 })
               Button(this.actionBusy ? '提交中...' : '添加')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().primary)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().brandPrimary)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.addLibrary();
@@ -415,7 +415,7 @@ struct LibrariesAdminPage {
           Column({ space: 12 }) {
             Text('删除媒体库？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`将删除“${this.pendingDeleteName}”的媒体库配置，此操作不可撤销。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
@@ -424,15 +424,15 @@ struct LibrariesAdminPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showDeleteConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '删除')
                 .layoutWeight(1)
                 .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.deleteLibrary();
