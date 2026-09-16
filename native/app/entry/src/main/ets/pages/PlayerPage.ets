@@ -399,7 +399,7 @@ struct PlayerPage {
    * 于是"继续观看"、跨端续播、观看记录都不会更新——功能上等于半成品。
    * 节流策略与硬解路径保持一致（避免高频请求）。
    */
-  private reportSoftProgressThrottled(ptsSec: number): void {
+  private async reportSoftProgressThrottled(ptsSec: number): Promise<void> {
     if (this.itemId.length === 0) {
       return;
     }
@@ -408,7 +408,25 @@ struct PlayerPage {
       return;
     }
     this.lastProgressReportAt = now;
-    JellyfinNative.reportPlaybackProgress(this.itemId, Math.floor(ptsSec * 10000000), false);
+    const raw: string = await JellyfinNative.reportPlaybackProgress(this.itemId,
+      Math.floor(ptsSec * 10000000), false);
+    // 文件探针：便于设备验证时直接确认"软解路径确实上报了、服务端是否接受"
+    // （读屏对播放页不可靠，见 writeStateProbe 的说明）
+    this.appendProbeFile('player_progress.txt',
+      `softProgress pts=${ptsSec.toFixed(1)} resp=${raw.length > 160 ? raw.substring(0, 160) : raw}\n`);
+  }
+
+  /** 追加一行到沙箱诊断文件（失败不影响播放） */
+  private appendProbeFile(name: string, line: string): void {
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const file = fs.openSync(`${ctx.cacheDir}/${name}`,
+        fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.APPEND);
+      fs.writeSync(file.fd, line);
+      fs.closeSync(file);
+    } catch (err) {
+      // 诊断写入失败忽略
+    }
   }
 
   private pad2(v: number): string {
@@ -939,18 +957,10 @@ struct PlayerPage {
    * 与前面用 `softcapture.png` 验证渲染的做法一致。
    */
   private writeStateProbe(action: string): void {
-    try {
-      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-      const line: string = `${action} locked=${this.controlsLocked ? 1 : 0}`
-        + ` controls=${this.showControls ? 1 : 0} playing=${this.softPlaying ? 1 : 0}`
-        + ` status=${this.status}\n`;
-      const file = fs.openSync(`${ctx.cacheDir}/player_state.txt`,
-        fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.APPEND);
-      fs.writeSync(file.fd, line);
-      fs.closeSync(file);
-    } catch (err) {
-      // 诊断写入失败不影响播放
-    }
+    this.appendProbeFile('player_state.txt',
+      `${action} locked=${this.controlsLocked ? 1 : 0}`
+      + ` controls=${this.showControls ? 1 : 0} playing=${this.softPlaying ? 1 : 0}`
+      + ` status=${this.status}\n`);
   }
 
   /**
