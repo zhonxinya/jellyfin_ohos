@@ -10,6 +10,7 @@
 #include "api_client.h"
 #include "engine.h"
 #include "http_client.h"
+#include "http_tls.h"
 #include "image_cache.h"
 #include "image_url.h"
 #include "playback_policy.h"
@@ -1436,6 +1437,35 @@ napi_value SetImageCacheDir(napi_env env, napi_callback_info info)
     return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"dir", dir}}));
 }
 
+/**
+ * 配置 HTTPS 用的 CA 根证书 PEM 路径（应用自带 Mozilla CA bundle，脱机可用）。
+ * 未配置时 https 连接会明确失败（TLS 层要求校验证书与主机名），不会静默跳过校验。
+ */
+napi_value SetCaBundlePath(napi_env env, napi_callback_info info)
+{
+    std::string path;
+    ReadStringArg(env, info, 0, path);
+    if (path.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "path required"));
+    }
+    const bool ok = jellyfin::TlsSession::SetCaBundlePath(path);
+    nlohmann::json data = {
+        {"path", path},
+        {"loaded", ok},
+    };
+    if (!ok) {
+        return ToNapiJson(env, MakeResult(false, 0, "CA bundle 解析失败（文件缺失或不是 PEM）", data));
+    }
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
+}
+
+/** 查询 CA 根证书是否已加载（诊断用） */
+napi_value HasCaBundle(napi_env env, napi_callback_info /*info*/)
+{
+    return ToNapiJson(env, MakeResult(true, 200, "ok",
+                                     nlohmann::json{{"loaded", jellyfin::TlsSession::HasCaBundle()}}));
+}
+
 napi_value LoadImage(napi_env env, napi_callback_info info)
 {
     std::string url;
@@ -1536,6 +1566,9 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getImageUrl", nullptr, GetImageUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setImageCacheDir", nullptr, SetImageCacheDir, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"setCaBundlePath", nullptr, SetCaBundlePath, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"hasCaBundle", nullptr, HasCaBundle, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadImage", nullptr, LoadImage, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"clearImageCache", nullptr, ClearImageCache, nullptr, nullptr, nullptr, napi_default,
          nullptr},

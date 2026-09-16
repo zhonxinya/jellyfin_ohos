@@ -49,6 +49,8 @@ declare module 'libjellyfin_native.so' {
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;
     setImageCacheDir(dir: string): string;
+    setCaBundlePath(path: string): string;
+    hasCaBundle(): string;
     loadImage(url: string): string;
     clearImageCache(): string;
   }

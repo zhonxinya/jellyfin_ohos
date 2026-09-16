@@ -456,6 +456,24 @@ export class JellyfinNative {
     }
   }
 
+  /** 配置 HTTPS 用的 CA 根证书 PEM 路径（未配置则 https 连接会明确失败） */
+  static setCaBundlePath(path: string): string {
+    try {
+      return jellyfinNative.setCaBundlePath(path);
+    } catch (error) {
+      return JellyfinNative.fail('setCaBundlePath', error);
+    }
+  }
+
+  /** 查询 CA 根证书是否已加载（诊断用） */
+  static hasCaBundle(): string {
+    try {
+      return jellyfinNative.hasCaBundle();
+    } catch (error) {
+      return JellyfinNative.fail('hasCaBundle', error);
+    }
+  }
+
   static async loadImage(url: string): Promise<string> {
     try {
       return await jellyfinNative.loadImage(url);
