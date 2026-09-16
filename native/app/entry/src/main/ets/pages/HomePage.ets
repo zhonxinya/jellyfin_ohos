@@ -326,11 +326,11 @@ export struct HomePage {
       Text(label)
         .fontSize(ThemeConstants.BODY_MEDIUM)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.homeTabIndex === index ? this.colors().primary : this.colors().onSurfaceVariant)
+        .fontColor(this.homeTabIndex === index ? this.colors().brandPrimary : this.colors().textSecondary)
       Row()
         .width(index === 0 ? 28 : 56)
         .height(3)
-        .backgroundColor(this.homeTabIndex === index ? this.colors().primary : Color.Transparent)
+        .backgroundColor(this.homeTabIndex === index ? this.colors().brandPrimary : Color.Transparent)
         .borderRadius(2)
         .margin({ top: 8 })
     }
@@ -418,8 +418,8 @@ export struct HomePage {
       }
       .width('100%')
       .height(46)
-      .backgroundColor(this.colors().surface)
-      .border({ width: { bottom: 1 }, color: this.colors().outline })
+      .backgroundColor(this.colors().cardBackground)
+      .border({ width: { bottom: 1 }, color: this.colors().divider })
 
       if (this.homeTabIndex === 0) {
         this.HomeTabContent()
@@ -429,6 +429,6 @@ export struct HomePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

@@ -243,11 +243,11 @@ export struct SettingsPage {
         Text(title)
           .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
         Text(body)
           .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
         Row({ space: 8 }) {
           Blank()
@@ -255,15 +255,15 @@ export struct SettingsPage {
             .height(40)
             .padding({ left: 12, right: 12 })
             .backgroundColor(Color.Transparent)
-            .fontColor(this.colors().primary)
+            .fontColor(this.colors().brandPrimary)
             .onClick(() => {
               onCancel();
             })
           Button(confirmLabel)
             .height(40)
             .padding({ left: 16, right: 16 })
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().brandPrimary)
+            .fontColor(this.colors().onBrand)
             .onClick(() => {
               onConfirm();
             })
@@ -271,7 +271,7 @@ export struct SettingsPage {
         .width('100%')
       }
       .padding(24)
-      .backgroundColor(this.colors().surface)
+      .backgroundColor(this.colors().cardBackground)
       .borderRadius(28)
       .width('80%')
       .onClick(() => {
@@ -296,7 +296,7 @@ export struct SettingsPage {
         Text('\u9009\u62e9\u9ed8\u8ba4\u64ad\u653e\u5668')
           .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
         ForEach(PLAYER_OPTIONS, (player: PlayerOption) => {
           Row({ space: 16 }) {
@@ -305,13 +305,13 @@ export struct SettingsPage {
                 .width(20)
                 .height(20)
                 .fill(Color.Transparent)
-                .stroke(this.defaultPlayer === player.value ? this.colors().primary : this.colors().onSurfaceVariant)
+                .stroke(this.defaultPlayer === player.value ? this.colors().brandPrimary : this.colors().textSecondary)
                 .strokeWidth(2)
               if (this.defaultPlayer === player.value) {
                 Circle()
                   .width(10)
                   .height(10)
-                  .fill(this.colors().primary)
+                  .fill(this.colors().brandPrimary)
               }
             }
             .width(40)
@@ -319,10 +319,10 @@ export struct SettingsPage {
             Column({ space: 2 }) {
               Text(player.label)
                 .fontSize(ThemeConstants.BODY_MEDIUM)
-                .fontColor(this.colors().onSurface)
+                .fontColor(this.colors().textPrimary)
               Text(player.description)
                 .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontColor(this.colors().onSurfaceVariant)
+                .fontColor(this.colors().textSecondary)
             }
             .alignItems(HorizontalAlign.Start)
             .layoutWeight(1)
@@ -335,7 +335,7 @@ export struct SettingsPage {
         }, (player: PlayerOption) => player.value)
       }
       .padding(24)
-      .backgroundColor(this.colors().surface)
+      .backgroundColor(this.colors().cardBackground)
       .borderRadius(28)
       .width('80%')
       .onClick(() => {
@@ -360,26 +360,26 @@ export struct SettingsPage {
         Circle()
           .width(52)
           .height(52)
-          .fill(this.colors().surfaceElevated)
+          .fill(this.colors().surfacePressed)
         Text(AppViewModel.getInstance().userName.length > 0 ?
           AppViewModel.getInstance().userName.substring(0, 1).toUpperCase() : '?')
           .fontSize(ThemeConstants.TITLE_XLARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
       }
       Column({ space: 4 }) {
         Text(AppViewModel.getInstance().userName.length > 0 ?
           AppViewModel.getInstance().userName : '\u672a\u767b\u5f55')
           .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(AppViewModel.getInstance().serverUrl.length > 0 ?
           AppViewModel.getInstance().serverUrl + (AppViewModel.getInstance().isAdmin ? ' \u00b7 \u7ba1\u7406\u5458' : '')
           : '\u672a\u77e5\u670d\u52a1\u5668')
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontColor(this.colors().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
@@ -388,7 +388,7 @@ export struct SettingsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(12)
     .margin({ top: 16, bottom: 8 })
     .alignItems(VerticalAlign.Center)
@@ -520,7 +520,7 @@ export struct SettingsPage {
       Row({ space: 8 }) {
         SymbolGlyph(this.iconResource(icon))
           .fontSize(ThemeConstants.ICON_MEDIUM)
-          .fontColor([this.colors().primary])
+          .fontColor([this.colors().brandPrimary])
         Text(title)
           .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontWeight(FontWeight.Medium)
@@ -602,11 +602,11 @@ export struct SettingsPage {
             Text($r('app.string.settings_title'))
               .fontSize(ThemeConstants.TITLE_XLARGE)
               .fontWeight(FontWeight.Medium)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
               .height(56)
               .padding({ left: 16, right: 16 })
-              .backgroundColor(this.colors().surface)
+              .backgroundColor(this.colors().cardBackground)
           }
 
           this.UserCard()
@@ -787,7 +787,7 @@ export struct SettingsPage {
           .fontColor(this.colors().success)
           .width('80%')
           .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(8)
           .position({ x: '10%', y: 56 })
           .onClick(() => {
@@ -797,7 +797,7 @@ export struct SettingsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }
 
