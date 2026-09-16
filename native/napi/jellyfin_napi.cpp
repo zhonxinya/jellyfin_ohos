@@ -33,7 +33,14 @@ constexpr const char *kNativeVersion = "0.1.0-native";
 
 jellyfin::JellyfinApiClient &Api()
 {
-    static jellyfin::JellyfinApiClient client;
+    // 交互式请求读超时从默认 30s 收紧到 15s：
+    // 设备实测遇到过服务端对个别端点"挂起不响应"（如 /Users/{uid}/Items/{personId}，
+    // curl 12s 无响应），30s 等待会让界面看起来像卡死；收紧后可更快落到错误态 + 重试入口。
+    static jellyfin::JellyfinApiClient client = []() {
+        jellyfin::HttpClient http;
+        http.setReadTimeoutSec(15);
+        return jellyfin::JellyfinApiClient(std::move(http));
+    }();
     return client;
 }
 
