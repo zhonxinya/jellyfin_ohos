@@ -123,26 +123,26 @@ struct ApiKeysPage {
     Row({ space: 10 }) {
       Column({ space: 4 }) {
         Text(key.app)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontColor(this.colors().onSurface)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(maskToken(key.token))
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
           .maxLines(1)
         if (key.created.length > 0) {
           Text(`创建：${key.created}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (key.lastActivity.length > 0) {
           Text(`最后使用：${key.lastActivity}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
       }
@@ -159,7 +159,7 @@ struct ApiKeysPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -234,11 +234,11 @@ struct ApiKeysPage {
               .width('100%')
             Text(`确认撤销应用“${this.pendingKey.app}”的 API Key？`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Text(maskToken(this.pendingKey.token))
-              .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontSize(ThemeConstants.META_SMALL)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
@@ -260,7 +260,7 @@ struct ApiKeysPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

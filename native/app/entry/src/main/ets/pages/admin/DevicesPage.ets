@@ -98,27 +98,27 @@ struct DevicesPage {
     Row({ space: 10 }) {
       Column({ space: 4 }) {
         Text(device.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontColor(this.colors().onSurface)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (device.appName.length > 0) {
           Text(device.appName)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (device.userName.length > 0) {
           Text(`用户：${device.userName}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (device.lastActivity.length > 0) {
           Text(`最后活动：${device.lastActivity}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
       }
@@ -135,7 +135,7 @@ struct DevicesPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -192,7 +192,7 @@ struct DevicesPage {
               .width('100%')
             Text(`确认注销设备“${this.pendingDevice.name}”？该设备将被移出已注册设备列表。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
@@ -214,7 +214,7 @@ struct DevicesPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

@@ -218,8 +218,8 @@ struct LibrariesAdminPage {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(`${folder.paths.length} 个路径`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
       }
       .width('100%')
 
@@ -228,10 +228,10 @@ struct LibrariesAdminPage {
           ForEach(folder.paths, (p: string) => {
             Row() {
               Text('\u{1F4C1}')
-                .fontSize(14)
+                .fontSize(ThemeConstants.BODY_MEDIUM)
               Text(p)
-                .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontColor(this.colors().onSurfaceVariant)
+                .fontSize(ThemeConstants.META_SMALL)
+                .fontColor(this.colors().textSecondary)
                 .layoutWeight(1)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -246,17 +246,17 @@ struct LibrariesAdminPage {
 
       Row() {
         Text(refreshModeLabel(folder.refreshMode))
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
         if (folder.metadataFetchers.length > 0) {
           Text(` · ${folder.metadataFetchers.join(', ')}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
         if (folder.locale.length > 0 && folder.locale !== 'en') {
           Text(` · ${folder.locale}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
       }
       .width('100%')
@@ -277,7 +277,7 @@ struct LibrariesAdminPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(12)
     .clip(true)
   }
@@ -331,7 +331,7 @@ struct LibrariesAdminPage {
         Button('+')
           .width(56)
           .height(56)
-          .fontSize(28)
+          .fontSize(ThemeConstants.ICON_XXL)
           .fontColor(this.colors().onPrimary)
           .backgroundColor(this.colors().primary)
           .borderRadius(28)
@@ -392,7 +392,7 @@ struct LibrariesAdminPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
@@ -418,7 +418,7 @@ struct LibrariesAdminPage {
               .width('100%')
             Text(`将删除“${this.pendingDeleteName}”的媒体库配置，此操作不可撤销。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
@@ -440,7 +440,7 @@ struct LibrariesAdminPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

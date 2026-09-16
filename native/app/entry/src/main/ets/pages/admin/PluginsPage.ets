@@ -203,21 +203,21 @@ struct PluginsPage {
     Row({ space: 10 }) {
       Column({ space: 4 }) {
         Text(pkg.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontColor(this.colors().onSurface)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (pkg.version.length > 0) {
           Text(`版本：${pkg.version}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (pkg.overview.length > 0) {
           Text(pkg.overview)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -248,7 +248,7 @@ struct PluginsPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -263,12 +263,12 @@ struct PluginsPage {
         `确认安装插件“${this.pendingPackage.name}”？` :
         `确认取消插件“${this.pendingPackage.name}”的安装？`)
         .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontColor(this.colors().textSecondary)
         .width('100%')
       if (this.showInstallConfirm && this.pendingPackage.version.length > 0) {
         Text(`将安装版本：${this.pendingPackage.version}`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
       }
       Row({ space: 8 }) {
@@ -296,7 +296,7 @@ struct PluginsPage {
       .width('100%')
     }
     .padding(20)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(12)
     .width('85%')
     .onClick(() => {

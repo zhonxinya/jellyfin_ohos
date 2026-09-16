@@ -53,7 +53,7 @@ struct LibrariesMetadataPage {
         .fontColor(this.colors().primary)
         .width(28)
       Text(path)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onSurface)
         .layoutWeight(1)
         .maxLines(2)
@@ -61,7 +61,7 @@ struct LibrariesMetadataPage {
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
   }
 
   build() {
@@ -88,8 +88,8 @@ struct LibrariesMetadataPage {
           // 头部说明
           Row() {
             Text(`共 ${this.paths.length} 个本地路径`)
-              .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontSize(ThemeConstants.META_SMALL)
+              .fontColor(this.colors().textSecondary)
             Blank()
             Button('刷新')
               .height(28)

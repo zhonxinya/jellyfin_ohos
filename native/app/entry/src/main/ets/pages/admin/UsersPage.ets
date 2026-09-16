@@ -334,7 +334,7 @@ struct UsersPage {
       Column({ space: 5 }) {
         Row({ space: 8 }) {
           Text(user.name)
-            .fontSize(ThemeConstants.BODY_MEDIUM)
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
             .fontColor(this.colors().onSurface)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -349,8 +349,8 @@ struct UsersPage {
           }
         }
         Text(`ID：${user.id}`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
@@ -380,7 +380,7 @@ struct UsersPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -388,7 +388,7 @@ struct UsersPage {
   ToggleRow(label: string, key: string, policy: boolean) {
     Row() {
       Text(label)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onSurface)
         .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: policy })
@@ -410,7 +410,7 @@ struct UsersPage {
   ConfigurationToggleRow(label: string, key: string) {
     Row() {
       Text(label)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onSurface)
         .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: this.configurationBoolean(key) })
@@ -440,8 +440,8 @@ struct UsersPage {
               .width('100%')
           }
           Text('用户策略')
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
           this.ToggleRow('管理员', 'IsAdministrator', this.policyBoolean('IsAdministrator'))
           this.ToggleRow('禁用登录', 'IsDisabled', this.policyBoolean('IsDisabled'))
@@ -452,8 +452,8 @@ struct UsersPage {
           this.ToggleRow('允许音频转码', 'EnableAudioPlaybackTranscoding', this.policyBoolean('EnableAudioPlaybackTranscoding'))
           this.ToggleRow('允许下载', 'EnableContentDownloading', this.policyBoolean('EnableContentDownloading'))
           Text('用户偏好')
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
           TextInput({ text: this.configurationText('AudioLanguagePreference'), placeholder: '音频语言偏好（可选）' })
             .width('100%')
@@ -498,7 +498,7 @@ struct UsersPage {
           .width('100%')
         }
         .padding(20)
-        .backgroundColor(this.colors().surface)
+        .backgroundColor(this.colors().cardBackground)
         .borderRadius(12)
         .width('90%')
         .onClick(() => {
@@ -554,7 +554,7 @@ struct UsersPage {
         Button('+')
           .width(56)
           .height(56)
-          .fontSize(28)
+          .fontSize(ThemeConstants.ICON_XXL)
           .fontColor(this.colors().onPrimary)
           .backgroundColor(this.colors().primary)
           .borderRadius(28)
@@ -610,7 +610,7 @@ struct UsersPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
@@ -638,7 +638,7 @@ struct UsersPage {
               .width('100%')
             Text(`确认删除用户“${this.pendingDelete.name}”？此操作不可撤销。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
@@ -657,7 +657,7 @@ struct UsersPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
@@ -680,7 +680,7 @@ struct UsersPage {
               .width('100%')
             Text(this.pendingAdminValue ? '该用户将获得管理员权限。请确认你了解此权限范围。' : '该用户将失去管理员权限。')
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
@@ -699,7 +699,7 @@ struct UsersPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

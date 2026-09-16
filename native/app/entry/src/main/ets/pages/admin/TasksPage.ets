@@ -116,14 +116,14 @@ struct TasksPage {
     Row({ space: 12 }) {
       Column({ space: 4 }) {
         Text(task.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontColor(this.colors().onSurface)
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(`${taskStateLabel(task.state)} · ${task.id}`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -155,7 +155,7 @@ struct TasksPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -212,7 +212,7 @@ struct TasksPage {
               .width('100%')
             Text(`确认停止“${this.pendingTask.name}”？`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
@@ -234,7 +234,7 @@ struct TasksPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
