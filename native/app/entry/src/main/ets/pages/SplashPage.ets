@@ -7,15 +7,19 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
+import { LEGAL_VERSION } from '../common/LegalTexts';
+import { PrivacyConsentDialog } from '../components/PrivacyConsentDialog';
 
 @Entry
 @Component
 struct SplashPage {
   @State private status: string = UiState.LOADING;
   @State private message: string = '正在恢复会话…';
+  /** 未同意隐私政策时先展示同意弹窗，同意前不进行任何信息处理与网络请求 */
+  @State private needConsent: boolean = false;
 
   aboutToAppear(): void {
-    this.bootstrap().catch(() => {
+    this.start().catch(() => {
       this.status = UiState.ERROR;
       this.message = '启动失败，请重试';
     });
@@ -23,6 +27,34 @@ struct SplashPage {
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
+  }
+
+  /** 启动入口：先校验隐私政策同意状态，未同意则只展示弹窗 */
+  private async start(): Promise<void> {
+    const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    await SessionStore.init(ctx);
+    const accepted: string = await SessionStore.loadLegalConsent();
+    if (accepted !== LEGAL_VERSION) {
+      this.needConsent = true;
+      this.message = '请阅读并同意隐私政策后继续';
+      return;
+    }
+    await this.bootstrap();
+  }
+
+  /** 用户点击"同意并继续"：落盘同意版本号后继续启动 */
+  private async onPrivacyAgree(): Promise<void> {
+    await SessionStore.saveLegalConsent(LEGAL_VERSION);
+    this.needConsent = false;
+    this.status = UiState.LOADING;
+    this.message = '正在恢复会话…';
+    await this.bootstrap();
+  }
+
+  /** 用户点击"不同意并退出"：直接退出应用（不得在未同意的情况下继续收集信息） */
+  private onPrivacyDecline(): void {
+    const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    ctx.terminateSelf();
   }
 
   private async bootstrap(): Promise<void> {
@@ -83,6 +115,25 @@ struct SplashPage {
   }
 
   build() {
+    Stack() {
+      this.Splash()
+      if (this.needConsent) {
+        PrivacyConsentDialog({
+          onAgree: () => {
+            this.onPrivacyAgree();
+          },
+          onDecline: () => {
+            this.onPrivacyDecline();
+          }
+        })
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  Splash() {
     Column({ space: 16 }) {
       Text($r('app.string.app_name'))
         .fontSize(28)
@@ -97,7 +148,7 @@ struct SplashPage {
           .fontColor(this.colors().onPrimary)
           .onClick(() => {
             this.status = UiState.LOADING;
-            this.bootstrap();
+            this.start();
           })
       }
     }

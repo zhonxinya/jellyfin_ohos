@@ -657,7 +657,9 @@ export struct SettingsPage {
 
           // 关于
           this.SectionCard('\u5173\u4e8e', 'info_circle', [
-            { icon: '', title: '\u5ba2\u6237\u7aef', subtitle: 'Jellyfin \u9e3f\u8499\u5ba2\u6237\u7aef', info: true },
+            { icon: 'doc_text', title: '\u9690\u79c1\u653f\u7b56', subtitle: '\u6211\u4eec\u5982\u4f55\u5904\u7406\u4e0e\u4fdd\u62a4\u4f60\u7684\u4fe1\u606f', route: 'pages/LegalPage', titleParam: 'privacy' },
+            { icon: 'doc_text', title: '\u7528\u6237\u534f\u8bae', subtitle: '\u4f7f\u7528\u672c\u5e94\u7528\u7684\u6761\u6b3e\u4e0e\u514d\u8d23\u8bf4\u660e', route: 'pages/LegalPage', titleParam: 'terms' },
+            { icon: '', title: '\u5ba2\u6237\u7aef', subtitle: 'Jellyfin \u975e\u5b98\u65b9\u7b2c\u4e09\u65b9\u5ba2\u6237\u7aef', info: true },
             { icon: '', title: '\u7248\u672c', subtitle: JellyfinNative.getVersion(), info: true },
             { icon: '', title: '\u6784\u5efa\u73af\u5883', subtitle: 'Native ArkTS 5.1.0(18)', info: true },
           ])

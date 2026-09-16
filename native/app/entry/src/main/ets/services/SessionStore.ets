@@ -8,6 +8,7 @@ const STORE_NAME: string = 'jellyfin_session';
 const KEY_SESSION: string = 'session_json';
 const KEY_SERVER: string = 'server_url';
 const KEY_LAST_USERNAME: string = 'last_username';
+const KEY_LEGAL_CONSENT: string = 'legal_consent_version';
 
 /**
  * Persist session / server URL via preferences.
@@ -131,6 +132,36 @@ export class SessionStore {
       return '';
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'loadServerUrl failed: %{public}s', JSON.stringify(error));
+      return '';
+    }
+  }
+
+  /** 保存用户已同意的隐私政策/用户协议版本号（上架合规：政策更新后需重新征得同意） */
+  static async saveLegalConsent(version: string): Promise<void> {
+    if (SessionStore.pref === null) {
+      return;
+    }
+    try {
+      await SessionStore.pref.put(KEY_LEGAL_CONSENT, version);
+      await SessionStore.pref.flush();
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'saveLegalConsent failed: %{public}s', JSON.stringify(error));
+    }
+  }
+
+  /** 读取已同意的政策版本号；未同意时返回空串 */
+  static async loadLegalConsent(): Promise<string> {
+    if (SessionStore.pref === null) {
+      return '';
+    }
+    try {
+      const value: preferences.ValueType = await SessionStore.pref.get(KEY_LEGAL_CONSENT, '');
+      if (typeof value === 'string') {
+        return value;
+      }
+      return '';
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'loadLegalConsent failed: %{public}s', JSON.stringify(error));
       return '';
     }
   }

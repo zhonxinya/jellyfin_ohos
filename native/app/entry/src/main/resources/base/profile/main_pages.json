@@ -2,6 +2,7 @@
   "src": [
     "pages/SplashPage",
     "pages/Index",
+    "pages/LegalPage",
     "pages/ServerPage",
     "pages/LoginPage",
     "pages/MainShell",
