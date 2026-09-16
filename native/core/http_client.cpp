@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <sstream>
@@ -147,11 +148,18 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
     // 而"同一 fd 被关两次"在竞速连接 + select 多分支里很容易发生（设备实测崩溃栈：
     // HttpClient::get → request → ConnectTcp(__fd_chk)）。用统一的关闭器把这类错误变成不可能。
     auto closeOnce = [](int &fd) {
+        // 取证：musl FORTIFY 的 __fd_chk 只在 fd < 0 或超出 fd 上限时 abort
+        // （单纯重复关闭只会得到 EBADF），因此这里把关闭前的值打出来，
+        // 崩溃前最后几行即可指出非法 fd 的来源。
         if (fd >= 0) {
+            std::fprintf(stderr, "[ConnectTcp] close fd=%d\n", fd);
             close(fd);
             fd = -1;
+        } else {
+            std::fprintf(stderr, "[ConnectTcp] skip close fd=%d\n", fd);
         }
     };
+    std::fprintf(stderr, "[ConnectTcp] start host=%s port=%s\n", host.c_str(), portStr.c_str());
     for (addrinfo *p = res; p != nullptr && sock < 0; p = p->ai_next) {
         int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
         if (fd < 0) {
@@ -168,6 +176,7 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         if (errno == EINPROGRESS && pending.size() < kMaxPendingConnects) {
+            std::fprintf(stderr, "[ConnectTcp] pending+= fd=%d (family=%d)\n", fd, p->ai_family);
             pending.push_back(fd);
             continue;
         }
