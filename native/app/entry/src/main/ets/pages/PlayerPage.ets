@@ -480,6 +480,14 @@ struct PlayerPage {
   }
 
   private async createAvPlayer(url: string): Promise<void> {
+    // 先释放"上一个"播放器与软解会话，再创建新的。
+    //
+    // 为什么必须这样（服务端实证的缺陷）：`createAvPlayer` 原来直接覆盖 `this.avPlayer`，
+    // 于是"重试"或再次进入播放页时会**同时存在两个活跃播放器**——服务端 `/Sessions`
+    // 会看到同一客户端的两条播放会话都在推进（实测：`我爱体育 70s` 与 `说事儿 393s` 同时推进），
+    // 观看记录与"继续观看"随之被污染。
+    this.softStopAvPlayer();
+    this.stopSoftPlay();
     try {
       this.avPlayer = await media.createAVPlayer();
       this.avPlayer.on('stateChange', (state: string) => {
