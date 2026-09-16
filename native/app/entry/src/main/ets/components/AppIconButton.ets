@@ -1,5 +1,3 @@
-import common from '@ohos.app.ability.common';
-import fs from '@ohos.file.fs';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 
@@ -93,19 +91,6 @@ export struct AppIconButton {
       }
     })
     .onClick(() => {
-      // 诊断探针（临时）：记录图标按钮确实收到了点击。
-      // 用于排查"播放页锁定按钮用 click/doubleClick/longClick 都点不中"：
-      // 文件有内容 ⇒ 事件送达（问题在状态逻辑）；为空 ⇒ 事件没到按钮（层级/容器吞掉）。
-      // 定位完成后移除或改为调试开关。
-      try {
-        const ctx = getContext(this) as common.UIAbilityContext;
-        const f = fs.openSync(`${ctx.cacheDir}/ui_tap_probe.txt`,
-          fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.APPEND);
-        fs.writeSync(f.fd, 'iconTap\n');
-        fs.closeSync(f);
-      } catch (err) {
-        // 诊断写入失败不影响交互
-      }
       this.onTap();
     });
   }
