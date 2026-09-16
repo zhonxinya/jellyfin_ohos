@@ -19,13 +19,16 @@
 #include "version.h"
 
 // Player version header shares the name version.h; include via relative path.
-#include "../player/version.h"
+#include "../feature/player/version.h"
+// ── feature/player（可移植的播放能力）──────────────────────────────────
+// 取流由本工程注入：CDN/鉴权/https 都走 core 的 HttpClient
+#include "../feature/player/range_fetcher.h"
 // FFmpeg 软解码器（未链接 FFmpeg 时其 available() 返回 false，probe 会如实报错）
-#include "../player/ffmpeg_decoder.h"
+#include "../feature/player/ffmpeg_decoder.h"
 // 流式软解会话（播放用：Range 分页取流 + 逐帧 RGBA 输出）
-#include "../player/soft_decode_session.h"
+#include "../feature/player/soft_decode_session.h"
 // EGL/GLES 渲染（把软解帧直接画进 XComponent surface）
-#include "../player/egl_renderer.h"
+#include "../feature/player/egl_renderer.h"
 
 #include <cctype>
 #include <functional>
@@ -38,6 +41,33 @@
 namespace {
 
 constexpr const char *kNativeVersion = "0.1.0-native";
+
+
+/**
+ * 向 feature/player 注入取流实现（本工程用 core 的 HttpClient，支持 https 与 Jellyfin 鉴权）。
+ * feature/player 自身不依赖任何 HTTP 实现，换工程时只需替换这里的注入。
+ */
+void EnsureRangeFetcher()
+{
+    static std::once_flag once;
+    std::call_once(once, []() {
+        jellyfin::player::SetRangeFetcher([](const std::string &url, int64_t start, int64_t end) {
+            jellyfin::player::RangeResponse out;
+            jellyfin::HttpClient http;
+            http.setReadTimeoutSec(60);
+            http.setConnectTimeoutSec(10);
+            jellyfin::HttpHeaders headers;
+            if (end >= start) {
+                headers["Range"] = "bytes=" + std::to_string(start) + "-" + std::to_string(end);
+            }
+            const jellyfin::HttpResponse resp = http.get(url, headers);
+            out.status = resp.status;
+            out.body = resp.body;
+            out.error = resp.error;
+            return out;
+        });
+    });
+}
 
 jellyfin::JellyfinApiClient &Api()
 {
@@ -1102,6 +1132,7 @@ bool WriteRgbaPng(const std::vector<uint8_t> &rgba, int width, int height, const
  */
 napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
 {
+    EnsureRangeFetcher();
     auto &session = jellyfin::SessionManager::instance();
     if (!session.isAuthenticated()) {
         return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
@@ -1334,6 +1365,7 @@ napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
  */
 napi_value PlayerSoftDecodeProbe(napi_env env, napi_callback_info info)
 {
+    EnsureRangeFetcher();
     auto &session = jellyfin::SessionManager::instance();
     if (!session.isAuthenticated()) {
         return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));

@@ -1,6 +1,6 @@
 #include "soft_decode_session.h"
 
-#include "http_client.h"
+#include "range_fetcher.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -60,8 +60,6 @@ public:
     HttpRangeReader(std::string url, size_t chunkBytes = 1024 * 1024)
         : url_(std::move(url)), chunk_(chunkBytes)
     {
-        http_.setReadTimeoutSec(30);
-        http_.setConnectTimeoutSec(10);
     }
 
     /**
@@ -72,11 +70,9 @@ public:
      */
     int64_t probeSize()
     {
-        HttpHeaders headers;
-        headers["Range"] = "bytes=0-" + std::to_string(chunk_ - 1);
-        const HttpResponse resp = http_.get(url_, headers);
+        const RangeResponse resp = FetchRange(url_, 0, static_cast<int64_t>(chunk_) - 1);
         if (resp.status >= 400 || resp.body.empty()) {
-            const HttpResponse plain = http_.get(url_, {});
+            const RangeResponse plain = FetchRange(url_, 0, -1);
             if (plain.status >= 400 || plain.body.empty()) {
                 return 0;
             }
@@ -151,13 +147,11 @@ private:
         }
         const int64_t end = (size_ >= 0) ? std::min<int64_t>(pos + static_cast<int64_t>(chunk_) - 1, size_ - 1)
                                          : pos + static_cast<int64_t>(chunk_) - 1;
-        HttpHeaders headers;
-        headers["Range"] = "bytes=" + std::to_string(pos) + "-" + std::to_string(end);
-        const HttpResponse resp = http_.get(url_, headers);
+        const RangeResponse resp = FetchRange(url_, pos, end);
         if (resp.status >= 400 || resp.body.empty()) {
-            // 服务器可能不支持 Range：退回普通 GET（仅首次可用）
+            // 服务器可能不支持 Range：退回整段请求（仅首次可用）
             if (pos == 0) {
-                const HttpResponse plain = http_.get(url_, {});
+                const RangeResponse plain = FetchRange(url_, 0, -1);
                 if (plain.status >= 400 || plain.body.empty()) {
                     error = plain.error.empty()
                                 ? ("取流失败：HTTP " + std::to_string(plain.status))
@@ -188,7 +182,6 @@ private:
 
     std::string url_;
     size_t chunk_;
-    HttpClient http_;
     std::string cache_;
     int64_t cacheStart_ = 0;
     int64_t pos_ = 0;

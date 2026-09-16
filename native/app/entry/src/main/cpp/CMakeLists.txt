@@ -9,7 +9,8 @@ set(NATIVEROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../..")
 
 set(NAPI_ROOT "${NATIVEROOT}/napi")
 set(CORE_ROOT "${NATIVEROOT}/core")
-set(PLAYER_ROOT "${NATIVEROOT}/player")
+# 播放能力放在 feature/ 下，便于整目录移植到其它工程（见 feature/player/README.md）
+set(PLAYER_ROOT "${NATIVEROOT}/feature/player")
 set(THIRD_PARTY_ROOT "${NATIVEROOT}/third_party")
 
 file(GLOB NAPI_SOURCES CONFIGURE_DEPENDS
@@ -78,7 +79,7 @@ target_link_libraries(jellyfin_native PUBLIC
 #   1) 模块内预编译目录  native/app/entry/libs/<abi>/   （hvigor 会打进 HAP）
 #   2) JELLYFIN_FFMPEG_ROOT/<abi>/lib                  （默认 <repo 父目录>/_ffmpeg-build/out）
 # 未找到时**不**定义 JELLYFIN_HAS_FFMPEG：FfmpegDecoder 会如实报告"解码不可用"，
-# 而不是假装可用（见 native/player/ffmpeg_decoder.cpp）。
+# 而不是假装可用（见 native/feature/player/ffmpeg_decoder.cpp）。
 set(JELLYFIN_FFMPEG_ROOT "" CACHE PATH "FFmpeg 预编译根目录（含 <abi>/lib、<abi>/include）")
 if(NOT JELLYFIN_FFMPEG_ROOT)
   set(JELLYFIN_FFMPEG_ROOT "${NATIVEROOT}/../../_ffmpeg-build/out")
