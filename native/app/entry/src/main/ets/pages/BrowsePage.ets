@@ -118,8 +118,8 @@ struct BrowsePage {
 
       Row() {
         Text(`${this.items.length} 项`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .layoutWeight(1)
          MediaViewToggle({
            mode: this.viewMode,

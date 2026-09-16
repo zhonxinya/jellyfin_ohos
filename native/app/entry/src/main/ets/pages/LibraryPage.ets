@@ -9,6 +9,8 @@ import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { PageHeader } from '../components/PageHeader';
 import { AsyncStateView } from '../components/AsyncStateView';
 import { MediaCollectionView, MediaViewToggle } from '../components/MediaCollectionView';
+import { ChipButton } from '../components/ChipButton';
+import { TextButton } from '../components/TextButton';
 
 @Entry
 @Component
@@ -28,7 +30,6 @@ struct LibraryPage {
   @State private footerTriggered: boolean = false;
   @State private sortBy: string = 'SortName';
   @State private sortOrder: string = 'Ascending';
-  @State private showSortDialog: boolean = false;
   private readonly pageSize: number = ThemeConstants.PAGE_SIZE;
 
   aboutToAppear(): void {
@@ -218,82 +219,66 @@ struct LibraryPage {
   private applySort(field: string, order: string): void {
     this.sortBy = field;
     this.sortOrder = order;
-    this.showSortDialog = false;
     this.reload();
   }
 
-  @Builder
-  SortDialog() {
-    Column({ space: 8 }) {
-      Text($r('app.string.sort_title'))
-        .fontSize(ThemeConstants.TITLE_MEDIUM)
-        .fontColor(this.colors().onSurface)
-      Button($r('app.string.sort_name_ascending'))
-        .width('100%')
-        .onClick(() => {
-          this.applySort('SortName', 'Ascending');
-        })
-      Button($r('app.string.sort_name_descending'))
-        .width('100%')
-        .onClick(() => {
-          this.applySort('SortName', 'Descending');
-        })
-      Button($r('app.string.sort_date_new'))
-        .width('100%')
-        .onClick(() => {
-          this.applySort('DateCreated', 'Descending');
-        })
-      Button($r('app.string.sort_date_old'))
-        .width('100%')
-        .onClick(() => {
-          this.applySort('DateCreated', 'Ascending');
-        })
-      Button($r('app.string.sort_premiere_new'))
-        .width('100%')
-        .onClick(() => {
-          this.applySort('PremiereDate', 'Descending');
-        })
-      Button($r('app.string.sort_premiere_old'))
-        .width('100%')
-        .onClick(() => {
-          this.applySort('PremiereDate', 'Ascending');
-        })
-      Button('\u53d6\u6d88')
-        .width('100%')
-        .backgroundColor(this.colors().surfaceElevated)
-        .fontColor(this.colors().onSurface)
-        .onClick(() => {
-          this.showSortDialog = false;
-        })
-    }
-    .padding(20)
-    .backgroundColor(this.colors().surface)
-    .borderRadius(12)
-    .width('80%')
+  /**
+   * 排序选择 —— 由手写全屏遮罩改为系统 ActionMenu。
+   *
+   * 参考项目对"单选项列表"一律用 `showActionMenu`（设置页主题选择、管理页行操作等都是这样），
+   * 不再自己搭遮罩 + 卡片 + 按钮列表；颜色用品牌色/错误色的字面量（与参考项目一致）。
+   */
+  private openSortMenu(): void {
+    const ctx = this.getUIContext();
+    ctx.getPromptAction().showActionMenu({
+      title: '排序方式',
+      buttons: [
+        { text: '名称 (A-Z)', color: '#007DFF' },
+        { text: '名称 (Z-A)', color: '#007DFF' },
+        { text: '最新添加', color: '#007DFF' },
+        { text: '最早添加', color: '#007DFF' },
+        { text: '首播时间（新→旧）', color: '#007DFF' },
+        { text: '首播时间（旧→新）', color: '#007DFF' }
+      ]
+    }).then((result) => {
+      const idx: number = result.index;
+      if (idx === 0) {
+        this.applySort('SortName', 'Ascending');
+      } else if (idx === 1) {
+        this.applySort('SortName', 'Descending');
+      } else if (idx === 2) {
+        this.applySort('DateCreated', 'Descending');
+      } else if (idx === 3) {
+        this.applySort('DateCreated', 'Ascending');
+      } else if (idx === 4) {
+        this.applySort('PremiereDate', 'Descending');
+      } else if (idx === 5) {
+        this.applySort('PremiereDate', 'Ascending');
+      }
+    }).catch(() => {
+      // 用户取消菜单时不做处理
+    });
   }
 
+  /** 分类切换 —— 参考项目用 FilterChips（34vp 圆角 chip，选中品牌实底）而非下划线 Tab */
   @Builder
-  TabBarBuilder() {
+  TabChips() {
     Scroll() {
       Row({ space: 8 }) {
         ForEach(this.tabLabels, (label: string, index: number) => {
-          Text(label)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontWeight(this.libraryTabIndex === index ? FontWeight.Medium : FontWeight.Normal)
-            .fontColor(this.libraryTabIndex === index ? this.colors().primary : this.colors().onSurfaceVariant)
-            .height(48)
-            .padding({ left: 16, right: 16, top: 16, bottom: 12 })
-            .border({
-              width: { bottom: this.libraryTabIndex === index ? 2 : 0 },
-              color: this.colors().primary
-            })
-            .onClick(() => {
+          ChipButton({
+            label: label,
+            selected: this.libraryTabIndex === index,
+            onTap: () => {
               this.libraryTabIndex = index;
               this.reload();
-            })
+            }
+          })
         }, (label: string, index: number) => `${label}_${index}`)
+        Blank()
+          .layoutWeight(1)
       }
-      .padding({ left: 0, right: 0 })
+      .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, top: 12, bottom: 4 })
     }
     .scrollable(ScrollDirection.Horizontal)
     .scrollBar(BarState.Off)
@@ -310,22 +295,19 @@ struct LibraryPage {
           }
         })
 
-        this.TabBarBuilder()
+        this.TabChips()
 
         Row() {
           Text(`${this.items.length} 项`)
             .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontColor(this.colors().textSecondary)
             .layoutWeight(1)
-          Button('排序')
-            .fontSize(12)
-            .height(28)
-            .backgroundColor(this.colors().surfaceElevated)
-            .fontColor(this.colors().onSurface)
-            .margin({ right: 8 })
-            .onClick(() => {
-              this.showSortDialog = true;
-            })
+          TextButton({
+            label: '排序',
+            onTap: () => {
+              this.openSortMenu();
+            }
+          })
            MediaViewToggle({
              mode: this.viewMode,
              onChange: (mode: string) => {
@@ -367,18 +349,6 @@ struct LibraryPage {
       .height('100%')
       .backgroundColor(this.colors().background)
 
-      if (this.showSortDialog) {
-        Column() {
-          this.SortDialog()
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor(this.colors().scrim)
-        .onClick(() => {
-          this.showSortDialog = false;
-        })
-      }
     }
     .width('100%')
     .height('100%')
