@@ -684,6 +684,7 @@ struct PlayerPage {
             // （实测表现为"点了锁定却没锁上"）。
             this.lockChangedAt = Date.now();
             this.refreshStateDiag(this.controlsLocked ? '锁定' : '取消锁定');
+            this.writeStateProbe(this.controlsLocked ? '锁定' : '取消锁定');
           }
         })
       }
@@ -931,6 +932,28 @@ struct PlayerPage {
   }
 
   /**
+   * 把播放页状态写进沙箱文件（`cache/player_state.txt`），供设备验证直接读取。
+   *
+   * 为什么要用文件而不是读屏：实测 `uitest dumpLayout` 对播放页**不可靠**
+   * （XComponent/控件经常不出现，甚至整页只剩状态栏），而文件产物可以稳定 pull 回来，
+   * 与前面用 `softcapture.png` 验证渲染的做法一致。
+   */
+  private writeStateProbe(action: string): void {
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const line: string = `${action} locked=${this.controlsLocked ? 1 : 0}`
+        + ` controls=${this.showControls ? 1 : 0} playing=${this.softPlaying ? 1 : 0}`
+        + ` status=${this.status}\n`;
+      const file = fs.openSync(`${ctx.cacheDir}/player_state.txt`,
+        fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.APPEND);
+      fs.writeSync(file.fd, line);
+      fs.closeSync(file);
+    } catch (err) {
+      // 诊断写入失败不影响播放
+    }
+  }
+
+  /**
    * 解锁：忽略"刚锁定后极短时间内的点击"。
    *
    * 为什么需要：锁定覆盖层是整屏的，点锁定按钮的同一次抬手事件会穿透到刚出现的覆盖层，
@@ -944,6 +967,7 @@ struct PlayerPage {
     this.lockChangedAt = Date.now();
     this.revealControls();
     this.refreshStateDiag('解锁');
+    this.writeStateProbe('解锁');
   }
 
   /**
