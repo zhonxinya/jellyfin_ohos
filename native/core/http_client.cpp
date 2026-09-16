@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <hilog/log.h>
 #include <ctime>
 #include <sstream>
 #include <string>
@@ -152,14 +153,15 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
         // （单纯重复关闭只会得到 EBADF），因此这里把关闭前的值打出来，
         // 崩溃前最后几行即可指出非法 fd 的来源。
         if (fd >= 0) {
-            std::fprintf(stderr, "[ConnectTcp] close fd=%d\n", fd);
+            // 用 hilog 取证：本项目实测 fprintf(stderr) 不会进入 hilog，OH_LOG_Print 才会
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "close fd=%{public}d", fd);
             close(fd);
             fd = -1;
         } else {
-            std::fprintf(stderr, "[ConnectTcp] skip close fd=%d\n", fd);
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "skip close fd=%{public}d", fd);
         }
     };
-    std::fprintf(stderr, "[ConnectTcp] start host=%s port=%s\n", host.c_str(), portStr.c_str());
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "start host=%{public}s", host.c_str());
     for (addrinfo *p = res; p != nullptr && sock < 0; p = p->ai_next) {
         int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
         if (fd < 0) {
@@ -176,7 +178,8 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         if (errno == EINPROGRESS && pending.size() < kMaxPendingConnects) {
-            std::fprintf(stderr, "[ConnectTcp] pending+= fd=%d (family=%d)\n", fd, p->ai_family);
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "pending+= fd=%{public}d family=%{public}d",
+                         fd, p->ai_family);
             pending.push_back(fd);
             continue;
         }
