@@ -614,7 +614,8 @@ struct PlayerPage {
         })
         Column({ space: 2 }) {
           Text(this.title)
-            .fontSize(ThemeConstants.BODY_MEDIUM)
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontWeight(FontWeight.Medium)
             .fontColor(this.colors().onOverlay)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -672,6 +673,13 @@ struct PlayerPage {
       }
     }
     .width('100%')
+    // 顶部渐变遮罩：视频画面明暗不定，纯文字/图标容易在浅色画面上"消失"；
+    // 与底部控制条同款 scrim 保证标题与按钮始终可读（主流播放器的通用做法）。
+    .padding({ top: 8, bottom: 12 })
+    .linearGradient({
+      angle: 180,
+      colors: [['#00000000', 0.0], [this.colors().scrimHeavy, 1.0]]
+    })
   }
 
   @Builder
@@ -759,6 +767,13 @@ struct PlayerPage {
           .onClick(() => {
             this.onSeek(10000);
           })
+      }
+      .width('100%')
+
+      // 次级操作行：把"倍速 / 软解 / 存帧"这类非播放主操作从主控制行移出。
+      // 主行只保留 -10s / 播放暂停 / +10s，播放意图更聚焦；这也是主流播放器的分组方式
+      // （主操作居中、次级操作单独一排，避免一排挤满 chip 导致主次不分）。
+      Row({ space: 8 }) {
         ChipButton({
           label: `${this.playbackSpeed}x`,
           selected: this.playbackSpeed !== 1,
@@ -791,6 +806,7 @@ struct PlayerPage {
         }
       }
       .width('100%')
+      .justifyContent(FlexAlign.Center)
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 16, bottom: 24 })
