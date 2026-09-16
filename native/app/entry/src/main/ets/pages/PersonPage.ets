@@ -8,11 +8,11 @@ import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { MediaCollectionView } from '../components/MediaCollectionView';
 import { SectionHeader } from '../components/SectionHeader';
-import { EmptyState } from '../components/EmptyState';
 
 @Entry
 @Component
@@ -150,13 +150,12 @@ struct PersonPage {
     Column() {
       SectionHeader({ title: $r('app.string.person_works'), icon: '' })
       if (this.worksStatus === UiState.LOADING) {
-        AsyncStateView({ status: UiState.LOADING, minHeight: 120 })
+        LoadingState()
       } else if (this.worksStatus === UiState.ERROR) {
-        AsyncStateView({
-          status: UiState.ERROR,
-          message: this.worksError,
-          minHeight: 120,
-          onRetry: () => {
+        EmptyState({
+          message: this.worksError.length > 0 ? this.worksError : '加载作品失败',
+          actionLabel: '重试',
+          onAction: () => {
             this.load();
           }
         })
@@ -196,14 +195,19 @@ struct PersonPage {
       })
 
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          minHeight: 240,
-          onRetry: () => {
-            this.load();
-          }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => {
+              this.load();
+            }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无数据' })
+        }
       } else {
         Scroll() {
           Column() {

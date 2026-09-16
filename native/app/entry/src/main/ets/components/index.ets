@@ -24,7 +24,6 @@ export { SearchBar } from './SearchBar';
 export { SettingCell } from './SettingCell';
 
 // 迁移期保留的既有组件（后续按参考项目风格逐个替换）
-export { AsyncStateView } from './AsyncStateView';
 export { PageHeader } from './PageHeader';
 export { SectionHeader } from './SectionHeader';
 export { JellyfinImage } from './JellyfinImage';

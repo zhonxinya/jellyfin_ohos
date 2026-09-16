@@ -4,7 +4,8 @@ import { SessionStore } from '../../services/SessionStore';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 import { JsonUtil } from '../../common/JsonUtil';
 import { UiState } from '../../common/UiState';
 
@@ -297,14 +298,19 @@ export struct SubtitleSettingsPage {
       })
 
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          minHeight: 240,
-          onRetry: () => {
-            this.loadServerConfig();
-          }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => {
+              this.loadServerConfig();
+            }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无数据' })
+        }
       } else {
         Scroll() {
           Column() {

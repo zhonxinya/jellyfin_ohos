@@ -7,7 +7,8 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { MediaCollectionView, MediaViewToggle } from '../components/MediaCollectionView';
 import { ChipButton } from '../components/ChipButton';
 import { TextButton } from '../components/TextButton';
@@ -328,14 +329,19 @@ struct LibraryPage {
         .padding({ left: 16, right: 16, bottom: 8 })
 
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            minHeight: 240,
-            onRetry: () => {
-              this.reload();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.reload();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '暂无数据' })
+          }
         } else {
           MediaCollectionView({
             items: $items,

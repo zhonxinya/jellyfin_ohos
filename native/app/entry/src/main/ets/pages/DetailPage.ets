@@ -6,7 +6,8 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { HorizontalShelf } from '../components/HorizontalShelf';
 import { AppIconButton } from '../components/AppIconButton';
@@ -612,14 +613,19 @@ struct DetailPage {
               router.back();
             }
           })
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            minHeight: 240,
-            onRetry: () => {
-              this.loadDetail();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.loadDetail();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '暂无数据' })
+          }
         }
         .width('100%')
         .height('100%')
