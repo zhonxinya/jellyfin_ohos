@@ -806,12 +806,14 @@ struct PlayerPage {
       .alignItems(VerticalAlign.Center)
 
       // 控制按钮行
-      Row({ space: 8 }) {
+      Row({ space: 12 }) {
         Button('-10s')
           .layoutWeight(1)
           .backgroundColor(this.colors().overlayControl)
           .fontColor(this.colors().onOverlay)
-          .height(40)
+          // 触达高度 40 → 48vp：常用操作应满足"一指可点"的最小触达区
+          // （鸿蒙触控最佳实践建议 ≥48vp），行间距 8 → 12 同时避免误触相邻按钮
+          .height(48)
           .onClick(() => {
             this.onSeek(-10000);
           })
@@ -836,7 +838,8 @@ struct PlayerPage {
           .layoutWeight(1)
           .backgroundColor(this.colors().overlayControl)
           .fontColor(this.colors().onOverlay)
-          .height(40)
+          // 与 -10s 保持一致（设备实测两者曾为 162px vs 135px，左右高度不齐）
+          .height(48)
           .onClick(() => {
             this.onSeek(10000);
           })
