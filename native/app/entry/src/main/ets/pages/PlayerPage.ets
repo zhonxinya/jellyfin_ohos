@@ -169,7 +169,13 @@ struct PlayerPage {
     try {
       this.avPlayer = await media.createAVPlayer();
       this.avPlayer.on('stateChange', (state: string) => {
-        if (state === 'prepared') {
+        this.stateText = state;
+        if (state === 'initialized') {
+          // ⚠️ 关键修复：AVPlayer 状态机为 idle →(设置 url)→ initialized →prepare()→ preparing → prepared。
+          // 原实现只设置 url 就等待 'prepared'，从不调用 prepare()，播放器会永远停在 initialized，
+          // 界面一直显示"加载播放器..."（设备实测：H.264/MP4 也一样起不来）。
+          this.avPlayer?.prepare();
+        } else if (state === 'prepared') {
           this.durationMs = (this.avPlayer?.duration ?? 0);
           this.status = UiState.SUCCESS;
           this.avPlayer?.play();
