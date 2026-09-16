@@ -226,7 +226,14 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
         pending.swap(next);
     }
     for (const int fd : pending) {
-        close(fd);
+        // 只关闭"未被选中的"候选 fd：
+        // - 排除 sock：选中的 fd 是本次连接要用的，误关它会让后续 send/recv 作用在
+        //   已关闭（甚至已被复用）的 fd 上；
+        // - 排除负值：对无效 fd 调 close()/fcntl() 会被 musl FORTIFY 的 __fd_chk 直接 abort
+        //   （设备实测：崩溃栈正是 HttpClient::get → request → ConnectTcp(__fd_chk)）。
+        if (fd >= 0 && fd != sock) {
+            close(fd);
+        }
     }
 
     if (sock < 0) {
