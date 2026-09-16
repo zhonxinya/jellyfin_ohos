@@ -45,6 +45,10 @@ ui-softdecode-firstframe.png
 ui-*.png
 ui-*.jpeg
 
+# 本地参考用的 Jellyfin 服务端源码（tarball + 解压目录）：仅作查阅，不入库
+docs/jellyfin-10.8.12/
+docs/v10.8.12.tar.gz
+
 # 本地 Agent 配置，不随仓库发布
 AGENTS.md
 .agents/
