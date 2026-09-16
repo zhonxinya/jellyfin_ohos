@@ -267,7 +267,7 @@ struct LibrariesAdminPage {
         Button('删除')
           .height(36)
           .padding({ left: 16, right: 16 })
-          .backgroundColor(this.colors().destructive)
+          .backgroundColor(this.colors().errorLight)
           .fontColor(this.colors().onBrand)
           .enabled(!this.actionBusy)
           .onClick(() => {
@@ -431,7 +431,7 @@ struct LibrariesAdminPage {
                 })
               Button(this.actionBusy ? '处理中...' : '删除')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
+                .backgroundColor(this.colors().errorLight)
                 .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {

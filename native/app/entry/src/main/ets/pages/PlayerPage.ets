@@ -378,7 +378,7 @@ struct PlayerPage {
             style: SliderStyle.OutSet
           })
             .width(160)
-            .selectedColor(this.colors().primary)
+            .selectedColor(this.colors().brandPrimary)
             .trackColor(this.colors().overlayControl)
             .trackThickness(4)
             .blockSize({ width: 12, height: 12 })
@@ -414,7 +414,7 @@ struct PlayerPage {
         style: SliderStyle.OutSet
       })
         .width('100%')
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .trackColor(this.colors().overlayControl)
         .trackThickness(4)
         .blockSize({ width: 12, height: 12 })
@@ -579,7 +579,7 @@ struct PlayerPage {
         Progress({ value: this.gestureRatio * 100, total: 100, type: ProgressType.Linear })
           .width(140)
           .height(4)
-          .color(this.colors().primary)
+          .color(this.colors().brandPrimary)
           .backgroundColor(this.colors().onOverlayMuted)
           .margin({ top: 8 })
       }
@@ -728,7 +728,7 @@ struct PlayerPage {
           LoadingProgress()
             .width(48)
             .height(48)
-            .color(this.colors().primary)
+            .color(this.colors().brandPrimary)
           Text('加载播放器...')
             .fontSize(ThemeConstants.BODY_MEDIUM)
             .fontColor(this.colors().onOverlayMuted)

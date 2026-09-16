@@ -52,7 +52,7 @@ struct ServerPage {
       Text($r('app.string.server_title'))
         .fontSize(ThemeConstants.TITLE_LARGE)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
         .width('100%')
 
       Text($r('app.string.server_hint'))
@@ -93,6 +93,6 @@ struct ServerPage {
     .constraintSize({ maxWidth: ThemeConstants.FORM_MAX_WIDTH })
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

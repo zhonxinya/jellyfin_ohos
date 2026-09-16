@@ -173,8 +173,8 @@ struct SplashPage {
         .fontColor(this.colors().textSecondary)
       if (this.status === UiState.ERROR) {
         Button($r('app.string.action_retry'))
-          .backgroundColor(this.colors().primary)
-          .fontColor(this.colors().onPrimary)
+          .backgroundColor(this.colors().brandPrimary)
+          .fontColor(this.colors().onBrand)
           .onClick(() => {
             this.status = UiState.LOADING;
             this.start();
@@ -185,6 +185,6 @@ struct SplashPage {
     .height('100%')
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

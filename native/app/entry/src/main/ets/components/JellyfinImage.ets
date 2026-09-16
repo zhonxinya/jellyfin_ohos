@@ -34,7 +34,7 @@ export struct JellyfinImage {
         LoadingProgress()
           .width(24)
           .height(24)
-          .color(this.colors().primary)
+          .color(this.colors().brandPrimary)
       } else {
         SymbolGlyph(this.iconResource())
           .fontSize(Math.min(40, Math.max(24, Math.floor(Math.min(this.imgWidth, this.imgHeight) / 4))))
@@ -44,7 +44,7 @@ export struct JellyfinImage {
     .width(this.imgWidth)
     .height(this.imgHeight)
     .borderRadius(this.cornerRadius)
-    .backgroundColor(this.colors().surfaceContainerHighest)
+    .backgroundColor(this.colors().surfacePressed)
     .justifyContent(FlexAlign.Center)
   }
 

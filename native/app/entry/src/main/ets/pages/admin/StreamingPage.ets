@@ -95,6 +95,6 @@ struct StreamingPage {
         .layoutWeight(1).width('100%').scrollBar(BarState.Auto)
       }
     }
-    .width('100%').height('100%').backgroundColor(this.colors().background)
+    .width('100%').height('100%').backgroundColor(this.colors().pageBackground)
   }
 }

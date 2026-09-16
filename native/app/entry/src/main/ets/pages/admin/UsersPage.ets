@@ -371,7 +371,7 @@ struct UsersPage {
       Button('删除')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().destructive)
+        .backgroundColor(this.colors().errorLight)
         .fontColor(this.colors().onBrand)
         .enabled(!this.actionBusy && !this.isCurrentLoggedInAdmin(user))
         .onClick(() => {
@@ -649,7 +649,7 @@ struct UsersPage {
                 .onClick(() => { this.showDeleteConfirm = false; })
               Button(this.actionBusy ? '处理中...' : '删除')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
+                .backgroundColor(this.colors().errorLight)
                 .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => { this.deleteUser(); })

@@ -77,7 +77,7 @@ export struct MediaCollectionView {
     GridItem() {
       if (this.loadingMore) {
         Row() {
-          LoadingProgress().width(24).height(24).color(this.colors().primary)
+          LoadingProgress().width(24).height(24).color(this.colors().brandPrimary)
         }
         .width('100%')
         .height(48)
@@ -114,7 +114,7 @@ export struct MediaCollectionView {
             ListItem() {
               if (this.loadingMore) {
                 Row() {
-                  LoadingProgress().width(24).height(24).color(this.colors().primary)
+                  LoadingProgress().width(24).height(24).color(this.colors().brandPrimary)
                 }
                 .width('100%')
                 .height(48)
