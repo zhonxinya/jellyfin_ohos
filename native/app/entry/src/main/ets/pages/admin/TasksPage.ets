@@ -117,7 +117,7 @@ struct TasksPage {
       Column({ space: 4 }) {
         Text(task.name)
           .fontSize(ThemeConstants.TITLE_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -134,8 +134,8 @@ struct TasksPage {
           Button('停止')
             .height(36)
             .padding({ left: 12, right: 12 })
-            .backgroundColor(this.colors().destructive)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().errorLight)
+            .fontColor(this.colors().onBrand)
             .enabled(!this.actionBusy && task.state === 'Running')
             .onClick(() => {
               this.requestStop(task);
@@ -144,8 +144,8 @@ struct TasksPage {
           Button('启动')
             .height(36)
             .padding({ left: 12, right: 12 })
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().brandPrimary)
+            .fontColor(this.colors().onBrand)
             .enabled(!this.actionBusy)
             .onClick(() => {
               this.startTask(task);
@@ -201,14 +201,14 @@ struct TasksPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showStopConfirm) {
         Column() {
           Column({ space: 12 }) {
             Text('停止计划任务？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认停止“${this.pendingTask.name}”？`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
@@ -217,15 +217,15 @@ struct TasksPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showStopConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '停止')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.stopTask();
