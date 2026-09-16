@@ -59,6 +59,8 @@ struct PlayerPage {
   private stopped: boolean = false;
   private timerId: number = -1;
   private hideTimerId: number = -1;
+  /** 最近一次锁定/解锁时刻：用于屏蔽"同一次点击穿透到覆盖层"造成的立即解锁 */
+  private lockChangedAt: number = 0;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   private seekDragMs: number = 0;
@@ -641,6 +643,10 @@ struct PlayerPage {
             } else {
               this.revealControls();
             }
+            // 记录切换时刻：锁定覆盖层会盖满整屏，若无此时间戳，
+            // 同一次点击的抬手事件会"穿透"到刚出现的覆盖层上把它立刻解锁
+            // （实测表现为"点了锁定却没锁上"）。
+            this.lockChangedAt = Date.now();
           }
         })
       }
@@ -867,8 +873,7 @@ struct PlayerPage {
       .backgroundColor(this.colors().brandPrimary)
       .margin({ bottom: 8 })
       .onClick(() => {
-        this.controlsLocked = false;
-        this.revealControls();
+        this.unlockByUser();
       })
       Text('屏幕已锁定')
         .fontSize(ThemeConstants.BODY_MEDIUM)
@@ -884,9 +889,23 @@ struct PlayerPage {
     .alignItems(HorizontalAlign.Center)
     .backgroundColor(this.colors().overlayControlStrong)
     .onClick(() => {
-      this.controlsLocked = false;
-      this.revealControls();
+      this.unlockByUser();
     })
+  }
+
+  /**
+   * 解锁：忽略"刚锁定后极短时间内的点击"。
+   *
+   * 为什么需要：锁定覆盖层是整屏的，点锁定按钮的同一次抬手事件会穿透到刚出现的覆盖层，
+   * 导致"点了锁定立刻又被解锁"（诊断设备上表现为锁定态无法复现，实际是真实缺陷）。
+   */
+  private unlockByUser(): void {
+    if (Date.now() - this.lockChangedAt < 400) {
+      return;
+    }
+    this.controlsLocked = false;
+    this.lockChangedAt = Date.now();
+    this.revealControls();
   }
 
   /** 手势反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
