@@ -30,6 +30,8 @@ struct PlayerPage {
   /** FFmpeg 软解回放状态：逐帧拉取并用 PixelMap 渲染（硬解不支持的编码走这条路） */
   @State private softPlaying: boolean = false;
   @State private softStatus: string = '';
+  /** 诊断结果（渲染自检/存帧），独立于逐帧状态，避免被 70ms 刷新覆盖 */
+  @State private softDiag: string = '';
   private softTimerId: number = -1;
   private softPulling: boolean = false;
   @State private errorMsg: string = '';
@@ -259,9 +261,18 @@ struct PlayerPage {
     }
   }
 
-  /** 诊断：把 EGL 当前渲染缓冲回读成 PNG（原生侧 glReadPixels → 编码），路径显示在状态栏 */
+  /** 诊断：先做 EGL 渲染自检（清屏为红并回读），再把渲染缓冲回读成 PNG */
   private async dumpSoftFrame(): Promise<void> {
     try {
+      // 自检结果直接进状态栏：能判别"surface 不可作为 GL 目标"与"绘制路径有 bug"
+      const selfRaw: string = JellyfinNative.softPlaySelfTest();
+      const selfResult: NativeResult = JellyfinNative.parseResult(selfRaw);
+      if (selfResult.ok && selfResult.data !== null) {
+        const ok: boolean = JsonUtil.getBoolean(selfResult.data as ESObject, 'ok', false);
+        const report: string = JsonUtil.getString(selfResult.data as ESObject, 'report',
+          JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
+        this.softDiag = `自检${ok ? '通过' : '未通过'}：${report}`;
+      }
       const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
       const path: string = `${ctx.cacheDir}/softplay_frame.png`;
       const raw: string = JellyfinNative.softPlayDumpFrame(path);
@@ -270,12 +281,12 @@ struct PlayerPage {
         const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
         const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
         const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
-        this.softStatus = `已存帧：${source} ${w}x${h} → ${path}`;
+        this.softDiag = `${this.softDiag}\n已存帧：${source} ${w}x${h} → ${path}`;
       } else {
-        this.softStatus = `存帧失败：${result.message}`;
+        this.softDiag = `${this.softDiag}\n存帧失败：${result.message}`;
       }
     } catch (err) {
-      this.softStatus = `存帧异常：${(err as Error).message}`;
+      this.softDiag = `存帧异常：${(err as Error).message}`;
     }
   }
 
@@ -974,6 +985,15 @@ struct PlayerPage {
       }
 
       // 软解状态常驻浮层（不随控制条自动隐藏，便于用户与诊断查看进度）
+      if (this.softDiag.length > 0) {
+        Text(this.softDiag)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlay)
+          .backgroundColor(this.colors().badgeScrim)
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(ThemeConstants.BADGE_RADIUS)
+          .margin({ top: 110 })
+      }
       if (this.softStatus.length > 0) {
         Text(this.softStatus)
           .fontSize(ThemeConstants.META_SMALL)

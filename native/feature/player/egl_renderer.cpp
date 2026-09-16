@@ -273,6 +273,39 @@ bool EglRenderer::readbackRgba(std::vector<uint8_t> &out, int &width, int &heigh
     return true;
 }
 
+bool EglRenderer::selfTest(std::string &report)
+{
+    if (!ready_) {
+        report = "渲染器未就绪";
+        return false;
+    }
+    eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
+                   static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
+    glViewport(0, 0, surfaceWidth_, surfaceHeight_);
+    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
+
+    unsigned char pixel[4] = {0, 0, 0, 0};
+    glReadPixels(surfaceWidth_ / 2, surfaceHeight_ / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    const GLenum readErr = glGetError();
+
+    const EGLBoolean swapped = eglSwapBuffers(static_cast<EGLDisplay>(display_),
+                                              static_cast<EGLSurface>(surface_));
+    const EGLint swapErr = eglGetError();
+
+    report = "几何 " + std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_)
+             + "；清屏(红)后中心像素 rgba=(" + std::to_string(pixel[0]) + "," + std::to_string(pixel[1])
+             + "," + std::to_string(pixel[2]) + "," + std::to_string(pixel[3]) + ")"
+             + "；glReadPixels=" + (readErr == GL_NO_ERROR ? "OK" : ("0x" + std::to_string(readErr)))
+             + "；eglSwapBuffers=" + (swapped == EGL_TRUE ? "OK" : ("0x" + std::to_string(swapErr)));
+
+    // 清屏为红且能回读到红 → 该 surface 可作为 GL 渲染目标
+    const bool surfaceRenderable = (pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60);
+    report += surfaceRenderable ? "；结论：surface 可渲染" : "；结论：surface 未呈现（清屏色未回读）";
+    return surfaceRenderable;
+}
+
 void EglRenderer::destroy()
 {
     if (display_ != nullptr && surface_ != nullptr && context_ != nullptr) {

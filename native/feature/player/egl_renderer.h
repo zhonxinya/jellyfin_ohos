@@ -40,6 +40,14 @@ public:
      */
     bool readbackRgba(std::vector<uint8_t> &out, int &width, int &height, std::string &error);
 
+    /**
+     * 渲染自检：只做 `glClearColor(红)` + `glReadPixels` 回读中心像素 + `eglSwapBuffers`，
+     * 用于把"surface 不能作为 GL 目标"与"绘制路径有 bug"两类问题一刀切开。
+     * @param report 人类可读结果（几何、清屏后中心像素、swap 结果）
+     * @return 清屏颜色是否正确回读（true 表示 surface 可渲染）
+     */
+    bool selfTest(std::string &report);
+
     void destroy();
     bool isReady() const { return ready_; }
 

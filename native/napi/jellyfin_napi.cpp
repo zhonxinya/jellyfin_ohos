@@ -1342,6 +1342,23 @@ napi_value SoftPlayStatus(napi_env env, napi_callback_info /*info*/)
     return ToNapiJson(env, MakeResult(true, 200, "ok", out));
 }
 
+/** 渲染自检：清屏为红并回读，判断 surface 能否作为 GL 渲染目标 */
+napi_value SoftPlaySelfTest(napi_env env, napi_callback_info /*info*/)
+{
+    nlohmann::json out;
+    out["rendererReady"] = SoftRenderer().isReady();
+    if (!SoftRenderer().isReady()) {
+        out["ok"] = false;
+        out["error"] = "渲染器未就绪（EGL 未初始化）";
+        return ToNapiJson(env, MakeResult(false, 0, "renderer not ready", out));
+    }
+    std::string report;
+    const bool ok = SoftRenderer().selfTest(report);
+    out["ok"] = ok;
+    out["report"] = report;
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
 napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
 {
     if (SoftSession() != nullptr) {
@@ -1881,6 +1898,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          nullptr},
         {"softPlayClose", nullptr, SoftPlayClose, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"softPlayDumpFrame", nullptr, SoftPlayDumpFrame, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlaySelfTest", nullptr, SoftPlaySelfTest, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},

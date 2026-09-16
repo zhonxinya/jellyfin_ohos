@@ -68,5 +68,11 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
 - **缓冲几何**：创建 EGL surface **之前**就要设置正确几何。实测 OHOS 上 `GET_BUFFER_GEOMETRY` 可能返回
   **宽高转置**的值（2619x1260 vs 实际 1260x2619），会导致 `eglSwapBuffers` 失败；因此建议由宿主传入组件真实像素尺寸。
 - **XComponent 的 surface**：软解渲染与系统 AVPlayer 不能同时占用同一个 surface，切换前要先停掉另一方。
+- **渲染目标可能不可用（实测）**：在 DevEco x86_64 模拟器上，`XComponent(SURFACE)` 无法作为 EGL 渲染目标 ——
+  `EglRenderer::selfTest()`（清屏为红 → `glReadPixels` 回读）返回 `rgba=(0,0,0,0)`，`eglSwapBuffers` 报
+  `0x12301`（非标准 EGL 错误码），即**连 `glClear` 都没有落到缓冲**，而 `glReadPixels` 自身无错。
+  这说明问题在"渲染目标/合成"这一层，而不是纹理/着色器绘制路径。
+  换机型或换渲染目标类型（`XComponentType.TEXTURE`、`OH_NativeImage` 提供 buffer）前，**建议先跑一次
+  `selfTest()` 判定该 surface 是否可渲染**，能省下大量盲调时间。
 - **音频**：本目录尚未包含音频输出（需宿主接 `OH_AudioRenderer`）。
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。

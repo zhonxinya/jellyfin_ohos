@@ -497,6 +497,15 @@ export class JellyfinNative {
     }
   }
 
+  /** 渲染自检：清屏为红并回读（判断 surface 能否作为 GL 渲染目标） */
+  static softPlaySelfTest(): string {
+    try {
+      return jellyfinNative.softPlaySelfTest();
+    } catch (error) {
+      return JellyfinNative.fail('softPlaySelfTest', error);
+    }
+  }
+
   static softPlayClose(): string {
     try {
       return jellyfinNative.softPlayClose();

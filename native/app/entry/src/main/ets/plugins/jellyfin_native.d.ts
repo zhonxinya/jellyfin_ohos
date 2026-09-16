@@ -49,6 +49,7 @@ declare module 'libjellyfin_native.so' {
     softPlayStatus(): string;
     softPlayClose(): string;
     softPlayDumpFrame(path: string): string;
+    softPlaySelfTest(): string;
     playerPlay(): string;
     playerPause(): string;
     playerSeek(positionTicks: number): string;
