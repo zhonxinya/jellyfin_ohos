@@ -671,7 +671,9 @@ struct PlayerPage {
         AppIconButton({
           icon: $r('sys.symbol.chevron_left'),
           variant: 'ghost',
-          iconSize: 20,
+          iconSize: 22,
+          // 触达区对齐 48vp 标准（默认 40vp；设备实测顶部栏按钮曾为 45vp，偏小）
+          buttonSize: 48,
           backgroundOverride: this.colors().overlayControlStrong,
           iconColorOverride: this.colors().onOverlay,
           onTap: () => {
@@ -697,7 +699,9 @@ struct PlayerPage {
         AppIconButton({
           icon: $r('sys.symbol.lock'),
           variant: 'ghost',
-          iconSize: 18,
+          iconSize: 20,
+          // 与返回按钮一致：48vp 触达区（锁定按钮此前实测 45vp，且是唯一"点不中"的控件）
+          buttonSize: 48,
           backgroundOverride: this.colors().overlayControlStrong,
           // 锁定态用品牌色高亮（原来用 🔒/🔓 两个 emoji 区分）
           iconColorOverride: this.controlsLocked ? this.colors().brandPrimary : this.colors().onOverlay,
