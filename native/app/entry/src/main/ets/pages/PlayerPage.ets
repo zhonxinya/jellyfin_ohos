@@ -462,6 +462,18 @@ struct PlayerPage {
     PlaybackState.set(this.itemId, Math.floor(ptsSec * 10000000));
     const raw: string = await JellyfinNative.reportPlaybackProgress(this.itemId,
       Math.floor(ptsSec * 10000000), false);
+    // 同步进系统媒体会话（通知栏/锁屏进度条随播放推进）；与进度上报同一节流节奏。
+    if (this.avSessionRef !== null) {
+      this.avSessionRef.setAVPlaybackState({
+        state: avSession.PlaybackState.PLAYBACK_STATE_PLAY,
+        position: { elapsedTime: Math.floor(ptsSec * 1000), updateTime: Date.now() }
+      }).then(() => {
+        this.appendProbeFile('player_avsession.txt',
+          `syncPlaybackState pos=${Math.floor(ptsSec)}s\n`);
+      }).catch(() => {
+        // 同步失败不影响播放
+      });
+    }
     // 文件探针：便于设备验证时直接确认"软解路径确实上报了、服务端是否接受"
     // （读屏对播放页不可靠，见 writeStateProbe 的说明）
     this.appendProbeFile('player_progress.txt',
