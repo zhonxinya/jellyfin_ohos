@@ -9,6 +9,8 @@ export class AppViewModel {
   hasServer: boolean = false;
   isLoggedIn: boolean = false;
   serverUrl: string = '';
+  /** 服务器名称（来自 /System/Info/Public，经 configureServer 返回） */
+  serverName: string = '';
   userName: string = '';
   isAdmin: boolean = false;
   themeMode: string = 'dark';
@@ -47,6 +49,10 @@ export class AppViewModel {
     this.isLoggedIn = false;
     this.userName = '';
     this.isAdmin = false;
+  }
+
+  setServerName(name: string): void {
+    this.serverName = name;
   }
 
   setServer(url: string): void {

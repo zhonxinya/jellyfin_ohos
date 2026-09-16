@@ -465,6 +465,11 @@ export struct SettingsPage {
   }
 
   private serverNameText(): string {
+    // 优先用 configureServer 返回的权威名称，其次会话 JSON，最后才回落到地址
+    const fromVm: string = AppViewModel.getInstance().serverName;
+    if (fromVm.length > 0) {
+      return fromVm;
+    }
     if (this.serverName.length > 0) {
       return this.serverName;
     }
@@ -712,7 +717,8 @@ export struct SettingsPage {
             // 名称行原来错误地显示了地址；地址行改用会话权威值（原为可能陈旧的 VM 值）
             { icon: '', title: '\u670d\u52a1\u5668\u540d\u79f0', subtitle: this.serverNameText(), info: true },
             { icon: '', title: '\u670d\u52a1\u5668\u5730\u5740', subtitle: this.serverAddressText(), info: true },
-            { icon: '', title: '\u670d\u52a1\u5668\u7248\u672c', subtitle: this.serverVersion.length > 0 ? this.serverVersion : '\u52a0\u8f7d\u4e2d...', info: true },
+            // 取不到版本时显示"未知"（原来永远停在"加载中..."）
+            { icon: '', title: '\u670d\u52a1\u5668\u7248\u672c', subtitle: this.serverVersion.length > 0 ? this.serverVersion : '\u672a\u77e5', info: true },
           ])
 
           // 账号

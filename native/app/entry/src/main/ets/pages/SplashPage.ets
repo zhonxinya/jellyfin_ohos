@@ -91,10 +91,23 @@ struct SplashPage {
       // （设备实测：应用连的是 :8097，设置页却显示旧的 :80），这里以会话为准并回写持久化
       const sessionBaseUrl: string = JsonUtil.getString(session.data, 'baseUrl',
         JsonUtil.getString(session.data, 'BaseUrl', ''));
-      if (sessionBaseUrl.length > 0 && sessionBaseUrl !== serverUrl) {
-        vm.setServer(sessionBaseUrl);
-        await SessionStore.saveServerUrl(sessionBaseUrl);
-        await JellyfinNative.configureServer(sessionBaseUrl);
+      if (sessionBaseUrl.length > 0) {
+        if (sessionBaseUrl !== serverUrl) {
+          vm.setServer(sessionBaseUrl);
+          await SessionStore.saveServerUrl(sessionBaseUrl);
+        }
+        // 始终调用：configureServer 会顺带用 /System/Info/Public 填充会话的 serverName，
+        // 否则设置页「服务器名称」只能回落到地址（上一轮设备实测的现象）
+        const cfgRaw: string = await JellyfinNative.configureServer(sessionBaseUrl);
+        // configureServer 的返回里带 serverName（取自 /System/Info/Public），
+        // 这是界面显示服务器名称的权威来源（会话 JSON 里的 serverName 可能为空）
+        const cfg: NativeResult = JellyfinNative.parseResult(cfgRaw);
+        if (cfg.ok && cfg.data !== null) {
+          const name: string = JsonUtil.getString(cfg.data, 'serverName', '');
+          if (name.length > 0) {
+            vm.setServerName(name);
+          }
+        }
       }
       const userName: string = JsonUtil.getString(session.data, 'userName',
         JsonUtil.getString(session.data, 'UserName', '用户'));
