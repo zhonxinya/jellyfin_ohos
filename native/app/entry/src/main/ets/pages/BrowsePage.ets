@@ -81,15 +81,24 @@ struct BrowsePage {
       }
       return;
     }
-    const page: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
-    if (more) {
-      this.items = this.items.concat(page);
-    } else {
-      this.items = page;
+    try {
+      const page: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      if (more) {
+        this.items = this.items.concat(page);
+      } else {
+        this.items = page;
+      }
+      this.startIndex = this.startIndex + page.length;
+      this.hasMore = page.length >= this.pageSize;
+      this.status = this.items.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
+    } catch (err) {
+      // 解析异常也必须落到终态，否则界面会永远停在"加载中"（且分页标志位卡死）
+      this.loadingMore = false;
+      if (!more) {
+        this.status = UiState.ERROR;
+        this.errorMsg = `加载失败：${(err as Error).message}`;
+      }
     }
-    this.startIndex = this.startIndex + page.length;
-    this.hasMore = page.length >= this.pageSize;
-    this.status = this.items.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
   }
 
   private openItem(item: MediaItem): void {
