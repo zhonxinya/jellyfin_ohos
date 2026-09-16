@@ -66,11 +66,37 @@ void OnSurfaceDestroyed(OH_NativeXComponent * /*component*/, void * /*window*/)
     OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag, "OnSurfaceDestroyed");
 }
 
+/**
+ * 视频区域触摸回调（官方契约：`OH_NativeXComponent_Callback.DispatchTouchEvent`）。
+ *
+ * 为什么必须有它：XComponent 指定 `libraryname` 后，**视频区域的触摸由原生侧接管**，
+ * ArkUI 层的 onTouch/onClick 收不到（设备实测：视频区长按/滑动均无反应，
+ * 而按钮区正常）。此前本回调是 `nullptr`，导致视频区手势（seek/音量/亮度/长按快进）全部失效。
+ *
+ * 本轮回调只做**取证**：把触摸动作与坐标打到 hilog，用来确认触摸确实到达原生侧，
+ * 为后续把这些事件转发给 ArkTS 的手势逻辑（或原生侧直接判定手势）打基础。
+ */
+void OnDispatchTouchEvent(OH_NativeXComponent *component, void *window)
+{
+    OH_NativeXComponent_TouchEvent touchEvent;
+    const int32_t rc = OH_NativeXComponent_GetTouchEvent(component, window, &touchEvent);
+    if (rc != 0) {
+        OH_LOG_Print(LOG_APP, LOG_WARN, kLogDomain, kLogTag, "GetTouchEvent rc=%{public}d", rc);
+        return;
+    }
+    const uint32_t index = touchEvent.numPoints > 0 ? 0 : 0;
+    OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag,
+                 "touch type=%{public}d x=%{public}.1f y=%{public}.1f points=%{public}d",
+                 static_cast<int>(touchEvent.type), touchEvent.x, touchEvent.y,
+                 static_cast<int>(touchEvent.numPoints));
+    (void)index;
+}
+
 OH_NativeXComponent_Callback g_callback = {
     OnSurfaceCreated,
     OnSurfaceChanged,
     OnSurfaceDestroyed,
-    nullptr,   // DispatchTouchEvent：手势仍由 ArkUI 处理
+    OnDispatchTouchEvent,   // 视频区触摸 → 原生侧（官方契约）
 };
 
 } // namespace
