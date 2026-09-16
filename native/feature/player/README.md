@@ -81,6 +81,20 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
 - **导出"渲染结果"必须先重绘再回读**：`eglSwapBuffers()` 之后后台缓冲内容未定义，
   直接 `glReadPixels` 会得到**全黑**（实测踩过，一度误判为渲染失败）；
   正确做法是重绘最近一帧 → `glFinish` → 在 swap **之前**回读（见 `redrawAndReadback()`）。
+- **自检必须与真实绘制走同一条路径**：`selfTest()` 现在分两步 ——
+  ①清屏为红并回读（判定 surface 能否作为渲染目标）；②**用程序生成的 2×2 纹理绘制四边形并回读**
+  （判定着色器/VBO/attribute/纹理采样这一整条绘制路径是否真的产出内容）。
+  实测第二步回读为 `rgba=(128,128,128,255)`（四个纹素经线性过滤的平均值）⇒ **绘制路径正常**。
+  这个两步自检能把"surface/发布层"与"绘制层"的问题一刀切开，强烈建议移植后先跑它。
+- **TEXTURE 路径的发布语义（本会话未解，附已排除项）**：实测在 TEXTURE 路径下，
+  解码帧真实有效（导出解码帧为彩色画面，217 色）、绘制路径正常（四边形自检通过）、
+  `eglSwapBuffers` 与 `OH_NativeImage_UpdateSurfaceImage` 均返回成功，
+  但**系统截图、ArkUI 组件快照（componentSnapshot）、帧缓冲回读三者一致为黑**。
+  已排除：解码为空、绘制路径失效、XComponent(SURFACE) 类型限制、二次初始化、
+  缓冲几何过大（已限制 ≤640 宽）、自检裸 swap 破坏配对（已修）。
+  下一步建议按官方 NativeImage 用法验证：**GL 直接写入 XComponent 的 textureId**（不经 EGL window surface）
+  → `UpdateSurfaceImage` 发布；若仍报 `NATIVE_ERROR_NO_BUFFER(40601000)`，
+  需确认是否要先注册 `OH_NativeImage_SetOnFrameAvailableListener` 或把纹理挂到 NativeImage 上下文上。
 - **EOF 的判定（`RangeCache`）**：HTTP `416` 与"2xx 且响应体为空"都应视为**读到末尾**而非错误，
   否则 libavformat 会在末尾收到 `EIO`；而"status=0 / 带 error"必须报错，不能静默当 EOF。
   另注意：服务器支持 Range 且每次返回整块时**无法**推断总长度（响应经回调返回、不含响应头），

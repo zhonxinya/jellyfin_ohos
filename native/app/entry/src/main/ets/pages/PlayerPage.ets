@@ -3,6 +3,8 @@ import common from '@ohos.app.ability.common';
 import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
 import image from '@ohos.multimedia.image';
+import componentSnapshot from '@ohos.arkui.componentSnapshot';
+import fs from '@ohos.file.fs';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -310,6 +312,21 @@ struct PlayerPage {
   private async autoDumpRenderedFrame(): Promise<void> {
     try {
       const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      // ① 组件级快照：XComponent(TEXTURE) 的内容由 ArkUI 合成，
+      //    componentSnapshot 能抓到组件真实显示结果（系统 snapshot_display 未必包含）。
+      const capturePath: string = `${ctx.cacheDir}/softcapture.png`;
+      try {
+        const shot: image.PixelMap = await componentSnapshot.get('softVideoArea');
+        const packer: image.ImagePacker = image.createImagePacker();
+        const buf: ArrayBuffer = await packer.packing(shot, { format: 'image/png', quality: 100 });
+        const file = fs.openSync(capturePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+        fs.writeSync(file.fd, buf);
+        fs.closeSync(file);
+        this.softDiag = `已组件快照 → ${capturePath}`;
+      } catch (snapErr) {
+        this.softDiag = `组件快照失败：${(snapErr as Error).message}`;
+      }
+      // ② 原生渲染缓冲回读（TEXTURE 路径不支持时会明确报错，不再给误导性黑图）
       const path: string = `${ctx.cacheDir}/softrender_frame.png`;
       const raw: string = JellyfinNative.softPlayDumpFrame(path);
       const result: NativeResult = JellyfinNative.parseResult(raw);
@@ -317,9 +334,9 @@ struct PlayerPage {
         const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
         const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
         const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
-        this.softDiag = `已自动存帧：${source} ${w}x${h} → ${path}`;
+        this.softDiag = `${this.softDiag}\n已自动存帧：${source} ${w}x${h}`;
       } else {
-        this.softDiag = `自动存帧失败：${result.message}`;
+        this.softDiag = `${this.softDiag}\n自动存帧：${result.message}`;
       }
     } catch (err) {
       this.softDiag = `自动存帧异常：${(err as Error).message}`;
@@ -852,6 +869,7 @@ struct PlayerPage {
     Stack() {
       // XComponent 始终存在：软解时 EGL 直接渲染到它的 surface（不再走 PixelMap 逐帧刷新）
       XComponent({ id: 'jellyfin_player', type: XComponentType.TEXTURE, controller: this.surfaceController })
+        .id('softVideoArea')
         .width('100%')
         .height('100%')
         .backgroundColor(this.colors().videoBackground)

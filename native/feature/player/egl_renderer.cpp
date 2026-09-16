@@ -270,38 +270,6 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
                    static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
 
-    if (nativeImage_ != nullptr) {
-        // TEXTURE 路径也走"四边形绘制"：先把解码帧上传到自己的纹理（texture_），
-        // 再绘制到 NativeImage 的 window surface，最后 swap + 发布。
-        glBindTexture(GL_TEXTURE_2D, texture_);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-        const GLenum texErr = glGetError();
-        if (texErr != GL_NO_ERROR) {
-            error = "上传解码帧纹理失败（0x" + std::to_string(texErr) + "，帧 "
-                    + std::to_string(width) + "x" + std::to_string(height) + "）";
-            return false;
-        }
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glUseProgram(program_);
-        glUniform1i(uniformTex_, 0);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-        glEnableVertexAttribArray(static_cast<GLuint>(attribPos_));
-        glVertexAttribPointer(static_cast<GLuint>(attribPos_), 2, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), reinterpret_cast<void *>(0));
-        glEnableVertexAttribArray(static_cast<GLuint>(attribUv_));
-        glVertexAttribPointer(static_cast<GLuint>(attribUv_), 2, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), reinterpret_cast<void *>(2 * sizeof(float)));
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        const GLenum drawErr = glGetError();
-        if (drawErr != GL_NO_ERROR) {
-            error = "绘制失败（0x" + std::to_string(drawErr) + "）";
-            return false;
-        }
-        return true;
-    }
-
     if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
         eglQuerySurface(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
                         EGL_WIDTH, &surfaceWidth_);
@@ -318,6 +286,12 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     glUseProgram(program_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture_);
+    // 每帧都重设纹理参数：纹理可能因某些驱动/平台状态被重置，
+    // 一旦采样器认为纹理不完整，采样结果就是**全黑且无 GL 错误**（正是本会话踩到的现象）。
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     GLenum glErr = glGetError();
@@ -537,7 +511,39 @@ bool EglRenderer::selfTest(std::string &report)
     // 清屏为红且能回读到红 → 该 surface 可作为 GL 渲染目标
     const bool surfaceRenderable = (pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60);
     report += surfaceRenderable ? "；结论：surface 可渲染" : "；结论：surface 未呈现（清屏色未回读）";
-    return surfaceRenderable;
+
+    // ── 第二步：走与真实播放**完全相同**的绘制路径，画一个程序生成的 2x2 纹理四边形再回读 ──
+    // 目的：把"绘制路径（着色器/VBO/attribute/纹理采样）有问题"与
+    //       "surface/发布这一层有问题"区分开。上下文：真实解码帧回读全黑但 GL 无错误。
+    const uint8_t checker[16] = {
+        255, 0, 0, 255,     0, 255, 0, 255,     // 上排：红、绿
+        0, 0, 255, 255,     255, 255, 255, 255  // 下排：蓝、白
+    };
+    std::string drawError;
+    bool quadOk = false;
+    if (drawFrame(checker, 2, 2, drawError)) {
+        glFinish();
+        unsigned char quadPixel[4] = {0, 0, 0, 0};
+        glReadPixels(surfaceWidth_ / 2, surfaceHeight_ / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, quadPixel);
+        const int nonBlack = quadPixel[0] + quadPixel[1] + quadPixel[2];
+        quadOk = nonBlack > 30;
+        report += "；纹理四边形回读 rgba=(" + std::to_string(quadPixel[0]) + ","
+                  + std::to_string(quadPixel[1]) + "," + std::to_string(quadPixel[2]) + ","
+                  + std::to_string(quadPixel[3]) + ")"
+                  + (quadOk ? "（绘制路径正常）" : "（绘制路径未产出内容）");
+    } else {
+        report += "；纹理四边形绘制失败：" + drawError;
+    }
+    // 自检结束时把画面恢复为黑并发布，避免把测试图案留在屏幕上
+    if (nativeImage_ != nullptr) {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) ==
+            EGL_TRUE) {
+            OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
+        }
+    }
+    return surfaceRenderable && quadOk;
 }
 
 void EglRenderer::destroy()
