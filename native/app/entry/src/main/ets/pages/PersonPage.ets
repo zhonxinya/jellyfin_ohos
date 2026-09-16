@@ -8,7 +8,8 @@ import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { MediaCollectionView } from '../components/MediaCollectionView';
 import { SectionHeader } from '../components/SectionHeader';
@@ -17,6 +18,8 @@ import { SectionHeader } from '../components/SectionHeader';
 @Component
 struct PersonPage {
   @State private personId: string = '';
+  /** 由详情页传入的姓名：有它就能立即渲染头部，不必请求会在部分服务器上挂起的人物详情端点 */
+  @State private personNameFromParams: string = '';
   @State private status: string = UiState.LOADING;
   @State private errorMsg: string = '';
   @State private person: MediaItem = new MediaItem();
@@ -32,8 +35,22 @@ struct PersonPage {
       if (idVal !== undefined && idVal.length > 0) {
         this.personId = idVal;
       }
+      const nameVal: string | undefined = bag['personName'] as string | undefined;
+      if (nameVal !== undefined && nameVal.length > 0) {
+        this.personNameFromParams = nameVal;
+        // 先用传入的姓名把页面渲染出来，避免头部空着等接口
+        this.person.name = nameVal;
+      }
     }
-    this.load();
+    // 必须捕获异常：原来直接 `this.load()`，任何异常都会让页面永远停在"加载中…"，
+    // 既看不到错误也没有重试入口（设备实测：人物页一直显示加载中的根因）
+    this.load().catch((err: Error) => {
+      const msg: string = err.message.length > 0 ? err.message : '未知错误';
+      this.status = UiState.ERROR;
+      this.errorMsg = `加载人物信息失败：${msg}`;
+      this.worksStatus = UiState.ERROR;
+      this.worksError = msg;
+    });
   }
 
   private colors(): ThemeColors {
@@ -49,14 +66,19 @@ struct PersonPage {
     this.status = UiState.LOADING;
     this.worksStatus = UiState.LOADING;
     this.worksError = '';
-    const raw: string = await JellyfinNative.getItemDetail(this.personId);
-    const result: NativeResult = JellyfinNative.parseResult(raw);
-    if (!result.ok || result.data === null) {
-      this.status = UiState.ERROR;
-      this.errorMsg = result.message.length > 0 ? result.message : '加载人物信息失败';
-      return;
+    // 有传入姓名时不再请求人物详情：实测部分 Jellyfin 版本对
+    // `/Users/{uid}/Items/{personId}` 会**挂起不响应**（curl 12s 无响应，同一服务器取影片详情仅 47ms），
+    // 请求它只会让页面卡在加载态；姓名与头像已能从详情页的演职人员数据里带过来。
+    if (this.personNameFromParams.length === 0) {
+      const raw: string = await JellyfinNative.getItemDetail(this.personId);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        this.status = UiState.ERROR;
+        this.errorMsg = result.message.length > 0 ? result.message : '加载人物信息失败';
+        return;
+      }
+      this.person = MediaItem.fromJson(result.data);
     }
-    this.person = MediaItem.fromJson(result.data);
     const query: ItemsQueryOptions = new ItemsQueryOptions();
     query.personIds = this.personId;
     query.includeItemTypes = 'Movie,Series,Episode,Audio';
@@ -98,18 +120,18 @@ struct PersonPage {
         Text(this.person.name)
           .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.person.year.length > 0) {
           Text(`出生年份：${this.person.year}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
         if (this.person.overview.length > 0) {
           Text(this.person.overview)
             .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontColor(this.colors().textSecondary)
             .lineHeight(21)
             .maxLines(5)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -126,24 +148,27 @@ struct PersonPage {
   @Builder
   WorksContent() {
     Column() {
-      SectionHeader({ title: $r('app.string.person_works'), icon: '\u{1F3AC}' })
+      SectionHeader({ title: $r('app.string.person_works'), icon: '' })
       if (this.worksStatus === UiState.LOADING) {
-        AsyncStateView({ status: UiState.LOADING, minHeight: 120 })
+        LoadingState()
       } else if (this.worksStatus === UiState.ERROR) {
-        AsyncStateView({
-          status: UiState.ERROR,
-          message: this.worksError,
-          minHeight: 120,
-          onRetry: () => {
+        EmptyState({
+          message: this.worksError.length > 0 ? this.worksError : '加载作品失败',
+          actionLabel: '重试',
+          onAction: () => {
             this.load();
           }
         })
       } else if (this.worksStatus === UiState.EMPTY) {
-        Text($r('app.string.person_no_works'))
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurfaceVariant)
-          .width('100%')
-          .padding({ left: 16, right: 16, bottom: 24 })
+        // 空数据走参考项目 EmptyState（原来是一行手写提示文字）
+        Column() {
+          EmptyState({
+            message: $r('app.string.person_no_works'),
+            icon: $r('sys.symbol.video')
+          })
+        }
+        .width('100%')
+        .padding({ bottom: 24 })
       } else {
         MediaCollectionView({
           items: $works,
@@ -170,14 +195,19 @@ struct PersonPage {
       })
 
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          minHeight: 240,
-          onRetry: () => {
-            this.load();
-          }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => {
+              this.load();
+            }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无数据' })
+        }
       } else {
         Scroll() {
           Column() {
@@ -194,6 +224,6 @@ struct PersonPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

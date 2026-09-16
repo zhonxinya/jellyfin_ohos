@@ -5,7 +5,9 @@
       "path": "./src/main/cpp/CMakeLists.txt",
       "arguments": "",
       "cppFlags": "",
-      "abiFilters": ["arm64-v8a"]
+      // arm64-v8a 供真机；x86_64 供 DevEco 模拟器（模拟器仅支持 x86_64，
+      // 缺了会报 9568347 install parse native so failed: Abi type 不匹配）
+      "abiFilters": ["arm64-v8a", "x86_64"]
     }
   },
   "targets": [

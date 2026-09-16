@@ -6,6 +6,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { PageHeader } from '../components/PageHeader';
 import { JsonUtil } from '../common/JsonUtil';
+import { SessionUtil } from '../services/SessionUtil';
 
 interface SettingsItem {
   /** 系统符号名，映射见 iconResource()；info 行忽略 */
@@ -45,8 +46,12 @@ export struct SettingsPage {
   @State private message: string = '';
   @State private status: string = UiState.INITIAL;
   @State private serverVersion: string = '';
+  /** 服务器名称与地址：来自活跃会话（权威来源），避免显示陈旧的持久化值 */
+  @State private serverName: string = '';
+  @State private serverAddress: string = '';
   @State private showLogoutConfirm: boolean = false;
   @State private showChangeServerConfirm: boolean = false;
+  @State private showClearDataConfirm: boolean = false;
   @State private showPlayerPicker: boolean = false;
   @State private defaultPlayer: string = 'native';
   // 服务器用户配置开关
@@ -66,6 +71,18 @@ export struct SettingsPage {
     const sys: NativeResult = JellyfinNative.parseResult(sysRaw);
     if (sys.ok && sys.data !== null) {
       this.serverVersion = JsonUtil.getString(sys.data, 'Version', '');
+      // 服务器名称取自服务端信息（会话里的 serverName 可能为空，此前该行错误地显示成地址）
+      const nameFromServer: string = JsonUtil.getString(sys.data, 'ServerName', '');
+      if (nameFromServer.length > 0) {
+        this.serverName = nameFromServer;
+      }
+    }
+    // 会话中的 baseUrl / serverName 是权威值（API 客户端实际使用）
+    const sessionRaw: string = SessionUtil.exportSessionJson();
+    const sessionObj: ESObject | null = JsonUtil.parseObject(sessionRaw);
+    if (sessionObj !== null) {
+      this.serverAddress = JsonUtil.getString(sessionObj, 'baseUrl', '');
+      this.serverName = JsonUtil.getString(sessionObj, 'serverName', '');
     }
     const prefsRaw: string = JellyfinNative.getPreferences();
     const prefs: NativeResult = JellyfinNative.parseResult(prefsRaw);
@@ -224,13 +241,13 @@ export struct SettingsPage {
     Column() {
       Column({ space: 16 }) {
         Text(title)
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
         Text(body)
           .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
         Row({ space: 8 }) {
           Blank()
@@ -238,15 +255,15 @@ export struct SettingsPage {
             .height(40)
             .padding({ left: 12, right: 12 })
             .backgroundColor(Color.Transparent)
-            .fontColor(this.colors().primary)
+            .fontColor(this.colors().brandPrimary)
             .onClick(() => {
               onCancel();
             })
           Button(confirmLabel)
             .height(40)
             .padding({ left: 16, right: 16 })
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().brandPrimary)
+            .fontColor(this.colors().onBrand)
             .onClick(() => {
               onConfirm();
             })
@@ -254,7 +271,7 @@ export struct SettingsPage {
         .width('100%')
       }
       .padding(24)
-      .backgroundColor(this.colors().surface)
+      .backgroundColor(this.colors().cardBackground)
       .borderRadius(28)
       .width('80%')
       .onClick(() => {
@@ -277,9 +294,9 @@ export struct SettingsPage {
     Column() {
       Column({ space: 12 }) {
         Text('\u9009\u62e9\u9ed8\u8ba4\u64ad\u653e\u5668')
-          .fontSize(20)
+          .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
         ForEach(PLAYER_OPTIONS, (player: PlayerOption) => {
           Row({ space: 16 }) {
@@ -288,13 +305,13 @@ export struct SettingsPage {
                 .width(20)
                 .height(20)
                 .fill(Color.Transparent)
-                .stroke(this.defaultPlayer === player.value ? this.colors().primary : this.colors().onSurfaceVariant)
+                .stroke(this.defaultPlayer === player.value ? this.colors().brandPrimary : this.colors().textSecondary)
                 .strokeWidth(2)
               if (this.defaultPlayer === player.value) {
                 Circle()
                   .width(10)
                   .height(10)
-                  .fill(this.colors().primary)
+                  .fill(this.colors().brandPrimary)
               }
             }
             .width(40)
@@ -302,10 +319,10 @@ export struct SettingsPage {
             Column({ space: 2 }) {
               Text(player.label)
                 .fontSize(ThemeConstants.BODY_MEDIUM)
-                .fontColor(this.colors().onSurface)
+                .fontColor(this.colors().textPrimary)
               Text(player.description)
                 .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontColor(this.colors().onSurfaceVariant)
+                .fontColor(this.colors().textSecondary)
             }
             .alignItems(HorizontalAlign.Start)
             .layoutWeight(1)
@@ -318,7 +335,7 @@ export struct SettingsPage {
         }, (player: PlayerOption) => player.value)
       }
       .padding(24)
-      .backgroundColor(this.colors().surface)
+      .backgroundColor(this.colors().cardBackground)
       .borderRadius(28)
       .width('80%')
       .onClick(() => {
@@ -343,26 +360,26 @@ export struct SettingsPage {
         Circle()
           .width(52)
           .height(52)
-          .fill(this.colors().surfaceElevated)
+          .fill(this.colors().surfacePressed)
         Text(AppViewModel.getInstance().userName.length > 0 ?
           AppViewModel.getInstance().userName.substring(0, 1).toUpperCase() : '?')
-          .fontSize(22)
+          .fontSize(ThemeConstants.TITLE_XLARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
       }
       Column({ space: 4 }) {
         Text(AppViewModel.getInstance().userName.length > 0 ?
           AppViewModel.getInstance().userName : '\u672a\u767b\u5f55')
-          .fontSize(16)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(AppViewModel.getInstance().serverUrl.length > 0 ?
           AppViewModel.getInstance().serverUrl + (AppViewModel.getInstance().isAdmin ? ' \u00b7 \u7ba1\u7406\u5458' : '')
           : '\u672a\u77e5\u670d\u52a1\u5668')
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontColor(this.colors().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
@@ -371,59 +388,99 @@ export struct SettingsPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(12)
     .margin({ top: 16, bottom: 8 })
     .alignItems(VerticalAlign.Center)
   }
 
-  /** Flutter _MenuTile：dense ListTile，leading primary 图标，trailing chevron */
+  /**
+   * 设置行（菜单型）—— 对齐 mybooks_ohos 的 `SettingCell`：
+   * 标题 16fp `text_primary`、副标题 12fp `text_secondary`、尾部 chevron 16fp `text_tertiary`、
+   * 四边 16vp 内边距、按下态 `surface_pressed`。
+   */
   @Builder
   MenuTile(icon: string, title: string, subtitle: string, onTap: () => void) {
     Row({ space: 12 }) {
       SymbolGlyph(this.iconResource(icon))
-        .fontSize(20)
-        .fontColor([this.colors().primary])
+        .fontSize(ThemeConstants.TITLE_LARGE)
+        .fontColor([this.colors().brandPrimary])
         .width(28)
-      Column({ space: 2 }) {
+      Column({ space: 4 }) {
         Text(title)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
-        Text(subtitle)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
+        if (subtitle.length > 0) {
+          Text(subtitle)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(18)
-        .fontColor([this.colors().onSurfaceVariant])
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor([this.colors().textTertiary])
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding(ThemeConstants.PAGE_PADDING)
+    .stateStyles({
+      pressed: {
+        .backgroundColor(this.colors().surfacePressed)
+      }
+    })
     .onClick(() => {
       onTap();
     })
   }
 
-  /** Flutter _InfoTile：无图标，label 左、值右对齐 */
+  /** 信息行 —— 对齐参考项目 `SettingCell` 的 valueText 分支（label 16fp 主色、值 14fp 次级） */
   @Builder
   InfoTile(label: string, value: string) {
     Row() {
       Text(label)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
         .layoutWeight(1)
       Text(value)
-        .fontSize(ThemeConstants.LABEL_SMALL)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontColor(this.colors().textSecondary)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding(ThemeConstants.PAGE_PADDING)
+  }
+
+  /** 清除全部本地数据并回到服务器配置页（上架合规入口） */
+  private async clearLocalData(): Promise<void> {
+    this.showClearDataConfirm = false;
+    await SessionStore.clearAll();
+    // 同时清掉内存中的会话与服务器地址，避免刚清除后界面仍显示上一次的配置
+    AppViewModel.getInstance().resetAuth();
+    AppViewModel.getInstance().setServer('');
+    router.replaceUrl({ url: 'pages/ServerPage' });
+  }
+
+  private serverNameText(): string {
+    // 优先用 configureServer 返回的权威名称，其次会话 JSON，最后才回落到地址
+    const fromVm: string = AppViewModel.getInstance().serverName;
+    if (fromVm.length > 0) {
+      return fromVm;
+    }
+    if (this.serverName.length > 0) {
+      return this.serverName;
+    }
+    return AppViewModel.getInstance().serverUrl.length > 0 ? AppViewModel.getInstance().serverUrl : '未知';
+  }
+
+  private serverAddressText(): string {
+    if (this.serverAddress.length > 0) {
+      return this.serverAddress;
+    }
+    return AppViewModel.getInstance().serverUrl.length > 0 ? AppViewModel.getInstance().serverUrl : '未配置';
   }
 
   private onSectionItemTap(child: SettingsItem): void {
@@ -435,6 +492,8 @@ export struct SettingsPage {
       this.showChangeServerConfirm = true;
     } else if (action === 'defaultPlayer') {
       this.showPlayerPicker = true;
+    } else if (action === 'clearLocalData') {
+      this.showClearDataConfirm = true;
     } else if (route.length > 0) {
       const titleParam: string = child.titleParam === undefined ? '' : child.titleParam;
       const pathParam: string = child.pathParam === undefined ? '' : child.pathParam;
@@ -451,26 +510,35 @@ export struct SettingsPage {
     }
   }
 
-  /** Flutter _SectionCard：头部 icon18 primary + 14 bold 标题；条目间通栏 1px 分隔线 */
+  /**
+   * 设置分组卡片 —— 对齐参考项目：头部「图标 + 标题 16fp Medium」，
+   * 组内行为 `SettingCell` 风格、条目间一律 **0.5vp `divider`**（参考项目全站只有这一种分隔线）。
+   */
   @Builder
   SectionCard(title: string, icon: string, children: SettingsItem[]) {
     Column() {
       Row({ space: 8 }) {
         SymbolGlyph(this.iconResource(icon))
-          .fontSize(18)
-          .fontColor([this.colors().primary])
+          .fontSize(ThemeConstants.ICON_MEDIUM)
+          .fontColor([this.colors().brandPrimary])
         Text(title)
-          .fontSize(ThemeConstants.TITLE_SMALL)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().textPrimary)
+          .layoutWeight(1)
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 4 })
+      .padding({
+        left: ThemeConstants.PAGE_PADDING,
+        right: ThemeConstants.PAGE_PADDING,
+        top: 14,
+        bottom: 10
+      })
       ForEach(children, (child: SettingsItem, index: number) => {
         if (index > 0) {
           Divider()
-            .color(this.colors().outline)
-            .strokeWidth(1)
+            .color(this.colors().divider)
+            .strokeWidth(0.5)
         }
         if (child.info === true) {
           this.InfoTile(child.title, child.subtitle)
@@ -482,36 +550,40 @@ export struct SettingsPage {
       }, (_child: SettingsItem, index: number) => `${title}_${index}`)
     }
     .width('100%')
-    .backgroundColor(this.colors().surface)
-    .borderRadius(12)
+    .backgroundColor(this.colors().cardBackground)
+    .borderRadius(ThemeConstants.CARD_RADIUS)
     .clip(true)
-    .margin({ left: 16, right: 16, bottom: 8 })
+    .margin({
+      left: ThemeConstants.PAGE_PADDING,
+      right: ThemeConstants.PAGE_PADDING,
+      bottom: ThemeConstants.CARD_STACK_SPACE
+    })
   }
 
-  /** Flutter SwitchListTile：标题 + 副标题 + 尾部 Switch */
+  /** 开关行 —— 对齐参考项目 `SettingCell` 的 toggle 分支（16/12 文案 + 品牌色开关） */
   @Builder
   ToggleRow(title: string, subtitle: string, isOn: boolean, onChange: (v: boolean) => void) {
     Row({ space: 12 }) {
-      Column({ space: 2 }) {
+      Column({ space: 4 }) {
         Text(title)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
         if (subtitle.length > 0) {
           Text(subtitle)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: isOn })
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .onChange((v: boolean) => {
           onChange(v);
         })
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding(ThemeConstants.PAGE_PADDING)
   }
 
   build() {
@@ -528,13 +600,13 @@ export struct SettingsPage {
           } else {
             // M3 AppBar 语义：56 高，titleLarge(22) 左对齐
             Text($r('app.string.settings_title'))
-              .fontSize(22)
+              .fontSize(ThemeConstants.TITLE_XLARGE)
               .fontWeight(FontWeight.Medium)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
               .height(56)
               .padding({ left: 16, right: 16 })
-              .backgroundColor(this.colors().surface)
+              .backgroundColor(this.colors().cardBackground)
           }
 
           this.UserCard()
@@ -578,8 +650,8 @@ export struct SettingsPage {
                 })
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
-            .borderRadius(12)
+            .backgroundColor(this.colors().cardBackground)
+            .borderRadius(ThemeConstants.CARD_RADIUS)
             .clip(true)
             .margin({ left: 16, right: 16, bottom: 8 })
           }
@@ -607,7 +679,7 @@ export struct SettingsPage {
                   this.enableNextEpisodeAutoPlay = v;
                   this.saveUserField('EnableNextEpisodeAutoPlay', v);
                 })
-              Divider().color(this.colors().outline).strokeWidth(1)
+              Divider().color(this.colors().divider).strokeWidth(0.5)
               this.ToggleRow('\u8bb0\u4f4f\u97f3\u9891\u9009\u62e9', '',
                 this.rememberAudioSelections, (v: boolean) => {
                   this.rememberAudioSelections = v;
@@ -615,8 +687,8 @@ export struct SettingsPage {
                 })
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
-            .borderRadius(12)
+            .backgroundColor(this.colors().cardBackground)
+            .borderRadius(ThemeConstants.CARD_RADIUS)
             .clip(true)
             .margin({ left: 16, right: 16, bottom: 8 })
           }
@@ -634,30 +706,34 @@ export struct SettingsPage {
                 })
             }
             .width('100%')
-            .backgroundColor(this.colors().surface)
-            .borderRadius(12)
+            .backgroundColor(this.colors().cardBackground)
+            .borderRadius(ThemeConstants.CARD_RADIUS)
             .clip(true)
             .margin({ left: 16, right: 16, bottom: 8 })
           }
 
           // 服务器（Flutter：名称 InfoTile + 地址 + 版本）
           this.SectionCard('\u670d\u52a1\u5668', 'externaldrive', [
-            { icon: '', title: '\u670d\u52a1\u5668\u540d\u79f0', subtitle: AppViewModel.getInstance().serverUrl.length > 0 ?
-              AppViewModel.getInstance().serverUrl : '\u672a\u77e5', info: true },
-            { icon: 'chevron_right', title: '\u670d\u52a1\u5668\u5730\u5740', subtitle: AppViewModel.getInstance().serverUrl.length > 0 ?
-              AppViewModel.getInstance().serverUrl : '\u672a\u914d\u7f6e', route: '' },
-            { icon: '', title: '\u670d\u52a1\u5668\u7248\u672c', subtitle: this.serverVersion.length > 0 ? this.serverVersion : '\u52a0\u8f7d\u4e2d...', info: true },
+            // 名称行原来错误地显示了地址；地址行改用会话权威值（原为可能陈旧的 VM 值）
+            { icon: '', title: '\u670d\u52a1\u5668\u540d\u79f0', subtitle: this.serverNameText(), info: true },
+            { icon: '', title: '\u670d\u52a1\u5668\u5730\u5740', subtitle: this.serverAddressText(), info: true },
+            // 取不到版本时显示"未知"（原来永远停在"加载中..."）
+            { icon: '', title: '\u670d\u52a1\u5668\u7248\u672c', subtitle: this.serverVersion.length > 0 ? this.serverVersion : '\u672a\u77e5', info: true },
           ])
 
           // 账号
           this.SectionCard('\u8d26\u53f7', 'person_2', [
             { icon: 'power', title: '\u9000\u51fa\u767b\u5f55', subtitle: '\u6e05\u9664\u672c\u5730\u8d26\u53f7\u4fe1\u606f\uff0c\u4fdd\u7559\u670d\u52a1\u5668\u5730\u5740', action: 'logout' },
             { icon: 'arrow_2_circlepath', title: '\u66f4\u6362\u670d\u52a1\u5668', subtitle: '\u6e05\u9664\u5168\u90e8\u914d\u7f6e\u5e76\u91cd\u65b0\u8fde\u63a5', action: 'changeServer' },
+            // 上架合规：提供明确的"清除全部本地数据"入口（会话、服务器地址、偏好、隐私同意记录）
+            { icon: 'trash', title: '\u6e05\u9664\u5168\u90e8\u672c\u5730\u6570\u636e', subtitle: '\u5220\u9664\u672c\u673a\u4f1a\u8bdd\u3001\u670d\u52a1\u5668\u5730\u5740\u4e0e\u504f\u597d\uff08\u4e0d\u5f71\u54cd\u670d\u52a1\u5668\u4e0a\u7684\u6570\u636e\uff09', action: 'clearLocalData' },
           ])
 
           // 关于
           this.SectionCard('\u5173\u4e8e', 'info_circle', [
-            { icon: '', title: '\u5ba2\u6237\u7aef', subtitle: 'Jellyfin \u9e3f\u8499\u5ba2\u6237\u7aef', info: true },
+            { icon: 'doc_text', title: '\u9690\u79c1\u653f\u7b56', subtitle: '\u6211\u4eec\u5982\u4f55\u5904\u7406\u4e0e\u4fdd\u62a4\u4f60\u7684\u4fe1\u606f', route: 'pages/LegalPage', titleParam: 'privacy' },
+            { icon: 'doc_text', title: '\u7528\u6237\u534f\u8bae', subtitle: '\u4f7f\u7528\u672c\u5e94\u7528\u7684\u6761\u6b3e\u4e0e\u514d\u8d23\u8bf4\u660e', route: 'pages/LegalPage', titleParam: 'terms' },
+            { icon: '', title: '\u5ba2\u6237\u7aef', subtitle: 'Jellyfin \u975e\u5b98\u65b9\u7b2c\u4e09\u65b9\u5ba2\u6237\u7aef', info: true },
             { icon: '', title: '\u7248\u672c', subtitle: JellyfinNative.getVersion(), info: true },
             { icon: '', title: '\u6784\u5efa\u73af\u5883', subtitle: 'Native ArkTS 5.1.0(18)', info: true },
           ])
@@ -672,6 +748,15 @@ export struct SettingsPage {
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
 
+      if (this.showClearDataConfirm) {
+        this.ConfirmDialog('\u6e05\u9664\u5168\u90e8\u672c\u5730\u6570\u636e',
+          '\u5c06\u5220\u9664\u672c\u673a\u4fdd\u5b58\u7684\u4f1a\u8bdd\u3001\u670d\u52a1\u5668\u5730\u5740\u3001\u504f\u597d\u4e0e\u9690\u79c1\u540c\u610f\u8bb0\u5f55\uff0c\u670d\u52a1\u5668\u4e0a\u7684\u6570\u636e\u4e0d\u53d7\u5f71\u54cd\u3002\u786e\u5b9a\u7ee7\u7eed\uff1f',
+          '\u6e05\u9664', () => {
+            this.clearLocalData();
+          }, () => {
+            this.showClearDataConfirm = false;
+          });
+      }
       if (this.showLogoutConfirm) {
         this.ConfirmDialog('\u9000\u51fa\u767b\u5f55', '\u786e\u5b9a\u8981\u9000\u51fa\u5f53\u524d\u8d26\u53f7\u5417\uff1f', '\u9000\u51fa', () => {
           this.onLogout();
@@ -702,7 +787,7 @@ export struct SettingsPage {
           .fontColor(this.colors().success)
           .width('80%')
           .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(8)
           .position({ x: '10%', y: 56 })
           .onClick(() => {
@@ -712,7 +797,7 @@ export struct SettingsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }
 

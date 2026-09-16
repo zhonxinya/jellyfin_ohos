@@ -1,69 +1,61 @@
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 
+/**
+ * 区块标题 —— 内部实现已换成 mybooks_ohos 的 `SectionTitle` 规格。
+ *
+ * 参考项目统一用「4×16vp 品牌色竖条 + 17fp / Medium 标题 + 可选右侧动作文字」，
+ * 不用 emoji 图标；容器左右 16vp、上 12vp 下 8vp（参考项目的区块节奏）。
+ *
+ * 保留 `icon` 参数是为了不破坏既有调用点（HomePage/DetailPage/LibraryShelf 仍在传 emoji），
+ * 但它**已被忽略**：新视觉不再使用 emoji → 系统符号的映射。后续轮次可直接从调用点移除。
+ *
+ * @deprecated 新代码请直接用 `SectionTitle`；本组件保留为兼容壳。
+ */
 @Component
 export struct SectionHeader {
   @Prop title: ResourceStr = '';
+  /** @deprecated 已忽略（参考项目不使用图标） */
   @Prop icon: string = '';
   @Prop showMore: boolean = false;
+  @Prop actionLabel: string = '';
   onMore: () => void = () => {};
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
   }
 
-  /** emoji 输入 → 系统符号资源；全部名称已在本机 SDK sysResource 核验 */
-  private iconResource(): Resource {
-    if (this.icon === '📚') {
-      return $r('sys.symbol.book_pages');
-    }
-    if (this.icon === '▶️') {
-      return $r('sys.symbol.play');
-    }
-    if (this.icon === '🎦') {
-      return $r('sys.symbol.video');
-    }
-    if (this.icon === '⭐') {
-      return $r('sys.symbol.star');
-    }
-    if (this.icon === '🎬') {
-      return $r('sys.symbol.film');
-    }
-    if (this.icon === '👥') {
-      return $r('sys.symbol.person_2');
-    }
-    if (this.icon.length > 0) {
-      return $r(this.icon as string);
-    }
-    return $r('sys.symbol.rectangle_stack');
-  }
-
   build() {
-    Row() {
-      if (this.icon.length > 0) {
-        SymbolGlyph(this.iconResource())
-          .fontSize(20)
-          .fontColor([this.colors().onSurfaceVariant])
-          .margin({ right: 8 })
-      }
+    Row({ space: 8 }) {
+      Column()
+        .width(4)
+        .height(16)
+        .borderRadius(2)
+        .backgroundColor(this.colors().brandPrimary)
       Text(this.title)
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_SECTION)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
       if (this.showMore) {
-        Button($r('app.string.view_all'))
-          .height(40)
-          .padding({ left: 8, right: 8 })
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().primary)
-          .backgroundColor(Color.Transparent)
+        Text(this.actionLabel.length > 0 ? this.actionLabel : $r('app.string.view_all'))
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().brandPrimary)
+          .padding({ left: 8, right: 8, top: 6, bottom: 6 })
           .onClick(() => {
             this.onMore();
           })
       }
     }
     .width('100%')
-    .padding({ left: 16, right: 8, top: 20, bottom: 8 })
+    .padding({
+      left: ThemeConstants.PAGE_PADDING,
+      right: ThemeConstants.PAGE_PADDING,
+      top: 12,
+      bottom: 8
+    })
+    .alignItems(VerticalAlign.Center)
   }
 }

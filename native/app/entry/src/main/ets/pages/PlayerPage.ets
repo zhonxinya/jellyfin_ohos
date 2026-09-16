@@ -7,12 +7,17 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { WindowLayout } from '../common/WindowLayout';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { formatSeconds } from '../common/format';
+import { AppIconButton } from '../components/AppIconButton';
+import { ChipButton } from '../components/ChipButton';
+import { EmptyState } from '../components/EmptyState';
 
 @Entry
 @Component
 struct PlayerPage {
   @State private itemId: string = '';
   @State private title: string = '播放';
+  /** 集数/季信息文案：参数解析时一次性算好，不在 build 里调用 getter（见下方稳定性修复说明） */
+  @State private typeLabel: string = '';
   @State private playUrl: string = '';
   @State private stateText: string = 'idle';
   @State private positionMs: number = 0;
@@ -68,6 +73,7 @@ struct PlayerPage {
         this.playbackOptions = optsVal;
       }
     }
+    this.typeLabel = this.computeTypeLabel();
     this.openPlayer();
     this.timerId = setInterval(() => {
       if (this.isPlaying) {
@@ -164,7 +170,13 @@ struct PlayerPage {
     try {
       this.avPlayer = await media.createAVPlayer();
       this.avPlayer.on('stateChange', (state: string) => {
-        if (state === 'prepared') {
+        this.stateText = state;
+        if (state === 'initialized') {
+          // ⚠️ 关键修复：AVPlayer 状态机为 idle →(设置 url)→ initialized →prepare()→ preparing → prepared。
+          // 原实现只设置 url 就等待 'prepared'，从不调用 prepare()，播放器会永远停在 initialized，
+          // 界面一直显示"加载播放器..."（设备实测：H.264/MP4 也一样起不来）。
+          this.avPlayer?.prepare();
+        } else if (state === 'prepared') {
           this.durationMs = (this.avPlayer?.duration ?? 0);
           this.status = UiState.SUCCESS;
           this.avPlayer?.play();
@@ -277,20 +289,31 @@ struct PlayerPage {
     return WindowLayout.screenWidth();
   }
 
-  private get itemTypeLabel(): string {
-    // 解析从 DetailPage 传入的播放选项，提取集数/季信息
+  /**
+   * 计算集数/季信息文案。
+   *
+   * 稳定性修复（设备实测发现的崩溃）：原实现是 `private get itemTypeLabel()`，
+   * 里面直接 `const album: string = opts['album']; ... album.length > 0`，
+   * 当 DetailPage 未传 album 时 `opts['album']` 为 undefined，`album.length` 抛
+   * `TypeError: Cannot read property length of undefined`；而 ArkTS 会把 getter 内联进
+   * build，getter 里的 try/catch 拦不住，导致**进入播放页即崩溃**（jscrash 日志
+   * PlayerPage.ets:320）。现在改为：字段值先做类型判断 + 结果缓存到 @State，build 里只读状态。
+   */
+  private computeTypeLabel(): string {
     try {
       const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
-      const seasonNum: number = opts['seasonNumber'] as number;
-      const episodeNum: number = opts['episodeNumber'] as number;
-      const album: string = opts['album'] as string;
+      const seasonNum: number = typeof opts['seasonNumber'] === 'number' ? opts['seasonNumber'] as number : 0;
+      const episodeNum: number = typeof opts['episodeNumber'] === 'number' ? opts['episodeNumber'] as number : 0;
+      const albumRaw: string = typeof opts['album'] === 'string' ? opts['album'] as string : '';
       if (seasonNum > 0 && episodeNum > 0) {
         return `第${seasonNum}季 第${episodeNum}集`;
       }
-      if (album.length > 0) {
-        return album;
+      if (albumRaw.length > 0) {
+        return albumRaw;
       }
-    } catch (_) {}
+    } catch (_e) {
+      // 参数不是合法 JSON 时忽略
+    }
     return '';
   }
 
@@ -298,53 +321,55 @@ struct PlayerPage {
   TopBar() {
     Column() {
       Row() {
-        Button('\u2039')
-          .width(40)
-          .height(40)
-          .fontSize(22)
-          .backgroundColor(this.colors().overlayControlStrong)
-          .fontColor(this.colors().onOverlay)
-          .borderRadius(20)
-          .onClick(() => {
+        AppIconButton({
+          icon: $r('sys.symbol.chevron_left'),
+          variant: 'ghost',
+          iconSize: 20,
+          backgroundOverride: this.colors().overlayControlStrong,
+          iconColorOverride: this.colors().onOverlay,
+          onTap: () => {
             this.flushStop();
             router.back();
-          })
+          }
+        })
         Column({ space: 2 }) {
           Text(this.title)
             .fontSize(ThemeConstants.BODY_MEDIUM)
             .fontColor(this.colors().onOverlay)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (this.itemTypeLabel.length > 0) {
-            Text(this.itemTypeLabel)
-              .fontSize(11)
+          if (this.typeLabel.length > 0) {
+            Text(this.typeLabel)
+              .fontSize(ThemeConstants.LABEL_SMALL)
               .fontColor(this.colors().onOverlayMuted)
           }
         }
         .layoutWeight(1)
         .margin({ left: 8 })
-        Button(this.controlsLocked ? '\u{1F512}' : '\u{1F513}')
-          .width(40)
-          .height(40)
-          .backgroundColor(this.colors().overlayControlStrong)
-          .fontColor(this.colors().onOverlay)
-          .borderRadius(20)
-          .onClick(() => {
+        AppIconButton({
+          icon: $r('sys.symbol.lock'),
+          variant: 'ghost',
+          iconSize: 18,
+          backgroundOverride: this.colors().overlayControlStrong,
+          // 锁定态用品牌色高亮（原来用 🔒/🔓 两个 emoji 区分）
+          iconColorOverride: this.controlsLocked ? this.colors().brandPrimary : this.colors().onOverlay,
+          onTap: () => {
             this.controlsLocked = !this.controlsLocked;
             if (this.controlsLocked) {
               this.showControls = false;
             } else {
               this.revealControls();
             }
-          })
+          }
+        })
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 12, bottom: 4 })
       if (this.showVolumeBar) {
         Row() {
-          Text('\u{1F50A}')
-            .fontSize(14)
-            .fontColor(this.colors().onOverlay)
+          SymbolGlyph($r('sys.symbol.speaker_wave_2'))
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontColor([this.colors().onOverlay])
           Slider({
             value: this.volume,
             min: 0,
@@ -353,7 +378,7 @@ struct PlayerPage {
             style: SliderStyle.OutSet
           })
             .width(160)
-            .selectedColor(this.colors().primary)
+            .selectedColor(this.colors().brandPrimary)
             .trackColor(this.colors().overlayControl)
             .trackThickness(4)
             .blockSize({ width: 12, height: 12 })
@@ -389,7 +414,7 @@ struct PlayerPage {
         style: SliderStyle.OutSet
       })
         .width('100%')
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .trackColor(this.colors().overlayControl)
         .trackThickness(4)
         .blockSize({ width: 12, height: 12 })
@@ -405,15 +430,15 @@ struct PlayerPage {
       // 时间显示 + 倍速
       Row() {
         Text(this.formatTime(this.positionMs))
-          .fontSize(12)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
         Blank()
         Text(`${this.playbackSpeed}x`)
-          .fontSize(12)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
           .margin({ right: 8 })
         Text(this.durationMs > 0 ? this.formatTime(this.durationMs) : '--:--')
-          .fontSize(12)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
       }
       .width('100%')
@@ -428,12 +453,20 @@ struct PlayerPage {
           .onClick(() => {
             this.onSeek(-10000);
           })
-        Button(this.isPlaying ? '\u23F8' : '\u25B6')
+        Button({ type: ButtonType.Circle, stateEffect: false }) {
+          SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause') : $r('sys.symbol.play'))
+            .fontSize(ThemeConstants.TITLE_XLARGE)
+            .fontColor([this.colors().onBrand])
+        }
           .layoutWeight(1)
-          .backgroundColor(this.colors().primary)
-          .fontColor(this.colors().onPrimary)
-          .height(48)
-          .fontSize(20)
+          .backgroundColor(this.colors().brandPrimary)
+          .height(ThemeConstants.BUTTON_HEIGHT)
+          .borderRadius(ThemeConstants.BUTTON_HEIGHT / 2)
+          .stateStyles({
+            pressed: {
+              .backgroundColor(this.colors().brandPrimaryPressed)
+            }
+          })
           .onClick(() => {
             this.onPlayPause();
           })
@@ -445,14 +478,13 @@ struct PlayerPage {
           .onClick(() => {
             this.onSeek(10000);
           })
-        Button(`${this.playbackSpeed}x`)
-          .layoutWeight(1)
-          .backgroundColor(this.colors().overlayControl)
-          .fontColor(this.colors().onOverlay)
-          .height(40)
-          .onClick(() => {
+        ChipButton({
+          label: `${this.playbackSpeed}x`,
+          selected: this.playbackSpeed !== 1,
+          onTap: () => {
             this.cycleSpeed();
-          })
+          }
+        })
       }
       .width('100%')
     }
@@ -468,15 +500,27 @@ struct PlayerPage {
   CompletedOverlay() {
     Column() {
       Text('播放结束')
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onOverlayMuted)
-      Button('\u{1F501}')
+      Button({ type: ButtonType.Circle, stateEffect: false }) {
+        SymbolGlyph($r('sys.symbol.arrow_2_circlepath'))
+          .fontSize(ThemeConstants.ICON_XXL)
+          .fontColor([this.colors().onBrand])
+      }
         .width(72)
         .height(72)
-        .fontSize(36)
-        .backgroundColor(this.colors().overlayControlStrong)
-        .fontColor(this.colors().onOverlay)
-        .borderRadius(36)
+        .backgroundColor(this.colors().brandPrimary)
+        .shadow({
+          radius: 12,
+          color: this.colors().buttonShadow,
+          offsetX: 0,
+          offsetY: 4
+        })
+        .stateStyles({
+          pressed: {
+            .backgroundColor(this.colors().brandPrimaryPressed)
+          }
+        })
         .margin({ top: 8 })
         .onClick(() => {
           this.onPlayPause();
@@ -491,11 +535,11 @@ struct PlayerPage {
   @Builder
   LockedOverlay() {
     Column() {
-      Text('\u{1F512}')
-        .fontSize(28)
-        .fontColor(this.colors().onOverlay)
+      SymbolGlyph($r('sys.symbol.lock'))
+        .fontSize(ThemeConstants.ICON_XXL)
+        .fontColor([this.colors().onOverlay])
       Text('已锁定，点击解锁')
-        .fontSize(12)
+        .fontSize(ThemeConstants.META_SMALL)
         .fontColor(this.colors().onOverlayMuted)
         .margin({ top: 4 })
     }
@@ -510,21 +554,32 @@ struct PlayerPage {
     })
   }
 
+  /** 手势反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
+  private gestureSymbol(): Resource {
+    if (this.gestureIcon === 'seek') {
+      return this.lastSeekForward ? $r('sys.symbol.chevron_right') : $r('sys.symbol.chevron_left');
+    }
+    if (this.gestureIcon === 'brightness') {
+      return $r('sys.symbol.bolt');
+    }
+    return $r('sys.symbol.speaker_wave_2');
+  }
+
   @Builder
   GestureFeedback() {
     Column() {
-      Text(this.gestureIcon)
-        .fontSize(40)
-        .fontColor(this.colors().onOverlay)
+      SymbolGlyph(this.gestureSymbol())
+        .fontSize(ThemeConstants.ICON_HERO)
+        .fontColor([this.colors().onOverlay])
       Text(this.gestureFeedback)
-        .fontSize(16)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
         .fontColor(this.colors().onOverlay)
         .margin({ top: 8 })
       if (this.gestureRatio >= 0) {
         Progress({ value: this.gestureRatio * 100, total: 100, type: ProgressType.Linear })
           .width(140)
           .height(4)
-          .color(this.colors().primary)
+          .color(this.colors().brandPrimary)
           .backgroundColor(this.colors().onOverlayMuted)
           .margin({ top: 8 })
       }
@@ -542,7 +597,7 @@ struct PlayerPage {
       XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE })
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000')
+        .backgroundColor(this.colors().videoBackground)
         .onLoad(() => {
           // XComponent surface is created after load; bind to AVPlayer if available
           if (this.avPlayer !== null && this.surfaceId.length > 0) {
@@ -580,7 +635,7 @@ struct PlayerPage {
                 this.positionMs = clamped;
                 this.lastSeekForward = deltaX >= 0;
                 this.gestureFeedback = this.lastSeekForward ? `+${this.formatTime(Math.abs(this.seekDragMs))}` : `-${this.formatTime(Math.abs(this.seekDragMs))}`;
-                this.gestureIcon = this.lastSeekForward ? '\u{23E9}' : '\u{23EA}';
+                this.gestureIcon = 'seek';
                 this.gestureRatio = total > 0 ? clamped / total : 0;
                 this.showFeedback = true;
               } else if (Math.abs(deltaY) > 3) {
@@ -591,7 +646,7 @@ struct PlayerPage {
                   const newBrightness: number = Math.max(0, Math.min(1, this.brightnessBase + delta));
                   // 鸿蒙暂不支持程序化调节系统亮度，显示反馈
                   this.gestureFeedback = `${Math.round(newBrightness * 100)}%`;
-                  this.gestureIcon = '\u{1F506}';
+                  this.gestureIcon = 'brightness';
                   this.gestureRatio = newBrightness;
                   this.showFeedback = true;
                   this.brightnessLastY = touch.y;
@@ -604,7 +659,7 @@ struct PlayerPage {
                     this.avPlayer.setVolume(newVolume);
                   }
                   this.gestureFeedback = `${Math.round(newVolume * 100)}%`;
-                  this.gestureIcon = '\u{1F50A}';
+                  this.gestureIcon = 'volume';
                   this.gestureRatio = newVolume;
                   this.showFeedback = true;
                   this.volumeLastY = touch.y;
@@ -673,7 +728,7 @@ struct PlayerPage {
           LoadingProgress()
             .width(48)
             .height(48)
-            .color(this.colors().primary)
+            .color(this.colors().brandPrimary)
           Text('加载播放器...')
             .fontSize(ThemeConstants.BODY_MEDIUM)
             .fontColor(this.colors().onOverlayMuted)
@@ -683,37 +738,30 @@ struct PlayerPage {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor('#000000')
+        .backgroundColor(this.colors().videoBackground)
       }
 
       if (this.status === UiState.ERROR) {
         Column() {
-          Text('\u26A0\uFE0F')
-            .fontSize(48)
-            .fontColor(this.colors().error)
-          Text(this.errorMsg)
-            .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurface)
-            .margin({ top: 16 })
-            .textAlign(TextAlign.Center)
-          Button('重试')
-            .margin({ top: 24 })
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
-            .onClick(() => {
+          // 错误态复用 EmptyState（参考项目约定：错误不另造组件，配"重试"动作）
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '播放出错',
+            actionLabel: '重试',
+            onAction: () => {
               this.stopped = false;
               this.openPlayer();
-            })
+            }
+          })
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor('#000000')
+        .backgroundColor(this.colors().videoBackground)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#000000')
+    .backgroundColor(this.colors().videoBackground)
   }
 }

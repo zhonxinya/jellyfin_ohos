@@ -100,6 +100,13 @@ std::string SessionManager::serverName() const
     return serverName_;
 }
 
+void SessionManager::setDeviceId(const std::string &deviceId)
+{
+    if (!deviceId.empty()) {
+        deviceId_ = deviceId;
+    }
+}
+
 std::string SessionManager::deviceId() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

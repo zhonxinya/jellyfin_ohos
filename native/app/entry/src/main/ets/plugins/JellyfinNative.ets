@@ -82,6 +82,15 @@ export class JellyfinNative {
     }
   }
 
+  /** 注入按安装持久化的稳定设备标识（应在登录之前调用，避免服务端堆积重复设备） */
+  static async setDeviceId(deviceId: string): Promise<string> {
+    try {
+      return await jellyfinNative.setDeviceId(deviceId);
+    } catch (error) {
+      return JellyfinNative.fail('setDeviceId', error);
+    }
+  }
+
   static async login(username: string, password: string): Promise<string> {
     try {
       return await jellyfinNative.login(username, password);

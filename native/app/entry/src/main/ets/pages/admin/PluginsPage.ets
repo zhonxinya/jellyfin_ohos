@@ -5,7 +5,8 @@ import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 
 interface PluginPackageInfo {
   name: string;
@@ -203,21 +204,21 @@ struct PluginsPage {
     Row({ space: 10 }) {
       Column({ space: 4 }) {
         Text(pkg.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (pkg.version.length > 0) {
           Text(`版本：${pkg.version}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (pkg.overview.length > 0) {
           Text(pkg.overview)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -228,8 +229,8 @@ struct PluginsPage {
         Button(this.actionBusy ? '处理中...' : '取消安装')
           .height(36)
           .padding({ left: 12, right: 12 })
-          .backgroundColor(this.colors().destructive)
-          .fontColor(this.colors().onPrimary)
+          .backgroundColor(this.colors().errorLight)
+          .fontColor(this.colors().onBrand)
           .enabled(!this.actionBusy && pkg.installationId.length > 0)
           .onClick(() => {
             this.requestCancelInstall(pkg);
@@ -238,8 +239,8 @@ struct PluginsPage {
         Button(this.actionBusy ? '安装中...' : '安装')
           .height(36)
           .padding({ left: 12, right: 12 })
-          .backgroundColor(this.colors().primary)
-          .fontColor(this.colors().onPrimary)
+          .backgroundColor(this.colors().brandPrimary)
+          .fontColor(this.colors().onBrand)
           .enabled(!this.actionBusy)
           .onClick(() => {
             this.requestInstall(pkg);
@@ -248,7 +249,7 @@ struct PluginsPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -257,33 +258,33 @@ struct PluginsPage {
     Column({ space: 12 }) {
       Text(this.showInstallConfirm ? '安装插件？' : '取消插件安装？')
         .fontSize(ThemeConstants.TITLE_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
         .width('100%')
       Text(this.showInstallConfirm ?
         `确认安装插件“${this.pendingPackage.name}”？` :
         `确认取消插件“${this.pendingPackage.name}”的安装？`)
         .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontColor(this.colors().textSecondary)
         .width('100%')
       if (this.showInstallConfirm && this.pendingPackage.version.length > 0) {
         Text(`将安装版本：${this.pendingPackage.version}`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
       }
       Row({ space: 8 }) {
         Button('取消')
           .layoutWeight(1)
-          .backgroundColor(this.colors().surfaceElevated)
-          .fontColor(this.colors().onSurface)
+          .backgroundColor(this.colors().surfacePressed)
+          .fontColor(this.colors().textPrimary)
           .onClick(() => {
             this.showInstallConfirm = false;
             this.showCancelConfirm = false;
           })
         Button(this.actionBusy ? '处理中...' : (this.showInstallConfirm ? '安装' : '取消安装'))
           .layoutWeight(1)
-          .backgroundColor(this.showInstallConfirm ? this.colors().primary : this.colors().destructive)
-          .fontColor(this.colors().onPrimary)
+          .backgroundColor(this.showInstallConfirm ? this.colors().brandPrimary : this.colors().errorLight)
+          .fontColor(this.colors().onBrand)
           .enabled(!this.actionBusy)
           .onClick(() => {
             if (this.showInstallConfirm) {
@@ -296,7 +297,7 @@ struct PluginsPage {
       .width('100%')
     }
     .padding(20)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(12)
     .width('85%')
     .onClick(() => {
@@ -321,15 +322,19 @@ struct PluginsPage {
             .padding({ left: 16, right: 16, bottom: 6 })
         }
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            emptyHint: '当前没有可用插件',
-            minHeight: 200,
-            onRetry: () => {
-              this.reload();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.reload();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '当前没有可用插件' })
+          }
         } else {
           List({ space: 8 }) {
             ForEach(this.packages, (pkg: PluginPackageInfo) => {
@@ -346,7 +351,7 @@ struct PluginsPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showInstallConfirm || this.showCancelConfirm) {
         Column() {

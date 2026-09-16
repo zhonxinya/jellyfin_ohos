@@ -5,7 +5,8 @@ import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 
 interface TaskInfo {
   id: string;
@@ -116,14 +117,14 @@ struct TasksPage {
     Row({ space: 12 }) {
       Column({ space: 4 }) {
         Text(task.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(`${taskStateLabel(task.state)} · ${task.id}`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -134,8 +135,8 @@ struct TasksPage {
           Button('停止')
             .height(36)
             .padding({ left: 12, right: 12 })
-            .backgroundColor(this.colors().destructive)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().errorLight)
+            .fontColor(this.colors().onBrand)
             .enabled(!this.actionBusy && task.state === 'Running')
             .onClick(() => {
               this.requestStop(task);
@@ -144,8 +145,8 @@ struct TasksPage {
           Button('启动')
             .height(36)
             .padding({ left: 12, right: 12 })
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().brandPrimary)
+            .fontColor(this.colors().onBrand)
             .enabled(!this.actionBusy)
             .onClick(() => {
               this.startTask(task);
@@ -155,7 +156,7 @@ struct TasksPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -176,15 +177,19 @@ struct TasksPage {
             .padding({ left: 16, right: 16, bottom: 6 })
         }
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            emptyHint: '当前没有计划任务',
-            minHeight: 200,
-            onRetry: () => {
-              this.reload();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.reload();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '当前没有计划任务' })
+          }
         } else {
           List({ space: 8 }) {
             ForEach(this.tasks, (task: TaskInfo) => {
@@ -201,31 +206,31 @@ struct TasksPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showStopConfirm) {
         Column() {
           Column({ space: 12 }) {
             Text('停止计划任务？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认停止“${this.pendingTask.name}”？`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showStopConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '停止')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.stopTask();
@@ -234,7 +239,7 @@ struct TasksPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

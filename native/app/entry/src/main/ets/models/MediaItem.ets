@@ -43,7 +43,8 @@ export class MediaItem {
       parts.push(this.year);
     }
     if (this.communityRating > 0) {
-      parts.push(`★ ${this.communityRating.toFixed(1)}`);
+      // 用文字"分"表示评分，不再用 ★ 字符当图标（参考项目里图标一律用系统符号）
+      parts.push(`${this.communityRating.toFixed(1)} 分`);
     }
     if (this.runTimeTicks > 0 && this.type !== 'Series' && this.type !== 'BoxSet' &&
       this.type !== 'CollectionFolder') {

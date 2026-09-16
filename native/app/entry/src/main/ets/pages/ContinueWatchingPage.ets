@@ -6,7 +6,8 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { MediaCollectionView } from '../components/MediaCollectionView';
 
 @Entry
@@ -74,13 +75,17 @@ struct ContinueWatchingPage {
         onBack: () => { router.back(); }
       })
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          emptyHint: '暂无继续观看内容',
-          minHeight: 260,
-          onRetry: () => { this.loadPage(false); }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => { this.loadPage(false); }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无继续观看内容' })
+        }
       } else {
         MediaCollectionView({
           items: $items,
@@ -99,6 +104,6 @@ struct ContinueWatchingPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

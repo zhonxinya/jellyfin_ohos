@@ -5,7 +5,8 @@ import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 
 interface UserInfo {
   id: string;
@@ -334,36 +335,36 @@ struct UsersPage {
       Column({ space: 5 }) {
         Row({ space: 8 }) {
           Text(user.name)
-            .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurface)
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontColor(this.colors().textPrimary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
           if (user.isAdmin) {
             Text('管理员')
               .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onPrimary)
-              .backgroundColor(this.colors().primary)
+              .fontColor(this.colors().onBrand)
+              .backgroundColor(this.colors().brandPrimary)
               .padding({ left: 6, right: 6, top: 2, bottom: 2 })
               .borderRadius(4)
           }
         }
         Text(`ID：${user.id}`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
         Text(user.isDisabled ? '已禁用' : (user.isHidden ? '隐藏用户' : '可登录'))
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(user.isDisabled ? this.colors().error : this.colors().onSurfaceVariant)
+          .fontColor(user.isDisabled ? this.colors().error : this.colors().textSecondary)
       }
       .layoutWeight(1)
       Button('编辑')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().surfaceElevated)
-        .fontColor(this.colors().onSurface)
+        .backgroundColor(this.colors().surfacePressed)
+        .fontColor(this.colors().textPrimary)
         .enabled(!this.actionBusy)
         .onClick(() => {
           this.openEdit(user);
@@ -371,8 +372,8 @@ struct UsersPage {
       Button('删除')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().destructive)
-        .fontColor(this.colors().onPrimary)
+        .backgroundColor(this.colors().errorLight)
+        .fontColor(this.colors().onBrand)
         .enabled(!this.actionBusy && !this.isCurrentLoggedInAdmin(user))
         .onClick(() => {
           this.requestDelete(user);
@@ -380,7 +381,7 @@ struct UsersPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -388,11 +389,11 @@ struct UsersPage {
   ToggleRow(label: string, key: string, policy: boolean) {
     Row() {
       Text(label)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
         .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: policy })
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .enabled(!this.actionBusy && this.editingUser !== null && !this.isCurrentLoggedInAdmin(this.editingUser))
         .onChange((value: boolean) => {
           if (key === 'IsAdministrator') {
@@ -410,11 +411,11 @@ struct UsersPage {
   ConfigurationToggleRow(label: string, key: string) {
     Row() {
       Text(label)
-        .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
         .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: this.configurationBoolean(key) })
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .enabled(!this.actionBusy && this.editingUser !== null && !this.isCurrentLoggedInAdmin(this.editingUser))
         .onChange((value: boolean) => {
           this.editConfiguration = this.updateObjectBoolean(this.editConfiguration, key, value);
@@ -431,7 +432,7 @@ struct UsersPage {
         Column({ space: 10 }) {
           Text(`编辑用户：${this.editingUser.name}`)
             .fontSize(ThemeConstants.TITLE_MEDIUM)
-            .fontColor(this.colors().onSurface)
+            .fontColor(this.colors().textPrimary)
             .width('100%')
           if (this.isCurrentLoggedInAdmin(this.editingUser)) {
             Text('当前登录管理员受保护，不能删除或修改。')
@@ -440,8 +441,8 @@ struct UsersPage {
               .width('100%')
           }
           Text('用户策略')
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
           this.ToggleRow('管理员', 'IsAdministrator', this.policyBoolean('IsAdministrator'))
           this.ToggleRow('禁用登录', 'IsDisabled', this.policyBoolean('IsDisabled'))
@@ -452,8 +453,8 @@ struct UsersPage {
           this.ToggleRow('允许音频转码', 'EnableAudioPlaybackTranscoding', this.policyBoolean('EnableAudioPlaybackTranscoding'))
           this.ToggleRow('允许下载', 'EnableContentDownloading', this.policyBoolean('EnableContentDownloading'))
           Text('用户偏好')
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
           TextInput({ text: this.configurationText('AudioLanguagePreference'), placeholder: '音频语言偏好（可选）' })
             .width('100%')
@@ -480,16 +481,16 @@ struct UsersPage {
           Row({ space: 8 }) {
             Button('取消')
               .layoutWeight(1)
-              .backgroundColor(this.colors().surfaceElevated)
-              .fontColor(this.colors().onSurface)
+              .backgroundColor(this.colors().surfacePressed)
+              .fontColor(this.colors().textPrimary)
               .enabled(!this.actionBusy)
               .onClick(() => {
                 this.closeEdit();
               })
             Button(this.actionBusy ? '保存中...' : '保存')
               .layoutWeight(1)
-              .backgroundColor(this.colors().primary)
-              .fontColor(this.colors().onPrimary)
+              .backgroundColor(this.colors().brandPrimary)
+              .fontColor(this.colors().onBrand)
               .enabled(!this.actionBusy && !this.isCurrentLoggedInAdmin(this.editingUser))
               .onClick(() => {
                 this.saveUser();
@@ -498,7 +499,7 @@ struct UsersPage {
           .width('100%')
         }
         .padding(20)
-        .backgroundColor(this.colors().surface)
+        .backgroundColor(this.colors().cardBackground)
         .borderRadius(12)
         .width('90%')
         .onClick(() => {
@@ -527,13 +528,17 @@ struct UsersPage {
             .padding({ left: 16, right: 16, bottom: 6 })
         }
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            emptyHint: '当前没有用户',
-            minHeight: 200,
-            onRetry: () => { this.reload(); }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => { this.reload(); }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '当前没有用户' })
+          }
         } else {
           List({ space: 8 }) {
             ForEach(this.users, (user: UserInfo) => {
@@ -548,15 +553,15 @@ struct UsersPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (!this.showCreateForm && this.editingUser === null && !this.showDeleteConfirm && !this.showAdminConfirm) {
         Button('+')
           .width(56)
           .height(56)
-          .fontSize(28)
-          .fontColor(this.colors().onPrimary)
-          .backgroundColor(this.colors().primary)
+          .fontSize(ThemeConstants.ICON_XXL)
+          .fontColor(this.colors().onBrand)
+          .backgroundColor(this.colors().brandPrimary)
           .borderRadius(28)
           .position({ x: '90%', y: '85%' })
           .enabled(!this.actionBusy)
@@ -571,7 +576,7 @@ struct UsersPage {
           Column({ space: 12 }) {
             Text('新增用户')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             TextInput({ text: this.createName, placeholder: '用户名' })
               .width('100%')
@@ -591,8 +596,8 @@ struct UsersPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.showCreateForm = false;
@@ -602,15 +607,15 @@ struct UsersPage {
                 })
               Button(this.actionBusy ? '创建中...' : '创建')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().primary)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().brandPrimary)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => { this.createUser(); })
             }
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
@@ -634,30 +639,30 @@ struct UsersPage {
           Column({ space: 12 }) {
             Text('删除用户？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认删除用户“${this.pendingDelete.name}”？此操作不可撤销。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .enabled(!this.actionBusy)
                 .onClick(() => { this.showDeleteConfirm = false; })
               Button(this.actionBusy ? '处理中...' : '删除')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => { this.deleteUser(); })
             }
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
@@ -676,30 +681,30 @@ struct UsersPage {
           Column({ space: 12 }) {
             Text('确认修改管理员权限？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(this.pendingAdminValue ? '该用户将获得管理员权限。请确认你了解此权限范围。' : '该用户将失去管理员权限。')
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .enabled(!this.actionBusy)
                 .onClick(() => { this.showAdminConfirm = false; })
               Button(this.actionBusy ? '处理中...' : '确认')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().primary)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().brandPrimary)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => { this.confirmAdminChange(); })
             }
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

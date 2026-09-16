@@ -6,8 +6,22 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { MediaCollectionView, MediaViewToggle } from '../components/MediaCollectionView';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { PageScaffold } from '../components/PageScaffold';
+import { SearchBar } from '../components/SearchBar';
+import { EmptyState } from '../components/EmptyState';
+import { LoadingState } from '../components/LoadingState';
 
+/**
+ * 搜索页 —— 已按 mybooks_ohos 的页面模板重构。
+ *
+ * 迁移要点：
+ * - 顶栏换成 `PageScaffold` + 56vp `AppTopBar`（原来是 56vp 手写 AppBar，标题字号/边距都是字面量）；
+ * - 搜索栏换成 `SearchBar` 组件（40vp 输入框 + 右侧品牌色圆形搜索按钮），
+ *   清除按钮作为可选能力保留；
+ * - **卡片/列表切换按钮移到顶栏右侧插槽**（参考项目把视图切换放在顶栏 action 位，而不是内容区）；
+ * - 状态渲染统一成 `LoadingState` / `EmptyState`（错误态复用空态 + "重试"），不再用 `AsyncStateView`；
+ * - 搜索建议行改用参考项目的列表行语言：内容 16vp 内边距、0.5vp 分隔线、按下态 `surface_pressed`。
+ */
 @Entry
 @Component
 struct SearchPage {
@@ -43,6 +57,13 @@ struct SearchPage {
     this.debounceId = setTimeout(() => {
       this.loadHints();
     }, 300);
+  }
+
+  private clearQuery(): void {
+    this.query = '';
+    this.hintItems = [];
+    this.items = [];
+    this.status = UiState.INITIAL;
   }
 
   private async loadHints(): Promise<void> {
@@ -96,158 +117,85 @@ struct SearchPage {
     this.status = this.items.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
   }
 
+  /** 顶栏右侧：结果列表出现后提供卡片/列表切换（对齐参考项目的顶栏视图切换） */
   @Builder
-  SearchBar() {
-    Row({ space: 8 }) {
-      SymbolGlyph($r('sys.symbol.magnifyingglass'))
-        .fontSize(18)
-        .fontColor([this.colors().onSurfaceVariant])
-      TextInput({ text: this.query, placeholder: $r('app.string.search_hint') })
-        .layoutWeight(1)
-        .height(40)
-        .backgroundColor(this.colors().surfaceElevated)
-        .fontColor(this.colors().onSurface)
-        .placeholderColor(this.colors().outline)
-        .onChange((value: string) => {
-          this.scheduleSearch(value);
-        })
-        .onSubmit(() => {
-          this.hintItems = [];
-          this.runSearch(false);
-        })
-      if (this.query.length > 0) {
-        Button('\u2715')
-          .width(32)
-          .height(32)
-          .fontSize(16)
-          .backgroundColor(Color.Transparent)
-          .fontColor(this.colors().onSurfaceVariant)
-          .onClick(() => {
-            this.query = '';
-            this.hintItems = [];
-            this.items = [];
-            this.status = UiState.INITIAL;
-          })
-      }
+  topBarAction() {
+    if (this.status === UiState.SUCCESS) {
+      MediaViewToggle({
+        mode: this.viewMode,
+        onChange: (mode: string) => {
+          this.viewMode = mode;
+        }
+      })
     }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 8, bottom: 8 })
   }
 
-  build() {
+  @Builder
+  pageContent() {
     Column() {
-      // AppBar 内嵌搜索栏
-      Column() {
-        Row() {
-          Button() {
-            SymbolGlyph($r('sys.symbol.chevron_left'))
-              .fontSize(24)
-              .fontColor([this.colors().onSurface])
-          }
-            .width(48)
-            .height(48)
-            .padding(0)
-            .backgroundColor(Color.Transparent)
-            .onClick(() => {
-              router.back();
-            })
-          Text($r('app.string.search_title'))
-            .fontSize(ThemeConstants.TITLE_LARGE)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.colors().onSurface)
-            .layoutWeight(1)
-          Button() {
-            SymbolGlyph($r('sys.symbol.magnifyingglass'))
-              .fontSize(20)
-              .fontColor([this.colors().onSurface])
-          }
-            .width(48)
-            .height(48)
-            .padding(0)
-            .backgroundColor(Color.Transparent)
-            .onClick(() => {
-              this.hintItems = [];
-              this.runSearch(false);
-            })
+      SearchBar({
+        placeholder: $r('app.string.search_hint'),
+        keyword: this.query,
+        showClear: true,
+        onChange: (value: string) => {
+          this.scheduleSearch(value);
+        },
+        onSearch: () => {
+          this.hintItems = [];
+          this.runSearch(false);
+        },
+        onClear: () => {
+          this.clearQuery();
         }
-        .width('100%')
-        .height(56)
-        .padding({ left: 4, right: 8 })
-
-        this.SearchBar()
-      }
-      .width('100%')
-      .backgroundColor(this.colors().background)
+      })
 
       if (this.status === UiState.INITIAL && this.hintItems.length > 0) {
-        List() {
-          ForEach(this.hintItems, (hint: MediaItem) => {
-            ListItem() {
-              Row() {
-                Text(hint.displayTitle())
-                  .fontSize(ThemeConstants.BODY_MEDIUM)
-                  .fontColor(this.colors().onSurface)
-                  .layoutWeight(1)
-                Text(hint.typeLabel())
-                  .fontSize(ThemeConstants.LABEL_SMALL)
-                  .fontColor(this.colors().onSurfaceVariant)
-              }
-              .width('100%')
-              .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-              .onClick(() => {
-                this.query = hint.name;
-                this.hintItems = [];
-                this.runSearch(false);
-              })
-            }
-          }, (hint: MediaItem) => hint.id)
-        }
-        .width('100%')
-        .height(Math.min(260, this.hintItems.length * 48))
-        .scrollBar(BarState.Off)
+        this.HintList()
       } else if (this.status === UiState.INITIAL) {
         Column() {
-          SymbolGlyph($r('sys.symbol.magnifyingglass'))
-            .fontSize(64)
-            .fontColor([this.colors().outline])
-          Text($r('app.string.search_prompt'))
-            .fontSize(ThemeConstants.TITLE_MEDIUM)
-            .fontColor(this.colors().onSurface)
-            .margin({ top: 16 })
-          Text($r('app.string.search_hint'))
-            .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurfaceVariant)
-            .textAlign(TextAlign.Center)
-            .margin({ top: 8 })
+          EmptyState({
+            message: '搜索你的媒体库',
+            detail: '输入片名、演员或剧集名称，回车即可搜索',
+            icon: $r('sys.symbol.magnifyingglass')
+          })
         }
         .width('100%')
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
-      } else if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          emptyHint: '没有找到结果',
-          minHeight: 200,
-          onRetry: () => {
-            this.runSearch(false);
-          }
-        })
-      } else {
-        Row() {
-          Text(`${this.items.length} 项`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
-            .layoutWeight(1)
-          MediaViewToggle({
-            mode: this.viewMode,
-            onChange: (mode: string) => {
-              this.viewMode = mode;
+      } else if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+        LoadingState({})
+      } else if (this.status === UiState.ERROR) {
+        Column() {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '搜索失败',
+            actionLabel: '重试',
+            onAction: () => {
+              this.runSearch(false);
             }
           })
         }
         .width('100%')
-        .padding({ left: 16, right: 16, bottom: 8 })
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else if (this.status === UiState.EMPTY) {
+        Column() {
+          EmptyState({
+            message: '没有找到结果',
+            detail: '换个关键词，或检查媒体库是否已刮削',
+            icon: $r('sys.symbol.magnifyingglass')
+          })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else {
+        Row() {
+          Text(`${this.items.length} 项`)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
+        }
+        .width('100%')
+        .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: 8 })
 
         MediaCollectionView({
           items: $items,
@@ -268,6 +216,67 @@ struct SearchPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+  }
+
+  /** 搜索建议：参考项目的列表行语言（卡片底行 + 0.5vp 分隔 + 按下态） */
+  @Builder
+  HintList() {
+    List() {
+      ForEach(this.hintItems, (hint: MediaItem) => {
+        ListItem() {
+          Row() {
+            Text(hint.displayTitle())
+              .fontSize(ThemeConstants.BODY_MEDIUM)
+              .fontColor(this.colors().textPrimary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+            Text(hint.typeLabel())
+              .fontSize(ThemeConstants.META_SMALL)
+              .fontColor(this.colors().textTertiary)
+          }
+          .width('100%')
+          .padding({
+            left: ThemeConstants.PAGE_PADDING,
+            right: ThemeConstants.PAGE_PADDING,
+            top: 12,
+            bottom: 12
+          })
+          .backgroundColor(this.colors().cardBackground)
+          .stateStyles({
+            pressed: {
+              .backgroundColor(this.colors().surfacePressed)
+            }
+          })
+          .onClick(() => {
+            this.query = hint.name;
+            this.hintItems = [];
+            this.runSearch(false);
+          })
+        }
+      }, (hint: MediaItem) => hint.id)
+    }
+    .width('100%')
+    .height(Math.min(260, this.hintItems.length * 48))
+    .divider({ strokeWidth: 0.5, color: this.colors().divider })
+    .scrollBar(BarState.Off)
+  }
+
+  build() {
+    Column() {
+      PageScaffold({
+        title: $r('app.string.search_title'),
+        showBack: true,
+        action: () => {
+          this.topBarAction();
+        },
+        content: () => {
+          this.pageContent();
+        }
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.colors().pageBackground)
   }
 }

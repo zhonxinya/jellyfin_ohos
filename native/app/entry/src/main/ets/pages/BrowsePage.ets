@@ -6,7 +6,8 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { MediaCollectionView, MediaViewToggle } from '../components/MediaCollectionView';
 
 @Entry
@@ -81,15 +82,24 @@ struct BrowsePage {
       }
       return;
     }
-    const page: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
-    if (more) {
-      this.items = this.items.concat(page);
-    } else {
-      this.items = page;
+    try {
+      const page: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      if (more) {
+        this.items = this.items.concat(page);
+      } else {
+        this.items = page;
+      }
+      this.startIndex = this.startIndex + page.length;
+      this.hasMore = page.length >= this.pageSize;
+      this.status = this.items.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
+    } catch (err) {
+      // 解析异常也必须落到终态，否则界面会永远停在"加载中"（且分页标志位卡死）
+      this.loadingMore = false;
+      if (!more) {
+        this.status = UiState.ERROR;
+        this.errorMsg = `加载失败：${(err as Error).message}`;
+      }
     }
-    this.startIndex = this.startIndex + page.length;
-    this.hasMore = page.length >= this.pageSize;
-    this.status = this.items.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
   }
 
   private openItem(item: MediaItem): void {
@@ -118,8 +128,8 @@ struct BrowsePage {
 
       Row() {
         Text(`${this.items.length} 项`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .layoutWeight(1)
          MediaViewToggle({
            mode: this.viewMode,
@@ -132,14 +142,19 @@ struct BrowsePage {
       .padding({ left: 16, right: 16, bottom: 8 })
 
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          minHeight: 240,
-          onRetry: () => {
-            this.reload();
-          }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => {
+              this.reload();
+            }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无数据' })
+        }
       } else {
           MediaCollectionView({
             items: $items,
@@ -161,6 +176,6 @@ struct BrowsePage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

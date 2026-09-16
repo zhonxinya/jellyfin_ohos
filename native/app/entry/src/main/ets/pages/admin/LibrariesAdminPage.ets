@@ -5,7 +5,8 @@ import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 
 /** 虚拟媒体库条目 */
 interface VirtualFolderInfo {
@@ -204,7 +205,7 @@ struct LibrariesAdminPage {
       Row() {
         Text(collectionLabel(folder.collectionType))
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onPrimary)
+          .fontColor(this.colors().onBrand)
           .padding({ left: 8, right: 8, top: 2, bottom: 2 })
           .backgroundColor(collectionBadgeColor(folder.collectionType, this.colors()))
           .borderRadius(6)
@@ -212,14 +213,14 @@ struct LibrariesAdminPage {
         Text(folder.name)
           .fontSize(ThemeConstants.BODY_MEDIUM)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .layoutWeight(1)
           .margin({ left: 8 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(`${folder.paths.length} 个路径`)
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
       }
       .width('100%')
 
@@ -227,11 +228,12 @@ struct LibrariesAdminPage {
         Column({ space: 4 }) {
           ForEach(folder.paths, (p: string) => {
             Row() {
-              Text('\u{1F4C1}')
-                .fontSize(14)
+              SymbolGlyph($r('sys.symbol.folder'))
+                .fontSize(ThemeConstants.ICON_SMALL)
+                .fontColor([this.colors().textTertiary])
               Text(p)
-                .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontColor(this.colors().onSurfaceVariant)
+                .fontSize(ThemeConstants.META_SMALL)
+                .fontColor(this.colors().textSecondary)
                 .layoutWeight(1)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -246,17 +248,17 @@ struct LibrariesAdminPage {
 
       Row() {
         Text(refreshModeLabel(folder.refreshMode))
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
         if (folder.metadataFetchers.length > 0) {
           Text(` · ${folder.metadataFetchers.join(', ')}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
         if (folder.locale.length > 0 && folder.locale !== 'en') {
           Text(` · ${folder.locale}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
       }
       .width('100%')
@@ -266,8 +268,8 @@ struct LibrariesAdminPage {
         Button('删除')
           .height(36)
           .padding({ left: 16, right: 16 })
-          .backgroundColor(this.colors().destructive)
-          .fontColor(this.colors().onPrimary)
+          .backgroundColor(this.colors().errorLight)
+          .fontColor(this.colors().onBrand)
           .enabled(!this.actionBusy)
           .onClick(() => {
             this.requestDelete(folder);
@@ -277,7 +279,7 @@ struct LibrariesAdminPage {
     }
     .width('100%')
     .padding(16)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(12)
     .clip(true)
   }
@@ -293,15 +295,19 @@ struct LibrariesAdminPage {
         })
 
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            emptyHint: '当前服务器没有配置任何虚拟媒体库，请先在 Jellyfin Web 控制台中添加媒体库。',
-            minHeight: 200,
-            onRetry: () => {
-              this.reload();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.reload();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '当前服务器没有配置任何虚拟媒体库，请先在 Jellyfin Web 控制台中添加媒体库。' })
+          }
         } else {
           List({ space: 12 }) {
             ForEach(this.folders, (folder: VirtualFolderInfo) => {
@@ -318,7 +324,7 @@ struct LibrariesAdminPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.actionMessage.length > 0 && !this.showAddForm && !this.showDeleteConfirm) {
         Text(this.actionMessage)
@@ -331,9 +337,9 @@ struct LibrariesAdminPage {
         Button('+')
           .width(56)
           .height(56)
-          .fontSize(28)
-          .fontColor(this.colors().onPrimary)
-          .backgroundColor(this.colors().primary)
+          .fontSize(ThemeConstants.ICON_XXL)
+          .fontColor(this.colors().onBrand)
+          .backgroundColor(this.colors().brandPrimary)
           .borderRadius(28)
           .position({ x: '90%', y: '85%' })
           .enabled(!this.actionBusy)
@@ -348,7 +354,7 @@ struct LibrariesAdminPage {
           Column({ space: 12 }) {
             Text('添加媒体库')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             TextInput({ text: this.libraryName, placeholder: '媒体库名称' })
               .width('100%')
@@ -374,16 +380,16 @@ struct LibrariesAdminPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showAddForm = false;
                   this.actionMessage = '';
                 })
               Button(this.actionBusy ? '提交中...' : '添加')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().primary)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().brandPrimary)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.addLibrary();
@@ -392,7 +398,7 @@ struct LibrariesAdminPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {
@@ -414,24 +420,24 @@ struct LibrariesAdminPage {
           Column({ space: 12 }) {
             Text('删除媒体库？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`将删除“${this.pendingDeleteName}”的媒体库配置，此操作不可撤销。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showDeleteConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '删除')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.deleteLibrary();
@@ -440,7 +446,7 @@ struct LibrariesAdminPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

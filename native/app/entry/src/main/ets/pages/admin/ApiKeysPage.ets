@@ -5,7 +5,8 @@ import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 
 interface ApiKeyInfo {
   token: string;
@@ -123,26 +124,26 @@ struct ApiKeysPage {
     Row({ space: 10 }) {
       Column({ space: 4 }) {
         Text(key.app)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(maskToken(key.token))
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
           .width('100%')
           .maxLines(1)
         if (key.created.length > 0) {
           Text(`创建：${key.created}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (key.lastActivity.length > 0) {
           Text(`最后使用：${key.lastActivity}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
       }
@@ -150,8 +151,8 @@ struct ApiKeysPage {
       Button('撤销')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().destructive)
-        .fontColor(this.colors().onPrimary)
+        .backgroundColor(this.colors().errorLight)
+        .fontColor(this.colors().onBrand)
         .enabled(!this.actionBusy)
         .onClick(() => {
           this.requestRevoke(key);
@@ -159,7 +160,7 @@ struct ApiKeysPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -181,8 +182,8 @@ struct ApiKeysPage {
             })
           Button(this.actionBusy ? '创建中...' : '创建')
             .height(44)
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().brandPrimary)
+            .fontColor(this.colors().onBrand)
             .enabled(!this.actionBusy)
             .onClick(() => {
               this.createKey();
@@ -198,15 +199,19 @@ struct ApiKeysPage {
             .padding({ left: 16, right: 16, bottom: 6 })
         }
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            emptyHint: '当前没有 API Key',
-            minHeight: 200,
-            onRetry: () => {
-              this.reload();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.reload();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '当前没有 API Key' })
+          }
         } else {
           List({ space: 8 }) {
             ForEach(this.keys, (key: ApiKeyInfo) => {
@@ -223,35 +228,35 @@ struct ApiKeysPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showRevokeConfirm) {
         Column() {
           Column({ space: 12 }) {
             Text('撤销 API Key？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认撤销应用“${this.pendingKey.app}”的 API Key？`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Text(maskToken(this.pendingKey.token))
-              .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontSize(ThemeConstants.META_SMALL)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showRevokeConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '撤销')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.revokeKey();
@@ -260,7 +265,7 @@ struct ApiKeysPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

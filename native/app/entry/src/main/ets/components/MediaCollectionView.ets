@@ -5,38 +5,31 @@ import { MediaCard } from './MediaCard';
 import { LibraryTile } from './LibraryTile';
 import { SectionHeader } from './SectionHeader';
 import { WindowLayout } from '../common/WindowLayout';
+import { AppIconButton } from './AppIconButton';
 
 @Component
 export struct MediaViewToggle {
   @Prop mode: string = 'grid';
   onChange: (mode: string) => void = (_mode: string) => {};
 
-  @Builder
-  ToggleButton(icon: Resource, value: string) {
-    Button() {
-      SymbolGlyph(icon)
-        .fontSize(22)
-        .fontColor([this.mode === value ? this.colors().primary : this.colors().onSurfaceVariant])
-    }
-      .width(40)
-      .height(40)
-      .padding(0)
-      .backgroundColor(Color.Transparent)
-      .onClick(() => {
-        this.onChange(value);
-      })
-  }
+  /**
+   * 单个图标按钮切换网格/列表 —— 对齐参考项目 `BookViewToggleButton`：
+   * 图标表示"点击后切到的模式"（网格模式显示列表图标，反之亦然），40vp ghost 圆形按钮。
+   */
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
   }
 
   build() {
-    Row({ space: 4 }) {
-      this.ToggleButton($r('sys.symbol.square_grid_2x2'), 'grid')
-      this.ToggleButton($r('sys.symbol.list_bullet'), 'list')
-    }
-    .height(40)
+    AppIconButton({
+      icon: this.mode === 'list' ? $r('sys.symbol.square_grid_2x2') : $r('sys.symbol.list_bullet'),
+      variant: 'ghost',
+      iconSize: 20,
+      onTap: () => {
+        this.onChange(this.mode === 'list' ? 'grid' : 'list');
+      }
+    })
   }
 }
 
@@ -65,8 +58,9 @@ export struct MediaCollectionView {
     return WindowLayout.cardWidth(this.resolvedColumns());
   }
 
+  /** 海报 0.7 宽高比 + 文案块高度（标题 2 行 + 间隙 + 元信息） */
   private gridItemHeight(): number {
-    return this.cardWidthForColumns() * 1.5 + 52;
+    return Math.floor(this.cardWidthForColumns() / ThemeConstants.POSTER_RATIO) + 60;
   }
 
   private columnsTemplate(): string {
@@ -83,7 +77,7 @@ export struct MediaCollectionView {
     GridItem() {
       if (this.loadingMore) {
         Row() {
-          LoadingProgress().width(24).height(24).color(this.colors().primary)
+          LoadingProgress().width(24).height(24).color(this.colors().brandPrimary)
         }
         .width('100%')
         .height(48)
@@ -103,7 +97,7 @@ export struct MediaCollectionView {
   build() {
     Column() {
       if (this.viewMode === 'list') {
-        List() {
+        List({ space: ThemeConstants.LIST_SPACE }) {
           ForEach(this.items, (item: MediaItem) => {
             ListItem() {
               MediaCard({
@@ -114,12 +108,13 @@ export struct MediaCollectionView {
                 }
               })
             }
+            .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING })
           }, (item: MediaItem) => item.id)
           if (this.hasMore) {
             ListItem() {
               if (this.loadingMore) {
                 Row() {
-                  LoadingProgress().width(24).height(24).color(this.colors().primary)
+                  LoadingProgress().width(24).height(24).color(this.colors().brandPrimary)
                 }
                 .width('100%')
                 .height(48)
@@ -136,6 +131,7 @@ export struct MediaCollectionView {
         }
         .layoutWeight(1)
         .width('100%')
+        .cachedCount(8)
         .scrollBar(BarState.Auto)
       } else {
         Scroll() {
@@ -157,9 +153,10 @@ export struct MediaCollectionView {
             }
           }
           .columnsTemplate(this.columnsTemplate())
-          .columnsGap(ThemeConstants.CARD_GAP)
-          .rowsGap(ThemeConstants.GRID_MAIN_SPACING)
-          .padding({ left: 16, right: 16, top: 8, bottom: 16 })
+          .columnsGap(ThemeConstants.GRID_COLUMN_GAP)
+          .rowsGap(ThemeConstants.GRID_ROW_GAP)
+          .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: ThemeConstants.PAGE_PADDING })
+          .cachedCount(12)
           .width('100%')
         }
         .layoutWeight(1)

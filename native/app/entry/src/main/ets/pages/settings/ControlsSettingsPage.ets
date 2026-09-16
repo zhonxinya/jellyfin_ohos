@@ -62,21 +62,21 @@ export struct ControlsSettingsPage {
     onChange: (v: boolean) => void) {
     Row({ space: 12 }) {
       SymbolGlyph(iconRes)
-        .fontSize(20)
-        .fontColor([this.colors().onSurfaceVariant])
+        .fontSize(ThemeConstants.TITLE_LARGE)
+        .fontColor([this.colors().textSecondary])
         .width(28)
       Column({ space: 2 }) {
         Text(title)
           .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
         Text(subtitle)
           .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onSurfaceVariant)
+          .fontColor(this.colors().textSecondary)
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
       Toggle({ type: ToggleType.Switch, isOn: isOn })
-        .selectedColor(this.colors().primary)
+        .selectedColor(this.colors().brandPrimary)
         .onChange((v: boolean) => {
           onChange(v);
         })
@@ -99,7 +99,7 @@ export struct ControlsSettingsPage {
         LoadingProgress()
           .width(40)
           .height(40)
-          .color(this.colors().primary)
+          .color(this.colors().brandPrimary)
           .margin({ top: 120 })
       } else {
         Scroll() {
@@ -107,12 +107,12 @@ export struct ControlsSettingsPage {
             Column() {
               Row({ space: 8 }) {
                 SymbolGlyph($r('sys.symbol.gamecontroller'))
-                  .fontSize(18)
-                  .fontColor([this.colors().primary])
+                  .fontSize(ThemeConstants.ICON_MEDIUM)
+                  .fontColor([this.colors().brandPrimary])
                 Text('\u64cd\u63a7')
                   .fontSize(ThemeConstants.TITLE_SMALL)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor(this.colors().onSurface)
+                  .fontColor(this.colors().textPrimary)
               }
               .width('100%')
               .padding({ left: 16, right: 16, top: 12, bottom: 4 })
@@ -122,7 +122,7 @@ export struct ControlsSettingsPage {
                 this.gamepad, (v: boolean) => {
                   this.gamepad = v;
                 })
-              Divider().color(this.colors().outline).strokeWidth(1)
+              Divider().color(this.colors().divider).strokeWidth(1)
               this.SwitchRow($r('sys.symbol.swipe'), '\u542f\u7528\u5e73\u6ed1\u6eda\u52a8',
                 '\u5728\u5a92\u4f53\u5217\u8868\u4e2d\u4f7f\u7528\u5e73\u6ed1\u6eda\u52a8\u6548\u679c',
                 this.smoothScroll, (v: boolean) => {
@@ -135,21 +135,21 @@ export struct ControlsSettingsPage {
                     LoadingProgress()
                       .width(16)
                       .height(16)
-                      .color(this.colors().onPrimary)
+                      .color(this.colors().onBrand)
                   } else {
                     SymbolGlyph($r('sys.symbol.save'))
-                      .fontSize(18)
-                      .fontColor([this.colors().onPrimary])
+                      .fontSize(ThemeConstants.ICON_MEDIUM)
+                      .fontColor([this.colors().onBrand])
                   }
                   Text(this.saving ? '\u4fdd\u5b58\u4e2d...' : '\u4fdd\u5b58')
                     .fontSize(ThemeConstants.BODY_MEDIUM)
-                    .fontColor(this.colors().onPrimary)
+                    .fontColor(this.colors().onBrand)
                     .margin({ left: 8 })
                 }
               }
               .width('100%')
               .height(40)
-              .backgroundColor(this.saving ? this.colors().onSurfaceVariant : this.colors().primary)
+              .backgroundColor(this.saving ? this.colors().textSecondary : this.colors().brandPrimary)
               .enabled(!this.saving)
               .margin({ top: 12 })
               .onClick(() => {
@@ -166,7 +166,7 @@ export struct ControlsSettingsPage {
             }
             .width('100%')
             .padding({ bottom: 12 })
-            .backgroundColor(this.colors().surface)
+            .backgroundColor(this.colors().cardBackground)
             .borderRadius(12)
             .clip(true)
             .margin({ left: 16, right: 16, top: 8, bottom: 8 })
@@ -185,6 +185,6 @@ export struct ControlsSettingsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

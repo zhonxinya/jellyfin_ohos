@@ -9,7 +9,15 @@ import display from '@ohos.display';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 
 /**
- * HeroBanner — 首页顶部推荐海报横幅，对齐 Jellyfin Web 首页视觉层级。
+ * HeroBanner —— 首页顶部推荐横幅，视觉规则已按 mybooks_ohos 重做。
+ *
+ * 与参考项目一致的要点：
+ * - 遮罩只用令牌，不再写死 `#000000CC`，也修掉了原实现"两个 1.0 停靠点 + `background` 放错位置"的渐变 bug；
+ * - 叠加在图片上的文字硬编码白色系（`onOverlay` / `onOverlayMuted`）——参考项目的明确约定：
+ *   `on_brand` 在深色主题会翻成近黑，不能用在图片上；
+ * - 主操作由 52vp 圆形 FAB 改为参考项目按钮规格：**48vp 高、12vp 圆角（不是胶囊）、品牌色实底 + `onBrand` 文字**；
+ * - 加载态用 48vp 品牌色 `LoadingProgress`（参考项目 LoadingState 尺寸），占位底色用卡片色。
+ *
  * 数据来源：/Users/{userId}/Items?IncludeItemTypes=Movie,Series&Limit=1&SortBy=Random
  */
 @Component
@@ -22,16 +30,30 @@ export struct HeroBanner {
     return AppViewModel.getInstance().colors();
   }
 
-  /** 根据屏幕宽度计算 banner 高度（约 38% 屏幕高度，最大 360dp） */
+  /** banner 高度：约 34% 屏幕高，最大 320vp（原实现因密率换算错误恒为 360vp） */
   private bannerHeight(): number {
     try {
       const info: display.Display = display.getDefaultDisplaySync();
-      const density: number = info.densityPixels > 0 ? info.densityPixels / 160 : 1;
-      const screenHeightDp: number = info.height / density;
-      return Math.min(360, Math.floor(screenHeightDp * 0.38));
+      const density: number = info.densityPixels > 0 ? info.densityPixels : 1;
+      const screenHeightVp: number = info.height / density;
+      return Math.min(320, Math.floor(screenHeightVp * 0.34));
     } catch (_) {
-      return 280;
+      return 260;
     }
+  }
+
+  private hasContent(): boolean {
+    return this.bannerItem.id.length > 0 && this.bannerItem.backdropTag.length > 0;
+  }
+
+  private openDetail(): void {
+    if (this.bannerItem.id.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/DetailPage',
+      params: { itemId: this.bannerItem.id }
+    });
   }
 
   build() {
@@ -40,58 +62,53 @@ export struct HeroBanner {
         Column()
           .width('100%')
           .height(this.bannerHeight())
-          .backgroundColor(this.colors().surfaceElevated)
+          .backgroundColor(this.colors().cardBackground)
         LoadingProgress()
-          .width(32)
-          .height(32)
-          .color(this.colors().primary)
-          .position({ x: '50%', y: this.bannerHeight() / 2 })
+          .width(48)
+          .height(48)
+          .color(this.colors().brandPrimary)
       }
       .width('100%')
       .height(this.bannerHeight())
+    } else if (!this.hasContent()) {
+      Column()
+        .width('100%')
+        .height(this.bannerHeight())
+        .backgroundColor(this.colors().cardBackground)
     } else {
-      // Banner 内容（加载中失败时也渲染空占位）
-      if (this.bannerItem.id.length === 0 || this.bannerItem.backdropTag.length === 0) {
-        Column()
-          .width('100%')
-          .height(this.bannerHeight())
-          .backgroundColor(this.colors().surfaceElevated)
-      } else {
-        this.BannerContent()
-      }
+      this.BannerContent()
     }
   }
 
   @Builder
   BannerContent() {
     Stack({ alignContent: Alignment.BottomStart }) {
-      // 背景图
       Image(this.bannerItem.imageUrl(1200, 'Backdrop'))
         .width('100%')
         .height(this.bannerHeight())
         .objectFit(ImageFit.Cover)
         .onError(() => {
-          // 背景图加载失败不影响页面
+          // 背景图加载失败不影响其余内容
         })
 
-      // 渐变遮罩：底部加深 → 顶部透明
+      // 顶部透明 → 底部压暗 → 收进页面底色，避免与下方内容出现硬边
       Column()
         .width('100%')
         .height(this.bannerHeight())
         .linearGradient({
           angle: 180,
           colors: [
-            [this.colors().background, 1.0],
-            ['#00000000', 0.5],
-            ['#000000CC', 1.0]
+            ['#00000000', 0.0],
+            ['#00000000', 0.45],
+            [this.colors().posterScrim, 0.82],
+            [this.colors().pageBackground, 1.0]
           ]
         })
 
-      // 底部信息区
-      Row() {
+      Row({ space: 12 }) {
         Column({ space: 4 }) {
           Text(this.bannerItem.name)
-            .fontSize(ThemeConstants.TITLE_LARGE)
+            .fontSize(ThemeConstants.TITLE_XLARGE)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.colors().onOverlay)
             .maxLines(2)
@@ -100,42 +117,46 @@ export struct HeroBanner {
             Text(this.bannerItem.metaLine())
               .fontSize(ThemeConstants.LABEL_SMALL)
               .fontColor(this.colors().onOverlayMuted)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
-        .margin({ left: 20, bottom: 16 })
 
-        // 播放按钮
-        Button() {
-          SymbolGlyph($r('sys.symbol.play'))
-            .fontSize(24)
-            .fontColor([this.colors().onPrimary])
+        Button({ type: ButtonType.Normal, stateEffect: false }) {
+          Row({ space: 6 }) {
+            SymbolGlyph($r('sys.symbol.play'))
+              .fontSize(ThemeConstants.ICON_MEDIUM)
+              .fontColor([this.colors().onBrand])
+            Text('播放')
+              .fontSize(ThemeConstants.TITLE_MEDIUM)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.colors().onBrand)
+          }
+          .alignItems(VerticalAlign.Center)
         }
-          .width(52)
-          .height(52)
-          .backgroundColor(this.colors().primary)
-          .borderRadius(26)
-          .margin({ right: 16, bottom: 16 })
-          .onClick(() => {
-            router.pushUrl({
-              url: 'pages/DetailPage',
-              params: { itemId: this.bannerItem.id }
-            });
-          })
+        .height(ThemeConstants.BUTTON_HEIGHT)
+        .padding({ left: 18, right: 18 })
+        .backgroundColor(this.colors().brandPrimary)
+        .borderRadius(ThemeConstants.BUTTON_RADIUS)
+        .stateStyles({
+          pressed: {
+            .backgroundColor(this.colors().brandPrimaryPressed)
+          }
+        })
+        .onClick(() => {
+          this.openDetail();
+        })
       }
       .width('100%')
+      .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: 20 })
       .alignItems(VerticalAlign.Bottom)
     }
     .width('100%')
     .height(this.bannerHeight())
     .onClick(() => {
-      if (this.bannerItem.id.length > 0) {
-        router.pushUrl({
-          url: 'pages/DetailPage',
-          params: { itemId: this.bannerItem.id }
-        });
-      }
+      this.openDetail();
     })
   }
 }

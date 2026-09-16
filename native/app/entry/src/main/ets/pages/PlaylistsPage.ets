@@ -6,8 +6,10 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { MediaCollectionView } from '../components/MediaCollectionView';
+import { TextButton } from '../components/TextButton';
 
 @Entry
 @Component
@@ -48,25 +50,31 @@ struct PlaylistsPage {
     Column() {
       PageHeader({ title: '播放列表', onBack: () => { router.back(); } })
       if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          emptyHint: '暂无播放列表',
-          minHeight: 260,
-          onRetry: () => { this.reload(); }
-        })
+        if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+          LoadingState()
+        } else if (this.status === UiState.ERROR) {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            actionLabel: '重试',
+            onAction: () => { this.reload(); }
+          })
+        } else if (this.status === UiState.EMPTY) {
+          EmptyState({ message: '暂无播放列表' })
+        }
       } else {
         Row() {
           Text(`${this.items.length} 个播放列表`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .layoutWeight(1)
-          Button('刷新')
-            .height(32)
-            .fontSize(12)
-            .backgroundColor(this.colors().surfaceElevated)
-            .fontColor(this.colors().onSurface)
-            .onClick(() => { this.reload(); })
+          // 刷新入口改用参考项目 TextButton（13fp Medium 品牌色 + 按下态），
+          // 原来是 32vp/12fp 的临时小按钮
+          TextButton({
+            label: '刷新',
+            onTap: () => {
+              this.reload();
+            }
+          })
         }
         .width('100%')
         .padding({ left: 16, right: 16, bottom: 8 })
@@ -82,6 +90,6 @@ struct PlaylistsPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

@@ -6,9 +6,14 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { PageHeader } from '../components/PageHeader';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { LoadingState } from '../components/LoadingState';
+import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { HorizontalShelf } from '../components/HorizontalShelf';
+import { AppIconButton } from '../components/AppIconButton';
+import { PrimaryButton } from '../components/PrimaryButton';
+import { SecondaryButton } from '../components/SecondaryButton';
+import { TextButton } from '../components/TextButton';
 
 /** 预计算的媒体流条目，供 Builder 使用 */
 interface StreamEntry {
@@ -29,16 +34,19 @@ struct DetailPage {
   @State private people: Object[] = [];
   @State private expandedSeasonId: string = '';
   @State private episodes: MediaItem[] = [];
-  @State private showPlayOptions: boolean = false;
-  @State private showMediaInfo: boolean = false;
-  @State private showMarkPlayed: boolean = false;
+  /**
+   * 弹层状态 —— 参考项目用「一个 bindSheet 节点 + sheetKind 判别」承载所有详情页弹层，
+   * 不再为每个弹层手写全屏遮罩 + 居中卡片 + 点遮罩关闭（原来有 4 套这样的代码）。
+   * '' 表示关闭；其余取值见 `SheetContent()`。
+   */
+  @State private sheetShow: boolean = false;
+  @State private sheetKind: string = '';
   @State private audioStreamIndex: number = -1;
   @State private subtitleStreamIndex: number = -1;
   @State private forceTranscode: boolean = false;
   @State private mediaStreams: Object[] = [];
   @State private playlistItems: MediaItem[] = [];
   @State private playlistName: string = '';
-  @State private showPlaylistPicker: boolean = false;
   @State private playlistMessage: string = '';
   @State private favoriting: boolean = false;
 
@@ -136,7 +144,8 @@ struct DetailPage {
       this.playlistItems = MediaItem.fromArray(JsonUtil.extractItems(result.data));
       this.playlistMessage = '';
     }
-    this.showPlaylistPicker = true;
+    this.sheetKind = 'playlist';
+    this.sheetShow = true;
   }
 
   private async addToPlaylist(playlistId: string): Promise<void> {
@@ -156,7 +165,17 @@ struct DetailPage {
       return;
     }
     this.playlistName = '';
-    this.showPlaylistPicker = false;
+    // 添加成功后关闭弹层（参考项目：改 sheetKind/sheetShow 即可，无需手写遮罩）
+    this.sheetShow = false;
+  }
+
+  /**
+   * 打开弹层 —— 参考项目的做法：只设置判别字段与显示开关，
+   * 弹层本体由根节点上一个 `bindSheet` 负责（不再手写遮罩、居中卡片与"点遮罩关闭"）。
+   */
+  private openSheet(kind: string): void {
+    this.sheetKind = kind;
+    this.sheetShow = true;
   }
 
   private buildPlaybackOptions(): string {
@@ -179,6 +198,36 @@ struct DetailPage {
         playbackOptions: this.buildPlaybackOptions()
       }
     });
+  }
+
+  /**
+   * 播放动作统一入口。
+   *
+   * 剧集（Series）**不能直接播放**：设备实测服务端对 `/Items/{seriesId}/PlaybackInfo`
+   * 返回 **HTTP 500**（同一服务器对剧集条目 `/Items/{episodeId}/PlaybackInfo` 返回 200 并给出播放地址）。
+   * 因此这里先解析出"第一季第一集"再交给播放器，与各 Jellyfin 客户端的行为一致。
+   */
+  private async startPlayback(): Promise<void> {
+    if (this.item.type !== 'Series') {
+      this.playItem(this.item.id);
+      return;
+    }
+    if (this.seasons.length === 0) {
+      this.errorMsg = '该剧集暂无可播放的分集';
+      return;
+    }
+    const raw: string = await JellyfinNative.getSeasonEpisodes(this.item.id, this.seasons[0].id);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok) {
+      this.errorMsg = result.message.length > 0 ? result.message : '加载分集失败';
+      return;
+    }
+    const episodes: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    if (episodes.length === 0) {
+      this.errorMsg = '该剧集暂无可播放的分集';
+      return;
+    }
+    this.playItem(episodes[0].id);
   }
 
   private mediaInfoLabels(): string[] {
@@ -227,7 +276,12 @@ struct DetailPage {
   private openPerson(person: Object): void {
     const id: string = this.personId(person);
     if (id.length > 0) {
-      router.pushUrl({ url: 'pages/PersonPage', params: { personId: id } });
+      // 一并带上姓名：人物页直接用这个名字渲染头部，
+      // 无需请求 /Users/{uid}/Items/{personId}（实测部分 Jellyfin 版本对该端点会挂起不响应）
+      router.pushUrl({
+        url: 'pages/PersonPage',
+        params: { personId: id, personName: this.personName(person) }
+      });
     }
   }
 
@@ -268,10 +322,10 @@ struct DetailPage {
     Flex({ wrap: FlexWrap.Wrap }) {
       ForEach(this.mediaInfoLabels(), (text: string) => {
         Text(text)
-          .fontSize(11)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.LABEL_SMALL)
+          .fontColor(this.colors().textPrimary)
           .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-          .backgroundColor(this.colors().surfaceElevated)
+          .backgroundColor(this.colors().surfacePressed)
           .borderRadius(8)
           .margin({ right: 8, bottom: 4 })
       }, (text: string) => text)
@@ -302,33 +356,189 @@ struct DetailPage {
     return entries;
   }
 
-  /** 完整媒体流信息弹窗 */
+  /**
+   * 详情页统一弹层 —— 参考项目「一个 bindSheet 节点 + sheetKind 判别」：
+   * 通过 `sheetKind` 决定渲染哪一份内容，取代原来 4 套手写全屏遮罩。
+   */
+  @Builder
+  SheetContent() {
+    if (this.sheetKind === 'playOptions') {
+      this.PlayOptionsSheet()
+    } else if (this.sheetKind === 'mediaInfo') {
+      this.MediaInfoDialog()
+    } else if (this.sheetKind === 'markPlayed') {
+      this.MarkPlayedSheet()
+    } else if (this.sheetKind === 'playlist') {
+      this.PlaylistSheet()
+    }
+  }
+
+  /** 播放选项（强制转码 / 媒体信息 / 加入播放列表） */
+  @Builder
+  PlayOptionsSheet() {
+    Column({ space: 8 }) {
+      Text('\u64ad\u653e\u9009\u9879')
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+      Row() {
+        Column({ space: 2 }) {
+          Text('\u5f3a\u5236\u8f6c\u7801\u64ad\u653e')
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontColor(this.colors().textPrimary)
+          Text('\u4e0d\u8d70\u76f4\u63a5\u64ad\u653e\uff0c\u7531\u670d\u52a1\u5668\u8f6c\u7801\u540e\u64ad\u653e')
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.forceTranscode })
+          .selectedColor(this.colors().brandPrimary)
+          .onChange((on: boolean) => {
+            this.forceTranscode = on;
+          })
+      }
+      .width('100%')
+      .padding({ top: 4, bottom: 4 })
+      SecondaryButton({
+        label: '\u5a92\u4f53\u4fe1\u606f',
+        onTap: () => {
+          this.sheetKind = 'mediaInfo';
+        }
+      })
+      SecondaryButton({
+        label: '\u52a0\u5165\u64ad\u653e\u5217\u8868',
+        onTap: () => {
+          this.openPlaylistPicker();
+        }
+      })
+      TextButton({
+        label: '\u5173\u95ed',
+        onTap: () => {
+          this.sheetShow = false;
+        }
+      })
+        .margin({ top: 4 })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 标记已播放/未播放确认 */
+  @Builder
+  MarkPlayedSheet() {
+    Column({ space: 8 }) {
+      Text(this.item.isPlayed ? $r('app.string.play_mark_unplayed') : $r('app.string.play_mark_played'))
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+      Text(this.item.isPlayed ? '\u786e\u8ba4\u6807\u8bb0\u4e3a\u672a\u64ad\u653e\uff1f' : '\u786e\u8ba4\u6807\u8bb0\u4e3a\u5df2\u64ad\u653e\uff1f')
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontColor(this.colors().textSecondary)
+        .margin({ bottom: 8 })
+      PrimaryButton({
+        label: this.item.isPlayed ? $r('app.string.play_mark_unplayed') : $r('app.string.play_mark_played'),
+        onTap: () => {
+          this.togglePlayed();
+          this.sheetShow = false;
+        }
+      })
+      TextButton({
+        label: '\u53d6\u6d88',
+        onTap: () => {
+          this.sheetShow = false;
+        }
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 加入播放列表（新建 + 选择已有） */
+  @Builder
+  PlaylistSheet() {
+    Column({ space: 8 }) {
+      Text('\u52a0\u5165\u64ad\u653e\u5217\u8868')
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+      TextInput({ text: this.playlistName, placeholder: '\u65b0\u5efa\u64ad\u653e\u5217\u8868\u540d\u79f0' })
+        .width('100%')
+        .height(ThemeConstants.INPUT_HEIGHT)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .backgroundColor(this.colors().pageBackground)
+        .fontColor(this.colors().textPrimary)
+        .placeholderColor(this.colors().textTertiary)
+        .border({ width: 1, color: this.colors().divider, radius: ThemeConstants.COVER_RADIUS })
+        .onChange((value: string) => {
+          this.playlistName = value;
+        })
+      if (this.playlistMessage.length > 0) {
+        Text(this.playlistMessage)
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().error)
+          .width('100%')
+      }
+      PrimaryButton({
+        label: '\u65b0\u5efa\u5e76\u6dfb\u52a0',
+        onTap: () => {
+          this.addToPlaylist('');
+        }
+      })
+      if (this.playlistItems.length > 0) {
+        List({ space: 4 }) {
+          ForEach(this.playlistItems, (playlist: MediaItem) => {
+            ListItem() {
+              Text(playlist.name)
+                .width('100%')
+                .fontSize(ThemeConstants.BODY_MEDIUM)
+                .fontColor(this.colors().textPrimary)
+                .padding({ top: 10, bottom: 10 })
+                .onClick(() => {
+                  this.addToPlaylist(playlist.id);
+                })
+            }
+          }, (playlist: MediaItem) => playlist.id)
+        }
+        .width('100%')
+        .height(Math.min(180, this.playlistItems.length * 44))
+        .scrollBar(BarState.Auto)
+      }
+      TextButton({
+        label: '\u53d6\u6d88',
+        onTap: () => {
+          this.sheetShow = false;
+        }
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 完整媒体流信息（作为 sheet 内容渲染，不再自带遮罩与卡片外壳） */
   @Builder
   MediaInfoDialog() {
     Column({ space: 8 }) {
       Text($r('app.string.media_info_title'))
         .fontSize(ThemeConstants.TITLE_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
       Text(this.streamsSummary())
-        .fontSize(ThemeConstants.LABEL_SMALL)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().textSecondary)
       List({ space: 4 }) {
         ForEach(this.streamEntries(), (entry: StreamEntry) => {
           ListItem() {
             Row() {
               Text(entry.type)
-                .fontSize(11)
-                .fontColor(this.colors().primary)
+                .fontSize(ThemeConstants.BADGE_LABEL)
+                .fontColor(this.colors().brandPrimary)
                 .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-                .backgroundColor(this.colors().surfaceElevated)
-                .borderRadius(4)
+                .backgroundColor(this.colors().surfacePressed)
+                .borderRadius(5)
               Text(entry.codec)
-                .fontSize(11)
-                .fontColor(this.colors().onSurface)
+                .fontSize(ThemeConstants.META_SMALL)
+                .fontColor(this.colors().textPrimary)
                 .margin({ left: 8 })
               Text(entry.sizeLabel)
-                .fontSize(11)
-                .fontColor(entry.sizeLabel.length > 0 ? this.colors().onSurfaceVariant : Color.Transparent)
+                .fontSize(ThemeConstants.META_SMALL)
+                .fontColor(entry.sizeLabel.length > 0 ? this.colors().textSecondary : Color.Transparent)
                 .margin({ left: 8 })
             }
             .width('100%')
@@ -339,18 +549,16 @@ struct DetailPage {
       .width('100%')
       .height(200)
       .scrollBar(BarState.Auto)
-      Button('\u5173\u95ed')
-        .width('100%')
+      TextButton({
+        label: '\u5173\u95ed',
+        onTap: () => {
+          this.sheetShow = false;
+        }
+      })
         .margin({ top: 8 })
-        .onClick(() => {
-          this.showMediaInfo = false;
-        })
     }
-    .padding(16)
-    .backgroundColor(this.colors().surface)
-    .borderRadius(12)
-    .width('90%')
-    .height('80%')
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
   }
 
   /** 演职人员横滑 */
@@ -359,7 +567,7 @@ struct DetailPage {
     Column() {
       Text('\u6f14\u804c\u4eba\u5458')
         .fontSize(ThemeConstants.TITLE_SMALL)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
         .padding({ left: 16, top: 8, bottom: 8 })
         .width('100%')
       List({ space: 12 }) {
@@ -374,8 +582,8 @@ struct DetailPage {
                 placeholderIcon: 'person'
               })
               Text(this.personName(p))
-                .fontSize(11)
-                .fontColor(this.colors().onSurface)
+                .fontSize(ThemeConstants.LABEL_SMALL)
+                .fontColor(this.colors().textPrimary)
                 .maxLines(1)
                 .width(72)
                 .textAlign(TextAlign.Center)
@@ -405,18 +613,23 @@ struct DetailPage {
               router.back();
             }
           })
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            minHeight: 240,
-            onRetry: () => {
-              this.loadDetail();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.loadDetail();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '暂无数据' })
+          }
         }
         .width('100%')
         .height('100%')
-        .backgroundColor(this.colors().background)
+        .backgroundColor(this.colors().pageBackground)
       } else {
         Scroll() {
           Column() {
@@ -434,7 +647,7 @@ struct DetailPage {
                 .height('100%')
                 .linearGradient({
                   angle: 180,
-                  colors: [['#00000066', 0.0], [this.colors().background, 1.0]]
+                  colors: [[this.colors().posterScrim, 0.0], [this.colors().pageBackground, 1.0]]
                 })
             }
             .width('100%')
@@ -458,89 +671,103 @@ struct DetailPage {
               Column({ space: 8 }) {
                 Text(this.item.name)
                   .fontSize(ThemeConstants.TITLE_LARGE)
-                  .fontColor(this.colors().onSurface)
+                  .fontColor(this.colors().textPrimary)
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%')
                 Text(this.item.metaLine())
                   .fontSize(ThemeConstants.LABEL_SMALL)
-                  .fontColor(this.colors().onSurfaceVariant)
+                  .fontColor(this.colors().textSecondary)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%')
                 Flex({ wrap: FlexWrap.Wrap }) {
                   if (this.item.type.length > 0) {
                     Text(this.item.typeLabel())
-                      .fontSize(11)
-                      .fontColor(this.colors().onSurface)
+                      .fontSize(ThemeConstants.LABEL_SMALL)
+                      .fontColor(this.colors().textPrimary)
                       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                      .backgroundColor(this.colors().surfaceElevated)
+                      .backgroundColor(this.colors().surfacePressed)
                       .borderRadius(8)
                       .margin({ right: 8, bottom: 4 })
                   }
                   ForEach(this.item.genres.slice(0, 3), (genre: string) => {
                     Text(genre)
-                      .fontSize(11)
-                      .fontColor(this.colors().onSurface)
+                      .fontSize(ThemeConstants.LABEL_SMALL)
+                      .fontColor(this.colors().textPrimary)
                       .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                      .backgroundColor(this.colors().surfaceElevated)
+                      .backgroundColor(this.colors().surfacePressed)
                       .borderRadius(8)
                       .margin({ right: 8, bottom: 4 })
                   }, (genre: string) => genre)
                 }
                 .width('100%')
-                // 播放按钮行
+                // 播放按钮行 —— 主操作按参考项目规格（48vp / 12vp 圆角 / 品牌实底 + 微光投影），
+                // 其余操作用 40vp 圆形图标按钮 + 系统符号（原来用的是 ▼ ★ ⏱ ⋮ 文本字符）
                 Flex({ wrap: FlexWrap.Wrap }) {
-                  Button(this.item.type === 'Episode' ? '\u64ad\u653e\u672c\u96c6' : '\u64ad\u653e')
-                    .height(40)
+                  Button(this.item.type === 'Episode' ? '\u64ad\u653e\u672c\u96c6' : '\u64ad\u653e',
+                    { type: ButtonType.Normal, stateEffect: false })
+                    .height(ThemeConstants.BUTTON_HEIGHT)
                     .width(this.item.type === 'Series' || this.item.type === 'Episode' ? 150 : '100%')
-                    .backgroundColor(this.colors().primary)
-                    .fontColor(this.colors().onPrimary)
+                    .fontSize(ThemeConstants.TITLE_MEDIUM)
+                    .fontWeight(FontWeight.Medium)
+                    .backgroundColor(this.colors().brandPrimary)
+                    .fontColor(this.colors().onBrand)
+                    .borderRadius(ThemeConstants.BUTTON_RADIUS)
+                    .shadow({
+                      radius: 10,
+                      color: this.colors().buttonShadow,
+                      offsetX: 0,
+                      offsetY: 4
+                    })
+                    .stateStyles({
+                      pressed: {
+                        .backgroundColor(this.colors().brandPrimaryPressed)
+                      }
+                    })
                     .margin({ right: 4, bottom: 4 })
                     .onClick(() => {
-                      this.playItem(this.item.id);
+                      // 走统一入口：剧集会先解析分集（系列条目本身无法直接播放）
+                      this.startPlayback();
                     })
-                  Button('\u25BC')
-                    .height(40)
-                    .width(40)
-                    .fontSize(16)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
-                      this.showPlayOptions = true;
-                    })
-                  Button(this.item.isFavorite ? '\u2605' : '\u2606')
-                    .height(40)
-                    .width(40)
-                    .fontSize(18)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.item.isFavorite ? this.colors().primary : this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
+                  AppIconButton({
+                    icon: $r('sys.symbol.chevron_down'),
+                    variant: 'surface',
+                    iconSize: 18,
+                    onTap: () => {
+                      this.openSheet('playOptions');
+                    }
+                  })
+                    .margin({ right: 4, bottom: 4 })
+                  AppIconButton({
+                    icon: this.item.isFavorite ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'),
+                    variant: this.item.isFavorite ? 'soft' : 'surface',
+                    iconSize: 19,
+                    onTap: () => {
                       this.toggleFavorite();
-                    })
-                  Button('\u{23F1}')
-                    .height(40)
-                    .width(40)
-                    .fontSize(14)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.item.isPlayed ? this.colors().success : this.colors().onSurface)
+                    }
+                  })
+                    .margin({ right: 4, bottom: 4 })
+                  AppIconButton({
+                    icon: $r('sys.symbol.clock'),
+                    variant: 'surface',
+                    iconSize: 18,
+                    iconColorOverride: this.item.isPlayed ? this.colors().success : '',
+                    onTap: () => {
+                      this.openSheet('markPlayed');
+                    }
+                  })
+                    .margin({ right: 4, bottom: 4 })
+                  AppIconButton({
+                    icon: $r('sys.symbol.ellipsis_circle'),
+                    variant: 'surface',
+                    iconSize: 18,
+                    onTap: () => {
+                      // 更多菜单：直接打开媒体信息弹层
+                      this.openSheet('mediaInfo');
+                    }
+                  })
                     .margin({ bottom: 4 })
-                    .onClick(() => {
-                      this.showMarkPlayed = true;
-                    })
-                  Button('\u22EE')
-                    .height(40)
-                    .width(40)
-                    .fontSize(16)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
-                      // 更多菜单
-                      this.showMediaInfo = true;
-                    })
                 }
                 .width('100%')
               }
@@ -555,28 +782,28 @@ struct DetailPage {
               Column() {
                 Text('\u97f3\u9891 / \u5b57\u5e55')
                   .fontSize(ThemeConstants.LABEL_SMALL)
-                  .fontColor(this.colors().onSurfaceVariant)
+                  .fontColor(this.colors().textSecondary)
                   .padding({ left: 16, bottom: 4 })
                   .width('100%')
                 Row({ space: 12 }) {
                   // 音频轨选择
                   Select(this.audioOptions())
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
+                    .backgroundColor(this.colors().surfacePressed)
+                    .fontColor(this.colors().textPrimary)
                     .height(40)
                     .layoutWeight(1)
-                    .border({ width: 1, color: this.colors().outline, radius: 4 })
+                    .border({ width: 1, color: this.colors().divider, radius: 4 })
                     .padding({ left: 12, right: 12 })
                     .onSelect((index: number, _value: string) => {
                       this.audioStreamIndex = this.streamIndexAt(index);
                     })
                   // 字幕轨选择
                   Select(this.subtitleOptions())
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
+                    .backgroundColor(this.colors().surfacePressed)
+                    .fontColor(this.colors().textPrimary)
                     .height(40)
                     .layoutWeight(1)
-                    .border({ width: 1, color: this.colors().outline, radius: 4 })
+                    .border({ width: 1, color: this.colors().divider, radius: 4 })
                     .padding({ left: 12, right: 12 })
                     .onSelect((index: number, _value: string) => {
                       this.subtitleStreamIndex = index === 0 ? -1 : this.streamIndexAt(index - 1);
@@ -592,7 +819,7 @@ struct DetailPage {
             if (this.item.overview.length > 0) {
               Text(this.item.overview)
                 .fontSize(ThemeConstants.BODY_MEDIUM)
-                .fontColor(this.colors().onSurface)
+                .fontColor(this.colors().textPrimary)
                 .lineHeight(22)
                 .padding({ left: 16, right: 16, top: 4, bottom: 16 })
                 .width('100%')
@@ -613,7 +840,7 @@ struct DetailPage {
               Column() {
                 Text('\u5b63\u4e0e\u96c6')
                   .fontSize(ThemeConstants.TITLE_SMALL)
-                  .fontColor(this.colors().onSurface)
+                  .fontColor(this.colors().textPrimary)
                   .padding({ left: 16, top: 8, bottom: 8 })
                   .width('100%')
                 ForEach(this.seasons, (season: MediaItem) => {
@@ -621,14 +848,17 @@ struct DetailPage {
                     Row() {
                       Text(season.name)
                         .fontSize(ThemeConstants.BODY_MEDIUM)
-                        .fontColor(this.colors().onSurface)
+                        .fontColor(this.colors().textPrimary)
                         .layoutWeight(1)
-                      Text(this.expandedSeasonId === season.id ? 'v' : '>')
-                        .fontColor(this.colors().outline)
+                      SymbolGlyph(this.expandedSeasonId === season.id
+                        ? $r('sys.symbol.chevron_down')
+                        : $r('sys.symbol.chevron_right'))
+                        .fontSize(ThemeConstants.TITLE_MEDIUM)
+                        .fontColor([this.colors().textTertiary])
                     }
                     .width('100%')
                     .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-                    .backgroundColor(this.colors().surface)
+                    .backgroundColor(this.colors().cardBackground)
                     .onClick(() => {
                       this.loadEpisodes(season.id);
                     })
@@ -647,11 +877,11 @@ struct DetailPage {
                               Column({ space: 4 }) {
                                 Text(ep.displayTitle())
                                   .fontSize(ThemeConstants.BODY_MEDIUM)
-                                  .fontColor(this.colors().onSurface)
+                                  .fontColor(this.colors().textPrimary)
                                   .maxLines(2)
                                 Text(ep.metaLine())
                                   .fontSize(ThemeConstants.LABEL_SMALL)
-                                  .fontColor(this.colors().onSurfaceVariant)
+                                  .fontColor(this.colors().textSecondary)
                               }
                               .alignItems(HorizontalAlign.Start)
                               .layoutWeight(1)
@@ -680,7 +910,7 @@ struct DetailPage {
             if ((this.item.type === 'Movie' || this.item.type === 'Series') && this.similar.length > 0) {
               HorizontalShelf({
                 title: '\u76f8\u4f3c\u63a8\u8350',
-                icon: '\u{1F3AC}',
+                icon: '',
                 items: this.similar,
                 shelfHeight: 235,
                 onItemTap: (it: MediaItem) => {
@@ -697,165 +927,20 @@ struct DetailPage {
         .scrollBar(BarState.Off)
       }
 
-      // 播放选项弹出层
-      if (this.showPlayOptions) {
-        Column() {
-          Column({ space: 8 }) {
-            Text('\u64ad\u653e\u9009\u9879')
-              .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
-            Text('\u5f3a\u5236\u8f6c\u7801\u64ad\u653e')
-              .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onSurfaceVariant)
-            Toggle({ type: ToggleType.Switch, isOn: this.forceTranscode })
-              .onChange((on: boolean) => {
-                this.forceTranscode = on;
-              })
-            Button('\u5a92\u4f53\u4fe1\u606f')
-              .width('100%')
-              .onClick(() => {
-                this.showMediaInfo = true;
-              })
-            Button('\u52a0\u5165\u64ad\u653e\u5217\u8868')
-              .width('100%')
-              .onClick(() => {
-                this.showPlayOptions = false;
-                this.openPlaylistPicker();
-              })
-            Button('\u5173\u95ed')
-              .width('100%')
-              .backgroundColor(this.colors().surfaceElevated)
-              .fontColor(this.colors().onSurface)
-              .onClick(() => {
-                this.showPlayOptions = false;
-              })
-          }
-          .padding(20)
-          .backgroundColor(this.colors().surface)
-          .borderRadius(12)
-          .width('85%')
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor(this.colors().scrim)
-        .onClick(() => {
-          this.showPlayOptions = false;
-        })
-      }
-
-      // 标为已播放/未播放确认弹窗
-      if (this.showMarkPlayed) {
-        Column() {
-          Column({ space: 8 }) {
-            Text(this.item.isPlayed ? $r('app.string.play_mark_unplayed') : $r('app.string.play_mark_played'))
-              .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
-            Text(this.item.isPlayed ? '确认标记为未播放？' : '确认标记为已播放？')
-              .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
-            Button(this.item.isPlayed ? $r('app.string.play_mark_unplayed') : $r('app.string.play_mark_played'))
-              .width('100%')
-              .backgroundColor(this.colors().primary)
-              .fontColor(this.colors().onPrimary)
-              .onClick(() => {
-                this.togglePlayed();
-                this.showMarkPlayed = false;
-              })
-            Button('\u53d6\u6d88')
-              .width('100%')
-              .backgroundColor(this.colors().surfaceElevated)
-              .fontColor(this.colors().onSurface)
-              .onClick(() => {
-                this.showMarkPlayed = false;
-              })
-          }
-          .padding(20)
-          .backgroundColor(this.colors().surface)
-          .borderRadius(12)
-          .width('85%')
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor(this.colors().scrim)
-        .onClick(() => {
-          this.showMarkPlayed = false;
-        })
-      }
-
-      // 媒体信息弹出层
-      if (this.showMediaInfo) {
-        this.MediaInfoDialog()
-      }
-
-      // 播放列表选择弹出层
-      if (this.showPlaylistPicker) {
-        Column() {
-          Column({ space: 8 }) {
-            Text('\u52a0\u5165\u64ad\u653e\u5217\u8868')
-              .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
-            TextInput({ text: this.playlistName, placeholder: '\u65b0\u5efa\u64ad\u653e\u5217\u8868\u540d\u79f0' })
-              .width('100%')
-              .height(44)
-              .onChange((value: string) => {
-                this.playlistName = value;
-              })
-            Button('\u65b0\u5efa\u5e76\u6dfb\u52a0')
-              .width('100%')
-              .backgroundColor(this.colors().primary)
-              .fontColor(this.colors().onPrimary)
-              .onClick(() => {
-                this.addToPlaylist('');
-              })
-            if (this.playlistMessage.length > 0) {
-              Text(this.playlistMessage)
-                .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontColor(this.colors().error)
-            }
-            if (this.playlistItems.length > 0) {
-              List() {
-                ForEach(this.playlistItems, (playlist: MediaItem) => {
-                  ListItem() {
-                    Text(playlist.name)
-                      .width('100%')
-                      .padding({ top: 10, bottom: 10 })
-                      .fontColor(this.colors().onSurface)
-                      .onClick(() => {
-                        this.addToPlaylist(playlist.id);
-                      })
-                  }
-                }, (playlist: MediaItem) => playlist.id)
-              }
-              .width('100%')
-              .height(Math.min(180, this.playlistItems.length * 44))
-              .scrollBar(BarState.Auto)
-            }
-            Button('\u53d6\u6d88')
-              .width('100%')
-              .backgroundColor(this.colors().surfaceElevated)
-              .fontColor(this.colors().onSurface)
-              .onClick(() => {
-                this.showPlaylistPicker = false;
-              })
-          }
-          .padding(20)
-          .backgroundColor(this.colors().surface)
-          .borderRadius(12)
-          .width('85%')
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor(this.colors().scrim)
-        .onClick(() => {
-          this.showPlaylistPicker = false;
-        })
-      }
+      // 所有弹层统一由根节点的 bindSheet + sheetKind 承载（见文件末尾），
+      // 原来这里的 4 套「全屏遮罩 + 居中卡片 + 点遮罩关闭」已删除
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
+    .bindSheet($$this.sheetShow, this.SheetContent(), {
+      height: SheetSize.FIT_CONTENT,
+      dragBar: false,
+      backgroundColor: this.colors().cardBackground,
+      onDisappear: () => {
+        // 关闭后清空判别字段，下次打开时不会残留上次的内容
+        this.sheetKind = '';
+      }
+    })
   }
 }

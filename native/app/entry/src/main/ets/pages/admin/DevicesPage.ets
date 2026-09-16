@@ -5,7 +5,8 @@ import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
-import { AsyncStateView } from '../../components/AsyncStateView';
+import { LoadingState } from '../../components/LoadingState';
+import { EmptyState } from '../../components/EmptyState';
 
 interface DeviceInfo {
   id: string;
@@ -98,27 +99,27 @@ struct DevicesPage {
     Row({ space: 10 }) {
       Column({ space: 4 }) {
         Text(device.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (device.appName.length > 0) {
           Text(device.appName)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (device.userName.length > 0) {
           Text(`用户：${device.userName}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
         if (device.lastActivity.length > 0) {
           Text(`最后活动：${device.lastActivity}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .width('100%')
         }
       }
@@ -126,8 +127,8 @@ struct DevicesPage {
       Button('注销')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().destructive)
-        .fontColor(this.colors().onPrimary)
+        .backgroundColor(this.colors().errorLight)
+        .fontColor(this.colors().onBrand)
         .enabled(!this.actionBusy)
         .onClick(() => {
           this.requestLogout(device);
@@ -135,7 +136,7 @@ struct DevicesPage {
     }
     .width('100%')
     .padding(14)
-    .backgroundColor(this.colors().surface)
+    .backgroundColor(this.colors().cardBackground)
     .borderRadius(10)
   }
 
@@ -156,15 +157,19 @@ struct DevicesPage {
             .padding({ left: 16, right: 16, bottom: 6 })
         }
         if (this.status !== UiState.SUCCESS) {
-          AsyncStateView({
-            status: this.status,
-            message: this.errorMsg,
-            emptyHint: '当前没有已注册设备',
-            minHeight: 200,
-            onRetry: () => {
-              this.reload();
-            }
-          })
+          if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+            LoadingState()
+          } else if (this.status === UiState.ERROR) {
+            EmptyState({
+              message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+              actionLabel: '重试',
+              onAction: () => {
+                this.reload();
+              }
+            })
+          } else if (this.status === UiState.EMPTY) {
+            EmptyState({ message: '当前没有已注册设备' })
+          }
         } else {
           List({ space: 8 }) {
             ForEach(this.devices, (device: DeviceInfo) => {
@@ -181,31 +186,31 @@ struct DevicesPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showLogoutConfirm) {
         Column() {
           Column({ space: 12 }) {
             Text('注销设备？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认注销设备“${this.pendingDevice.name}”？该设备将被移出已注册设备列表。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
               .width('100%')
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showLogoutConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '注销')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.logoutDevice();
@@ -214,7 +219,7 @@ struct DevicesPage {
             .width('100%')
           }
           .padding(20)
-          .backgroundColor(this.colors().surface)
+          .backgroundColor(this.colors().cardBackground)
           .borderRadius(12)
           .width('85%')
           .onClick(() => {

@@ -29,6 +29,11 @@ public:
     bool isAdmin() const;
     std::string serverName() const;
     std::string deviceId() const;
+    /**
+     * 覆盖设备标识（应在上一次登录之前调用）。
+     * 客户端把设备标识按安装持久化，启动时注入，避免"退出/重新登录"后服务端出现重复设备。
+     */
+    void setDeviceId(const std::string &deviceId);
     bool isAuthenticated() const;
 
     /** Extra client preferences (theme, etc.) stored alongside session. */

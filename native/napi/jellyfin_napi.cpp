@@ -33,7 +33,14 @@ constexpr const char *kNativeVersion = "0.1.0-native";
 
 jellyfin::JellyfinApiClient &Api()
 {
-    static jellyfin::JellyfinApiClient client;
+    // 交互式请求读超时从默认 30s 收紧到 15s：
+    // 设备实测遇到过服务端对个别端点"挂起不响应"（如 /Users/{uid}/Items/{personId}，
+    // curl 12s 无响应），30s 等待会让界面看起来像卡死；收紧后可更快落到错误态 + 重试入口。
+    static jellyfin::JellyfinApiClient client = []() {
+        jellyfin::HttpClient http;
+        http.setReadTimeoutSec(15);
+        return jellyfin::JellyfinApiClient(std::move(http));
+    }();
     return client;
 }
 
@@ -286,6 +293,17 @@ napi_value GetVersion(napi_env env, napi_callback_info /*info*/)
     const std::string version = std::string(kNativeVersion) + ";" + jellyfin_core_version() + ";" +
                                 jellyfin_player_version();
     return ToNapiString(env, version);
+}
+
+napi_value SetDeviceId(napi_env env, napi_callback_info info)
+{
+    std::string deviceId;
+    if (!ReadStringArg(env, info, 0, deviceId) || deviceId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "deviceId required"));
+    }
+    auto &session = jellyfin::SessionManager::instance();
+    session.setDeviceId(deviceId);
+    return ToNapiJson(env, MakeResult(true, 0, "ok"));
 }
 
 napi_value ConfigureServer(napi_env env, napi_callback_info info)
@@ -1332,6 +1350,7 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getVersion", nullptr, GetVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"setDeviceId", nullptr, SetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreSession", nullptr, RestoreSession, nullptr, nullptr, nullptr, napi_default,

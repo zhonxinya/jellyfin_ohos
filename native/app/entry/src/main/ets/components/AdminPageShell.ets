@@ -3,7 +3,8 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { UiState } from '../common/UiState';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { PageHeader } from './PageHeader';
-import { AsyncStateView } from './AsyncStateView';
+import { EmptyState } from './EmptyState';
+import { LoadingState } from './LoadingState';
 import { AdminEntityList, AdminKeyValueList, KeyValueRow } from './AdminListViews';
 
 /**
@@ -31,15 +32,23 @@ export struct AdminPageShell {
         }
       })
 
-      if (this.status !== UiState.SUCCESS) {
-        AsyncStateView({
-          status: this.status,
-          message: this.errorMsg,
-          minHeight: 200,
-          onRetry: () => {
-            this.onRetry();
-          }
-        })
+      if (this.status === UiState.LOADING || this.status === UiState.REFRESHING) {
+        LoadingState({})
+      } else if (this.status === UiState.ERROR || this.status === UiState.EMPTY) {
+        Column() {
+          EmptyState({
+            message: this.status === UiState.EMPTY
+              ? '暂无数据'
+              : (this.errorMsg.length > 0 ? this.errorMsg : '加载失败'),
+            actionLabel: this.status === UiState.ERROR ? '重试' : '',
+            onAction: () => {
+              this.onRetry();
+            }
+          })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
       } else {
         Scroll() {
           Column() {
@@ -60,6 +69,6 @@ export struct AdminPageShell {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }
