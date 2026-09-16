@@ -29,6 +29,8 @@
 #include "../feature/player/soft_decode_session.h"
 // EGL/GLES 渲染（把软解帧直接画进 XComponent surface）
 #include "../feature/player/egl_renderer.h"
+// 官方 XComponent 原生渲染桥（OH_NativeXComponent 回调提供 window）
+#include "../feature/player/xcomponent_bridge.h"
 
 #include <cctype>
 #include <functional>
@@ -1201,11 +1203,28 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
             } catch (...) {
                 surfaceId = 0;
             }
-            if (surfaceId != 0) {
+            if (surfaceId != 0 || renderMode == "xcomponent") {
                 if (SoftRenderer().isReady()) {
                     // 已就绪（例如刚被 renderTargetProbe 初始化过）时复用，避免二次初始化同一 surface
                     renderReady = true;
                     out["renderReused"] = true;
+                } else if (renderMode == "xcomponent") {
+                    // 官方路径：window 由 ArkUI 经 OH_NativeXComponent 回调给出（见 xcomponent_bridge）
+                    int surfaceW = 0;
+                    int surfaceH = 0;
+                    void *surfaceWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
+                    if (!jellyfin::player::XComponentBridge::SurfaceSize(surfaceW, surfaceH)) {
+                        // 尺寸取自 ArkTS 侧的组件实测值兜底
+                        surfaceW = static_cast<int>(surfaceWidth);
+                        surfaceH = static_cast<int>(surfaceHeight);
+                    }
+                    if (surfaceWindow == nullptr) {
+                        renderError = "XComponent surface 尚未创建（等待 OnSurfaceCreated）";
+                    } else {
+                        renderReady = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH,
+                                                                    renderError);
+                        out["xcomponentSize"] = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
+                    }
                 } else if (renderMode == "texture") {
                     // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
                     renderReady = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId),
@@ -1434,7 +1453,24 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
 
     std::string initError;
     bool ready = false;
-    if (out["mode"] == "texture") {
+    if (out["mode"] == "xcomponent") {
+        // 官方路径：window 来自 OH_NativeXComponent 回调（xcomponent_bridge）
+        void *surfaceWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
+        int surfaceW = 0;
+        int surfaceH = 0;
+        if (!jellyfin::player::XComponentBridge::SurfaceSize(surfaceW, surfaceH)) {
+            surfaceW = static_cast<int>(width);
+            surfaceH = static_cast<int>(height);
+        }
+        if (surfaceWindow == nullptr) {
+            initError = jellyfin::player::XComponentBridge::IsRegistered()
+                            ? "XComponent 已注册但 surface 尚未创建（等待 OnSurfaceCreated）"
+                            : "未收到 OH_NativeXComponent：请确认 XComponent 指定了 libraryname";
+        } else {
+            out["xcomponentSize"] = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
+            ready = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH, initError);
+        }
+    } else if (out["mode"] == "texture") {
         ready = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId), initError,
                                                static_cast<int>(width), static_cast<int>(height));
     } else {
@@ -2093,5 +2129,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+    // 官方 XComponent 原生渲染入口：ArkUI 会把 XComponent 的 OH_NativeXComponent 注入到本模块 exports
+    // （前提：ArkTS 侧 XComponent 指定 libraryname 指向本模块）
+    jellyfin::player::XComponentBridge::Register(env, exports);
     return exports;
 }

@@ -64,6 +64,8 @@ endif()
 target_link_libraries(jellyfin_native PUBLIC
   libace_napi.z.so
   libhilog_ndk.z.so
+  # 官方 XComponent 原生接口（OH_NativeXComponent_*）：EGL/GLES 渲染到 XComponent 的官方入口
+  libace_ndk.z.so
 )
 
 # 软解渲染：EGL + GLES3 把解码帧直接画进 XComponent surface；

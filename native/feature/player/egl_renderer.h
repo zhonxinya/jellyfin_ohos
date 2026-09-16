@@ -57,6 +57,12 @@ public:
                          int requestedHeight = 0);
 
     /**
+     * **官方路径**：用 ArkUI 经 `OH_NativeXComponent` 回调交来的 `OHNativeWindow*` 初始化
+     * （见 `xcomponent_bridge.h`）。相比 surfaceId 方式，window 与尺寸都由 framework 给出。
+     */
+    bool initFromWindow(void *nativeWindow, int width, int height, std::string &error);
+
+    /**
      * 重绘最近一帧并在 **swap 之前** 回读帧缓冲（导出渲染结果的正确做法）。
      *
      * 为什么不能直接读：`eglSwapBuffers` 之后后台缓冲内容未定义，`glReadPixels` 会读到全黑
@@ -72,6 +78,9 @@ public:
     bool isTexturePath() const { return nativeImage_ != nullptr; }
 
 private:
+    /** 两条路径共用的初始化：EGL display/config/context、着色器程序、纹理与顶点缓冲 */
+    bool initWithWindow(void *window, int requestedWidth, int requestedHeight, std::string &error);
+
     /** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
     bool drawFrame(const uint8_t *rgba, int width, int height, std::string &error);
 

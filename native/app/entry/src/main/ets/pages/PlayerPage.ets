@@ -176,7 +176,7 @@ struct PlayerPage {
     const pxSize: number[] = this.surfacePixelSize();
     // XComponent 为 TEXTURE 类型：surfaceId 是 GL 纹理 id，原生侧走 OH_NativeImage 渲染并发布
     const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, pxSize[0],
-                                                          pxSize[1], 'texture', this.playbackOptions);
+                                                          pxSize[1], 'xcomponent', this.playbackOptions);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.softStatus = `软解打开失败：${result.message}`;
@@ -231,7 +231,7 @@ struct PlayerPage {
     try {
       const pxSize: number[] = this.surfacePixelSize();
       const raw: string = JellyfinNative.renderTargetProbe(this.surfaceId, pxSize[0], pxSize[1],
-        'texture');
+        'xcomponent');
       const result: NativeResult = JellyfinNative.parseResult(raw);
       if (!result.ok || result.data === null) {
         this.softDiag = `渲染目标判定失败：${result.message}`;
@@ -868,7 +868,11 @@ struct PlayerPage {
   build() {
     Stack() {
       // XComponent 始终存在：软解时 EGL 直接渲染到它的 surface（不再走 PixelMap 逐帧刷新）
-      XComponent({ id: 'jellyfin_player', type: XComponentType.TEXTURE, controller: this.surfaceController })
+      // 官方 XComponent 原生渲染用法：type=SURFACE + libraryname 指向原生模块，
+      // ArkUI 会在 surface 就绪时回调 OH_NativeXComponent_Callback.OnSurfaceCreated(component, window)，
+      // 原生侧据此直接拿到 framework 的 window 做 EGL/GLES 渲染（见 native/feature/player/xcomponent_bridge.h）。
+      XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE,
+        libraryname: 'jellyfin_native', controller: this.surfaceController })
         .id('softVideoArea')
         .width('100%')
         .height('100%')
@@ -888,6 +892,15 @@ struct PlayerPage {
           // 结果进常驻 softDiag：打开播放页即可看到结论，无需任何播放/控制条交互
           this.probeRenderTarget();
         })
+      // 手势与"点击唤出控制条"的透明承载层。
+      // 为什么需要它：官方 NativeXComponent 模式（XComponent 指定 libraryname）下，
+      // ArkUI 会把该组件的输入交给原生侧（见 OH_NativeXComponent_Callback.DispatchTouchEvent），
+      // 挂在 XComponent 自身上的 onTouch/onClick 不再触发。因此把原有手势逻辑原样挂到这一层，
+      // 位置在视频面之上、控件之下，既不影响原生渲染，也保留全部交互。
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(Color.Transparent)
         .onTouch((event: TouchEvent) => {
           if (this.controlsLocked) {
             return;
