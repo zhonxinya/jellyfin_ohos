@@ -245,7 +245,12 @@ struct DetailPage {
   private openPerson(person: Object): void {
     const id: string = this.personId(person);
     if (id.length > 0) {
-      router.pushUrl({ url: 'pages/PersonPage', params: { personId: id } });
+      // 一并带上姓名：人物页直接用这个名字渲染头部，
+      // 无需请求 /Users/{uid}/Items/{personId}（实测部分 Jellyfin 版本对该端点会挂起不响应）
+      router.pushUrl({
+        url: 'pages/PersonPage',
+        params: { personId: id, personName: this.personName(person) }
+      });
     }
   }
 

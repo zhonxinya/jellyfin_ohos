@@ -18,6 +18,8 @@ import { EmptyState } from '../components/EmptyState';
 @Component
 struct PersonPage {
   @State private personId: string = '';
+  /** 由详情页传入的姓名：有它就能立即渲染头部，不必请求会在部分服务器上挂起的人物详情端点 */
+  @State private personNameFromParams: string = '';
   @State private status: string = UiState.LOADING;
   @State private errorMsg: string = '';
   @State private person: MediaItem = new MediaItem();
@@ -33,8 +35,22 @@ struct PersonPage {
       if (idVal !== undefined && idVal.length > 0) {
         this.personId = idVal;
       }
+      const nameVal: string | undefined = bag['personName'] as string | undefined;
+      if (nameVal !== undefined && nameVal.length > 0) {
+        this.personNameFromParams = nameVal;
+        // 先用传入的姓名把页面渲染出来，避免头部空着等接口
+        this.person.name = nameVal;
+      }
     }
-    this.load();
+    // 必须捕获异常：原来直接 `this.load()`，任何异常都会让页面永远停在"加载中…"，
+    // 既看不到错误也没有重试入口（设备实测：人物页一直显示加载中的根因）
+    this.load().catch((err: Error) => {
+      const msg: string = err.message.length > 0 ? err.message : '未知错误';
+      this.status = UiState.ERROR;
+      this.errorMsg = `加载人物信息失败：${msg}`;
+      this.worksStatus = UiState.ERROR;
+      this.worksError = msg;
+    });
   }
 
   private colors(): ThemeColors {
@@ -50,14 +66,19 @@ struct PersonPage {
     this.status = UiState.LOADING;
     this.worksStatus = UiState.LOADING;
     this.worksError = '';
-    const raw: string = await JellyfinNative.getItemDetail(this.personId);
-    const result: NativeResult = JellyfinNative.parseResult(raw);
-    if (!result.ok || result.data === null) {
-      this.status = UiState.ERROR;
-      this.errorMsg = result.message.length > 0 ? result.message : '加载人物信息失败';
-      return;
+    // 有传入姓名时不再请求人物详情：实测部分 Jellyfin 版本对
+    // `/Users/{uid}/Items/{personId}` 会**挂起不响应**（curl 12s 无响应，同一服务器取影片详情仅 47ms），
+    // 请求它只会让页面卡在加载态；姓名与头像已能从详情页的演职人员数据里带过来。
+    if (this.personNameFromParams.length === 0) {
+      const raw: string = await JellyfinNative.getItemDetail(this.personId);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        this.status = UiState.ERROR;
+        this.errorMsg = result.message.length > 0 ? result.message : '加载人物信息失败';
+        return;
+      }
+      this.person = MediaItem.fromJson(result.data);
     }
-    this.person = MediaItem.fromJson(result.data);
     const query: ItemsQueryOptions = new ItemsQueryOptions();
     query.personIds = this.personId;
     query.includeItemTypes = 'Movie,Series,Episode,Audio';
