@@ -99,7 +99,7 @@ struct DevicesPage {
       Column({ space: 4 }) {
         Text(device.name)
           .fontSize(ThemeConstants.TITLE_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -126,8 +126,8 @@ struct DevicesPage {
       Button('注销')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().destructive)
-        .fontColor(this.colors().onPrimary)
+        .backgroundColor(this.colors().errorLight)
+        .fontColor(this.colors().onBrand)
         .enabled(!this.actionBusy)
         .onClick(() => {
           this.requestLogout(device);
@@ -181,14 +181,14 @@ struct DevicesPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showLogoutConfirm) {
         Column() {
           Column({ space: 12 }) {
             Text('注销设备？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认注销设备“${this.pendingDevice.name}”？该设备将被移出已注册设备列表。`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
@@ -197,15 +197,15 @@ struct DevicesPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showLogoutConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '注销')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.logoutDevice();

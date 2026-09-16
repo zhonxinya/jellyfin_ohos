@@ -124,7 +124,7 @@ struct ApiKeysPage {
       Column({ space: 4 }) {
         Text(key.app)
           .fontSize(ThemeConstants.TITLE_MEDIUM)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .width('100%')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -150,8 +150,8 @@ struct ApiKeysPage {
       Button('撤销')
         .height(36)
         .padding({ left: 12, right: 12 })
-        .backgroundColor(this.colors().destructive)
-        .fontColor(this.colors().onPrimary)
+        .backgroundColor(this.colors().errorLight)
+        .fontColor(this.colors().onBrand)
         .enabled(!this.actionBusy)
         .onClick(() => {
           this.requestRevoke(key);
@@ -181,8 +181,8 @@ struct ApiKeysPage {
             })
           Button(this.actionBusy ? '创建中...' : '创建')
             .height(44)
-            .backgroundColor(this.colors().primary)
-            .fontColor(this.colors().onPrimary)
+            .backgroundColor(this.colors().brandPrimary)
+            .fontColor(this.colors().onBrand)
             .enabled(!this.actionBusy)
             .onClick(() => {
               this.createKey();
@@ -223,14 +223,14 @@ struct ApiKeysPage {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(this.colors().background)
+      .backgroundColor(this.colors().pageBackground)
 
       if (this.showRevokeConfirm) {
         Column() {
           Column({ space: 12 }) {
             Text('撤销 API Key？')
               .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontColor(this.colors().onSurface)
+              .fontColor(this.colors().textPrimary)
               .width('100%')
             Text(`确认撤销应用“${this.pendingKey.app}”的 API Key？`)
               .fontSize(ThemeConstants.BODY_MEDIUM)
@@ -243,15 +243,15 @@ struct ApiKeysPage {
             Row({ space: 8 }) {
               Button('取消')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().surfaceElevated)
-                .fontColor(this.colors().onSurface)
+                .backgroundColor(this.colors().surfacePressed)
+                .fontColor(this.colors().textPrimary)
                 .onClick(() => {
                   this.showRevokeConfirm = false;
                 })
               Button(this.actionBusy ? '处理中...' : '撤销')
                 .layoutWeight(1)
-                .backgroundColor(this.colors().destructive)
-                .fontColor(this.colors().onPrimary)
+                .backgroundColor(this.colors().errorLight)
+                .fontColor(this.colors().onBrand)
                 .enabled(!this.actionBusy)
                 .onClick(() => {
                   this.revokeKey();
