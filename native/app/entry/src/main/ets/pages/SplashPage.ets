@@ -33,6 +33,10 @@ struct SplashPage {
   private async start(): Promise<void> {
     const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
     await SessionStore.init(ctx);
+    // 稳定设备标识必须在任何网络请求（恢复会话/登录）之前注入 C++ 会话，
+    // 否则 C++ 会用自己的随机 id 先向服务端注册一次设备，导致设备列表堆积
+    const stableDeviceId: string = await SessionStore.ensureDeviceId();
+    JellyfinNative.setDeviceId(stableDeviceId);
     const accepted: string = await SessionStore.loadLegalConsent();
     if (accepted !== LEGAL_VERSION) {
       this.needConsent = true;

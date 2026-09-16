@@ -288,6 +288,17 @@ napi_value GetVersion(napi_env env, napi_callback_info /*info*/)
     return ToNapiString(env, version);
 }
 
+napi_value SetDeviceId(napi_env env, napi_callback_info info)
+{
+    std::string deviceId;
+    if (!ReadStringArg(env, info, 0, deviceId) || deviceId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "deviceId required"));
+    }
+    auto &session = jellyfin::SessionManager::instance();
+    session.setDeviceId(deviceId);
+    return ToNapiJson(env, MakeResult(true, 0, "ok"));
+}
+
 napi_value ConfigureServer(napi_env env, napi_callback_info info)
 {
     std::string baseUrl;
@@ -1332,6 +1343,7 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getVersion", nullptr, GetVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"setDeviceId", nullptr, SetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreSession", nullptr, RestoreSession, nullptr, nullptr, nullptr, napi_default,

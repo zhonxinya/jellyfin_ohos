@@ -2,6 +2,7 @@ declare module 'libjellyfin_native.so' {
   interface JellyfinNativeModule {
     getVersion(): string;
     configureServer(serverUrl: string): string;
+    setDeviceId(deviceId: string): string;
     login(username: string, password: string): string;
     logout(): string;
     restoreSession(sessionJson: string): string;
