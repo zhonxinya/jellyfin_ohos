@@ -4,6 +4,7 @@ import { SessionStore } from '../services/SessionStore';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
+import { PrimaryButton } from '../components/PrimaryButton';
 
 @Entry
 @Component
@@ -55,35 +56,37 @@ struct ServerPage {
         .width('100%')
 
       Text($r('app.string.server_hint'))
-        .fontSize(ThemeConstants.LABEL_SMALL)
-        .fontColor(this.colors().onSurfaceVariant)
+        .fontSize(ThemeConstants.META_MEDIUM)
+        .fontColor(this.colors().textSecondary)
         .width('100%')
 
       TextInput({ text: this.serverUrl, placeholder: 'https://jellyfin.example.com' })
         .width('100%')
-        .height(48)
-        .backgroundColor(this.colors().surface)
-        .fontColor(this.colors().onSurface)
-        .placeholderColor(this.colors().outline)
+        .height(ThemeConstants.INPUT_HEIGHT)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .backgroundColor(this.colors().cardBackground)
+        .fontColor(this.colors().textPrimary)
+        .placeholderColor(this.colors().textTertiary)
+        // 圆角写进 border（先 borderRadius 再 border 会重置圆角）
+        .border({ width: 1, color: this.colors().divider, radius: ThemeConstants.COVER_RADIUS })
         .onChange((value: string) => {
           this.serverUrl = value;
         })
 
       if (this.status === UiState.ERROR && this.errorMsg.length > 0) {
         Text(this.errorMsg)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
+          .fontSize(ThemeConstants.META_MEDIUM)
           .fontColor(this.colors().error)
           .width('100%')
       }
 
-      Button(this.status === UiState.LOADING ? $r('app.string.state_loading') : $r('app.string.action_continue'))
-        .width('100%')
-        .backgroundColor(this.colors().primary)
-        .fontColor(this.colors().onPrimary)
-        .enabled(this.status !== UiState.LOADING)
-        .onClick(() => {
+      PrimaryButton({
+        label: this.status === UiState.LOADING ? '连接中…' : '继续',
+        buttonEnabled: this.status !== UiState.LOADING,
+        onTap: () => {
           this.onConnect();
-        })
+        }
+      })
     }
     .padding(24)
     .width('100%')

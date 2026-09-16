@@ -3,6 +3,8 @@ import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { SessionStore } from '../services/SessionStore';
 import { SessionUtil } from '../services/SessionUtil';
 import { AppViewModel } from '../viewmodel/AppViewModel';
+import { PrimaryButton } from '../components/PrimaryButton';
+import { SecondaryButton } from '../components/SecondaryButton';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
@@ -87,25 +89,28 @@ struct LoginPage {
       })
       Scroll() {
         Column() {
-          Text('\u{1F3AC}')
-            .fontSize(72)
-            .width('100%')
-            .textAlign(TextAlign.Center)
-            .fontColor(this.colors().primary)
-            .margin({ bottom: 16 })
+          Row() {
+            SymbolGlyph($r('sys.symbol.film'))
+              .fontSize(56)
+              .fontColor([this.colors().brandPrimary])
+          }
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+          .margin({ bottom: 16 })
 
           Text(this.serverLabel.length > 0 ? this.serverLabel : 'Jellyfin')
             .fontSize(ThemeConstants.TITLE_LARGE)
-            .fontColor(this.colors().onSurface)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.colors().textPrimary)
             .width('100%')
             .textAlign(TextAlign.Center)
 
           Text(this.serverLabel.length > 0 ? AppViewModel.getInstance().serverUrl : '')
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textTertiary)
             .width('100%')
             .textAlign(TextAlign.Center)
-            .margin({ bottom: 32 })
+            .margin({ bottom: 28 })
 
           LoginTextInput({
             text: this.username,
@@ -126,41 +131,32 @@ struct LoginPage {
 
           if (this.status === UiState.ERROR && this.errorMsg.length > 0) {
             Text(this.errorMsg)
-              .fontSize(ThemeConstants.BODY_MEDIUM)
+              .fontSize(ThemeConstants.META_MEDIUM)
               .fontColor(this.colors().error)
               .width('100%')
+              .textAlign(TextAlign.Center)
               .margin({ top: 12 })
           }
 
-          Button() {
-            if (this.status === UiState.LOADING) {
-              LoadingProgress()
-                .width(20)
-                .height(20)
-                .color(this.colors().onPrimary)
-            } else {
-              Text($r('app.string.action_login'))
-                .fontColor(this.colors().onPrimary)
-            }
-          }
-            .width('100%')
-            .height(48)
-            .backgroundColor(this.colors().primary)
-            .enabled(this.status !== UiState.LOADING)
-            .margin({ top: 24 })
-            .onClick(() => {
+          // 主按钮：参考项目规格（48vp / 12vp 圆角 / 品牌实底 / 品牌微光投影），加载中切换文案并禁用
+          PrimaryButton({
+            label: this.status === UiState.LOADING ? '登录中…' : '登录',
+            buttonEnabled: this.status !== UiState.LOADING,
+            onTap: () => {
               this.onLogin();
-            })
+            }
+          })
+            .margin({ top: 24 })
 
-          Button($r('app.string.action_change_server'))
-            .width('100%')
-            .height(40)
-            .backgroundColor(Color.Transparent)
-            .fontColor(this.colors().primary)
-            .margin({ top: 8 })
-            .onClick(() => {
+          // 次级按钮：浅底 + 1vp 描边（参考项目 SecondaryButton）
+          SecondaryButton({
+            label: '更换服务器',
+            compact: true,
+            onTap: () => {
               router.replaceUrl({ url: 'pages/ServerPage' });
-            })
+            }
+          })
+            .margin({ top: 10 })
         }
         .padding({ left: 24, right: 24, top: 24, bottom: 24 })
         .width('100%')
@@ -172,7 +168,7 @@ struct LoginPage {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }
 
@@ -192,17 +188,18 @@ struct LoginTextInput {
       Row() {
         SymbolGlyph(this.icon)
           .fontSize(20)
-          .fontColor([this.colors().onSurfaceVariant])
+          .fontColor([this.colors().textTertiary])
       }
-        .width(48)
-        .height(48)
+        .width(ThemeConstants.INPUT_HEIGHT)
+        .height(ThemeConstants.INPUT_HEIGHT)
         .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
       TextInput({ text: this.text, placeholder: this.placeholder })
         .layoutWeight(1)
-        .height(48)
-        .fontColor(this.colors().onSurface)
-        .placeholderColor(this.colors().outline)
+        .height(ThemeConstants.INPUT_HEIGHT)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+        .placeholderColor(this.colors().textTertiary)
         .backgroundColor(Color.Transparent)
         .enterKeyType(EnterKeyType.Next)
         .onChange((value: string) => {
@@ -210,10 +207,10 @@ struct LoginTextInput {
         })
     }
     .width('100%')
-    .height(48)
-    .backgroundColor(this.colors().surface)
-    .border({ width: 1, color: this.colors().outline })
-    .borderRadius(4)
+    .height(ThemeConstants.INPUT_HEIGHT)
+    .backgroundColor(this.colors().cardBackground)
+    // 圆角必须写进 border：先 borderRadius 再 border 会把圆角重置为直角
+    .border({ width: 1, color: this.colors().divider, radius: ThemeConstants.COVER_RADIUS })
   }
 }
 
@@ -235,19 +232,20 @@ struct SecurePasswordInput {
       Row() {
         SymbolGlyph($r('sys.symbol.lock'))
           .fontSize(20)
-          .fontColor([this.colors().onSurfaceVariant])
+          .fontColor([this.colors().textTertiary])
       }
-        .width(48)
-        .height(48)
+        .width(ThemeConstants.INPUT_HEIGHT)
+        .height(ThemeConstants.INPUT_HEIGHT)
         .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
       TextInput({ text: this.text, placeholder: '密码' })
         .layoutWeight(1)
-        .height(48)
+        .height(ThemeConstants.INPUT_HEIGHT)
         .type(this.obscure ? InputType.Password : InputType.Normal)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
         .backgroundColor(Color.Transparent)
-        .fontColor(this.colors().onSurface)
-        .placeholderColor(this.colors().outline)
+        .fontColor(this.colors().textPrimary)
+        .placeholderColor(this.colors().textTertiary)
         .enterKeyType(EnterKeyType.Done)
         .onChange((value: string) => {
           this.onChange(value);
@@ -258,19 +256,19 @@ struct SecurePasswordInput {
       Button() {
         SymbolGlyph(this.obscure ? $r('sys.symbol.eye') : $r('sys.symbol.eye_slash'))
           .fontSize(20)
-          .fontColor([this.colors().onSurfaceVariant])
+          .fontColor([this.colors().textTertiary])
       }
-        .width(48)
-        .height(48)
+        .width(ThemeConstants.INPUT_HEIGHT)
+        .height(ThemeConstants.INPUT_HEIGHT)
+        .padding(0)
         .backgroundColor(Color.Transparent)
         .onClick(() => {
           this.onToggleObscure();
         })
     }
     .width('100%')
-    .height(48)
-    .backgroundColor(this.colors().surface)
-    .border({ width: 1, color: this.colors().outline })
-    .borderRadius(4)
+    .height(ThemeConstants.INPUT_HEIGHT)
+    .backgroundColor(this.colors().cardBackground)
+    .border({ width: 1, color: this.colors().divider, radius: ThemeConstants.COVER_RADIUS })
   }
 }
