@@ -307,6 +307,19 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * FFmpeg 软解码探测：解析播放地址 → 取前缀字节 → 软解出前若干帧（可落盘首帧 PNG）。
+   * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 PlayerSoftDecodeProbe。
+   */
+  static async playerSoftDecodeProbe(itemId: string, cacheDir: string,
+                                     optionsJson: string = '{}'): Promise<string> {
+    try {
+      return await jellyfinNative.playerSoftDecodeProbe(itemId, cacheDir, optionsJson);
+    } catch (error) {
+      return JellyfinNative.fail('playerSoftDecodeProbe', error);
+    }
+  }
+
   static playerPlay(): string {
     try {
       return jellyfinNative.playerPlay();

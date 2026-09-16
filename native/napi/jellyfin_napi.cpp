@@ -9,6 +9,7 @@
 #include "api/user_items_api.h"
 #include "api_client.h"
 #include "engine.h"
+#include "http_client.h"
 #include "image_cache.h"
 #include "image_url.h"
 #include "playback_policy.h"
@@ -18,6 +19,8 @@
 
 // Player version header shares the name version.h; include via relative path.
 #include "../player/version.h"
+// FFmpeg 软解码器（未链接 FFmpeg 时其 available() 返回 false，probe 会如实报错）
+#include "../player/ffmpeg_decoder.h"
 
 #include <cctype>
 #include <functional>
@@ -974,6 +977,121 @@ napi_value ReportPlaybackStopped(napi_env env, napi_callback_info info)
     });
 }
 
+/**
+ * 软解码探测：解析播放地址 → 取文件前缀字节 → 用 FFmpeg 软解出前若干帧。
+ *
+ * 用途：
+ *  - 设备上验证 FFmpeg 软解链路（系统 AVPlayer 解不了的编码，如模拟器上的 HEVC）
+ *  - 为后续"硬解失败自动回落软解"提供能力探测
+ *
+ * 参数：itemId, cacheDir（可写目录，用于落盘首帧 PNG；可为空）, optionsJson（同 playerOpen）
+ * 返回：{ok, ffmpegAvailable, playMethod, httpStatus, bytesFetched,
+ *        container, videoCodec, audioCodec, width, height, pixelFormat,
+ *        durationSec, bitRate, decodedFrames, framePngPath, error}
+ */
+napi_value PlayerSoftDecodeProbe(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string itemId;
+    std::string cacheDir;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, cacheDir);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "itemId required"));
+    }
+    nlohmann::json optionsJson;
+    ReadJsonArg(env, info, 2, optionsJson);
+    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const std::string userId = session.userId();
+
+    return RunAsync(env, [userId, itemId, cacheDir, options]() {
+        nlohmann::json out;
+        out["ffmpegAvailable"] = jellyfin::player::FfmpegDecoder::available();
+
+        // 1) 解析播放地址（与 playerOpen 走同一条 PlaybackInfo + 策略解析路径）
+        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        if (!playback.ok()) {
+            out["ok"] = false;
+            out["error"] = "获取播放信息失败：" + playback.error.message;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        if (playback.data.is_object() && !playback.data.contains("ItemId")) {
+            playback.data["ItemId"] = itemId;
+        }
+        auto &sess = jellyfin::SessionManager::instance();
+        jellyfin::player::PlaybackSession pbSession;
+        std::string resolveError;
+        if (!jellyfin::player::ResolvePlaybackSession(playback.data, sess.baseUrl(), sess.accessToken(),
+                                                     pbSession, resolveError)) {
+            out["ok"] = false;
+            out["error"] = resolveError.empty() ? "无法解析播放地址" : resolveError;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        out["playMethod"] = jellyfin::player::PlayMethodToString(pbSession.method);
+        out["container"] = pbSession.container;
+        out["videoCodec"] = pbSession.videoCodec;
+        out["audioCodec"] = pbSession.audioCodec;
+
+        // 2) 取文件前缀：探测只需容器头 + 前若干帧，避免整片下载；
+        //    用 Range 请求，失败（如服务器不支持）则退化为普通 GET
+        constexpr size_t kPrefixBytes = 8u * 1024u * 1024u;
+        jellyfin::HttpClient http;
+        http.setReadTimeoutSec(60);
+        jellyfin::HttpHeaders headers;
+        headers["Range"] = "bytes=0-" + std::to_string(kPrefixBytes - 1);
+        jellyfin::HttpResponse resp = http.get(pbSession.playUrl, headers);
+        if (resp.status >= 400 || resp.body.size() < 1024) {
+            jellyfin::HttpResponse plain = http.get(pbSession.playUrl, {});
+            if (plain.status < 400 && plain.body.size() >= 1024) {
+                resp = plain;
+            }
+        }
+        out["httpStatus"] = resp.status;
+        out["bytesFetched"] = static_cast<double>(resp.body.size());
+        if (resp.body.size() < 1024) {
+            out["ok"] = false;
+            out["error"] = resp.error.empty()
+                ? ("取流失败：HTTP " + std::to_string(resp.status) + "，仅取到 " +
+                   std::to_string(resp.body.size()) + " 字节")
+                : ("取流失败：" + resp.error);
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+
+        // 3) FFmpeg 软解
+        std::vector<uint8_t> data(resp.body.begin(), resp.body.end());
+        std::string pngPath;
+        if (!cacheDir.empty()) {
+            pngPath = cacheDir + "/softdecode_probe.png";
+        }
+        jellyfin::player::FfmpegDecoder::ProbeResult result;
+        jellyfin::player::FfmpegDecoder::probeFromMemory(data, pngPath, result, 3);
+
+        out["ok"] = result.ok;
+        out["backend"] = result.backend;
+        out["decodedFrames"] = result.decodedFrames;
+        out["framePngPath"] = result.framePngPath;
+        if (!result.error.empty()) {
+            out["error"] = result.error;
+        }
+        if (result.ok) {
+            out["container"] = result.container.empty() ? out["container"] : nlohmann::json(result.container);
+            out["videoCodec"] = result.videoCodec.empty() ? out["videoCodec"] : nlohmann::json(result.videoCodec);
+            if (!result.audioCodec.empty()) {
+                out["audioCodec"] = result.audioCodec;
+            }
+            out["width"] = result.width;
+            out["height"] = result.height;
+            out["pixelFormat"] = result.pixelFormat;
+            out["durationSec"] = result.durationSec;
+            out["bitRate"] = result.bitRate;
+        }
+        return MakeResult(true, 200, "ok", out).dump();
+    });
+}
+
 napi_value PlayerOpen(napi_env env, napi_callback_info info)
 {
     auto &session = jellyfin::SessionManager::instance();
@@ -995,8 +1113,7 @@ napi_value PlayerOpen(napi_env env, napi_callback_info info)
         if (!playback.ok()) {
             return FromApi(playback).dump();
         }
-        if (playback.data.is_object() && !playback.data.contains("ItemId")) {
-            playback.data["ItemId"] = itemId;
+        if (playback.data.is_object() && !playback.data.contains("ItemId")) {            playback.data["ItemId"] = itemId;
         }
 
         auto &session = jellyfin::SessionManager::instance();
@@ -1351,6 +1468,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"setDeviceId", nullptr, SetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"playerSoftDecodeProbe", nullptr, PlayerSoftDecodeProbe, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreSession", nullptr, RestoreSession, nullptr, nullptr, nullptr, napi_default,

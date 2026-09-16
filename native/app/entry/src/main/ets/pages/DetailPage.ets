@@ -1,4 +1,5 @@
 import router from '@ohos.router';
+import common from '@ohos.app.ability.common';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -41,6 +42,10 @@ struct DetailPage {
    */
   @State private sheetShow: boolean = false;
   @State private sheetKind: string = '';
+  /** FFmpeg 软解探测：诊断文本 + 首帧 PNG 路径（用于验证软解链路） */
+  @State private softDecodeInfo: string = '';
+  @State private softDecodeImage: string = '';
+  @State private softDecodeBusy: boolean = false;
   @State private audioStreamIndex: number = -1;
   @State private subtitleStreamIndex: number = -1;
   @State private forceTranscode: boolean = false;
@@ -176,6 +181,56 @@ struct DetailPage {
   private openSheet(kind: string): void {
     this.sheetKind = kind;
     this.sheetShow = true;
+  }
+
+  /**
+   * 运行 FFmpeg 软解探测：解析播放地址 → 取前缀字节 → 软解出前几帧并导出首帧 PNG。
+   *
+   * 这是"硬解不可用时的软解回落"的能力验证入口：系统 AVPlayer 解不了的编码
+   * （例如模拟器上的 HEVC/H.265）可以在这里用 FFmpeg 软件解码验证。
+   */
+  private async runSoftDecodeProbe(): Promise<void> {
+    this.softDecodeBusy = true;
+    this.softDecodeInfo = '正在软解…';
+    this.softDecodeImage = '';
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const raw: string = await JellyfinNative.playerSoftDecodeProbe(
+        this.item.id, ctx.cacheDir, this.buildPlaybackOptions());
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        this.softDecodeInfo = `探测失败：${result.message}`;
+        return;
+      }
+      const data: ESObject = result.data as ESObject;
+      const ok: boolean = JsonUtil.getBoolean(data, 'ok', false);
+      const available: boolean = JsonUtil.getBoolean(data, 'ffmpegAvailable', false);
+      const lines: string[] = [];
+      lines.push(`FFmpeg 可用：${available ? '是' : '否（本构建未链接）'}`);
+      lines.push(`播放方式：${JsonUtil.getString(data, 'playMethod', '-')}`);
+      lines.push(`HTTP ${JsonUtil.getNumber(data, 'httpStatus', 0)}，取流 ${JsonUtil.getNumber(data, 'bytesFetched', 0)} 字节`);
+      const err: string = JsonUtil.getString(data, 'error', '');
+      if (ok) {
+        lines.push(`容器：${JsonUtil.getString(data, 'container', '-')}`);
+        lines.push(`视频编码：${JsonUtil.getString(data, 'videoCodec', '-')}`);
+        lines.push(`音频编码：${JsonUtil.getString(data, 'audioCodec', '-')}`);
+        lines.push(`分辨率：${JsonUtil.getNumber(data, 'width', 0)}x${JsonUtil.getNumber(data, 'height', 0)}`);
+        lines.push(`像素格式：${JsonUtil.getString(data, 'pixelFormat', '-')}`);
+        lines.push(`软解帧数：${JsonUtil.getNumber(data, 'decodedFrames', 0)}`);
+      }
+      if (err.length > 0) {
+        lines.push(`说明：${err}`);
+      }
+      this.softDecodeInfo = lines.join('\n');
+      const png: string = JsonUtil.getString(data, 'framePngPath', '');
+      if (png.length > 0) {
+        this.softDecodeImage = 'file://' + png;
+      }
+    } catch (err) {
+      this.softDecodeInfo = `探测异常：${(err as Error).message}`;
+    } finally {
+      this.softDecodeBusy = false;
+    }
   }
 
   private buildPlaybackOptions(): string {
@@ -370,7 +425,52 @@ struct DetailPage {
       this.MarkPlayedSheet()
     } else if (this.sheetKind === 'playlist') {
       this.PlaylistSheet()
+    } else if (this.sheetKind === 'softDecode') {
+      this.SoftDecodeSheet()
     }
+  }
+
+  /** 软解探测结果（FFmpeg 软解码诊断 + 首帧预览） */
+  @Builder
+  SoftDecodeSheet() {
+    Column({ space: 10 }) {
+      Text('软解首帧预览')
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+      if (this.softDecodeBusy) {
+        LoadingState({ hint: '正在软解…' })
+      }
+      if (this.softDecodeInfo.length > 0) {
+        Text(this.softDecodeInfo)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
+          .width('100%')
+          .textAlign(TextAlign.Start)
+      }
+      if (this.softDecodeImage.length > 0) {
+        Image(this.softDecodeImage)
+          .width('100%')
+          .height(200)
+          .objectFit(ImageFit.Contain)
+          .borderRadius(ThemeConstants.COVER_RADIUS)
+      }
+      if (!this.softDecodeBusy) {
+        SecondaryButton({
+          label: '重新探测',
+          onTap: () => {
+            this.runSoftDecodeProbe();
+          }
+        })
+      }
+      TextButton({
+        label: '关闭',
+        onTap: () => {
+          this.sheetShow = false;
+        }
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
   }
 
   /** 播放选项（强制转码 / 媒体信息 / 加入播放列表） */
@@ -409,6 +509,14 @@ struct DetailPage {
         label: '\u52a0\u5165\u64ad\u653e\u5217\u8868',
         onTap: () => {
           this.openPlaylistPicker();
+        }
+      })
+      // 软解回落能力：用 FFmpeg 软解该条目的前几帧（系统硬解不支持的编码也能验证）
+      SecondaryButton({
+        label: '软解首帧预览',
+        onTap: () => {
+          this.sheetKind = 'softDecode';
+          this.runSoftDecodeProbe();
         }
       })
       TextButton({

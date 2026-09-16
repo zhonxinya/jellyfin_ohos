@@ -64,3 +64,46 @@ target_link_libraries(jellyfin_native PUBLIC
   libace_napi.z.so
   libhilog_ndk.z.so
 )
+
+# ── FFmpeg 软解码（可选）────────────────────────────────────────────────────────
+# 由 scripts/build_ffmpeg_ohos.sh 交叉编译产出。查找顺序：
+#   1) 模块内预编译目录  native/app/entry/libs/<abi>/   （hvigor 会打进 HAP）
+#   2) JELLYFIN_FFMPEG_ROOT/<abi>/lib                  （默认 <repo 父目录>/_ffmpeg-build/out）
+# 未找到时**不**定义 JELLYFIN_HAS_FFMPEG：FfmpegDecoder 会如实报告"解码不可用"，
+# 而不是假装可用（见 native/player/ffmpeg_decoder.cpp）。
+set(JELLYFIN_FFMPEG_ROOT "" CACHE PATH "FFmpeg 预编译根目录（含 <abi>/lib、<abi>/include）")
+if(NOT JELLYFIN_FFMPEG_ROOT)
+  set(JELLYFIN_FFMPEG_ROOT "${NATIVEROOT}/../../_ffmpeg-build/out")
+endif()
+
+set(FFMPEG_ABI_DIR "${JELLYFIN_FFMPEG_ROOT}/${OHOS_ARCH}")
+# cpp -> main -> src -> entry（本文件位于 <entry>/src/main/cpp）
+set(FFMPEG_LOCAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/${OHOS_ARCH}")
+
+set(FFMPEG_LINK_DIR "")
+if(EXISTS "${FFMPEG_LOCAL_DIR}/libavcodec.so")
+  set(FFMPEG_LINK_DIR "${FFMPEG_LOCAL_DIR}")
+elseif(EXISTS "${FFMPEG_ABI_DIR}/lib/libavcodec.so")
+  set(FFMPEG_LINK_DIR "${FFMPEG_ABI_DIR}/lib")
+endif()
+
+if(FFMPEG_LINK_DIR)
+  target_compile_definitions(jellyfin_native PRIVATE JELLYFIN_HAS_FFMPEG=1)
+  # 头文件优先用仓库内 third_party/ffmpeg/include（随仓库提交，副本/CI 构建均可相对定位），
+  # 其次回退到预编译目录 <root>/<abi>/include
+  target_include_directories(jellyfin_native PRIVATE
+    "${THIRD_PARTY_ROOT}/ffmpeg/include"
+    "${FFMPEG_ABI_DIR}/include"
+  )
+  foreach(FF_LIB avformat avcodec avutil swscale swresample)
+    add_library(ff_${FF_LIB} SHARED IMPORTED)
+    set_target_properties(ff_${FF_LIB} PROPERTIES
+      IMPORTED_LOCATION "${FFMPEG_LINK_DIR}/lib${FF_LIB}.so"
+    )
+    target_link_libraries(jellyfin_native PUBLIC ff_${FF_LIB})
+  endforeach()
+  message(STATUS "FFmpeg 软解码：已链接（${FFMPEG_LINK_DIR}，ABI=${OHOS_ARCH}）")
+else()
+  message(STATUS "FFmpeg 软解码：未找到 ABI=${OHOS_ARCH} 的预编译库，本次构建不启用"
+                 "（可运行 scripts/build_ffmpeg_ohos.sh ${OHOS_ARCH}）")
+endif()
