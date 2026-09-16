@@ -60,7 +60,15 @@ struct LoginPage {
     }
     const sessionRaw: string = JellyfinNative.getSession();
     const session: NativeResult = JellyfinNative.parseResult(sessionRaw);
-    const payload: string = SessionUtil.exportSessionJson();
+    // 登录会由 C++ 随机生成 deviceId；这里统一替换为持久化的稳定值并重新 restore，
+    // 使服务端 /Devices 与 /Sessions 始终对应同一台设备
+    const stableDeviceId: string = await SessionStore.ensureDeviceId();
+    const rawSession: string = SessionUtil.exportSessionJson();
+    const payload: string = SessionUtil.stabilizeDeviceId(rawSession, stableDeviceId);
+    if (payload.length > 0 && payload !== rawSession) {
+      // deviceId 被替换过 → 让 C++ 会话也切到稳定标识
+      JellyfinNative.restoreSession(payload);
+    }
     if (payload.length === 0) {
       this.status = UiState.ERROR;
       this.errorMsg = '登录成功但会话无效，请重试';

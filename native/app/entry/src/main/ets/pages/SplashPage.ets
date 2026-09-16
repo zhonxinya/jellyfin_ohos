@@ -71,7 +71,10 @@ struct SplashPage {
       this.routeNext(serverUrl.length > 0);
       return;
     }
-    const normalized: string = SessionUtil.normalizeStoredSession(sessionJson);
+    // 设备标识独立持久化：恢复会话时统一覆盖为稳定值，避免退出/重新登录后服务端堆积重复设备
+    const deviceId: string = await SessionStore.ensureDeviceId();
+    const normalized: string = SessionUtil.stabilizeDeviceId(
+      SessionUtil.normalizeStoredSession(sessionJson), deviceId);
     const restoreRaw: string = JellyfinNative.restoreSession(normalized);
     const restore: NativeResult = JellyfinNative.parseResult(restoreRaw);
     const sessionRaw: string = JellyfinNative.getSession();

@@ -24,6 +24,27 @@ export class SessionUtil {
     return raw;
   }
 
+  /**
+   * 把会话 JSON 里的 deviceId 覆盖为持久化的稳定值。
+   * C++ `restoreSession` 会优先采用 JSON 中的 deviceId（见 core/session.cpp），
+   * 因此这里覆盖后重新 restore 即可让服务端看到稳定的设备标识。
+   */
+  static stabilizeDeviceId(sessionJson: string, deviceId: string): string {
+    if (sessionJson.length === 0 || deviceId.length === 0) {
+      return sessionJson;
+    }
+    const root: ESObject | null = JsonUtil.parseObject(sessionJson);
+    if (root === null) {
+      return sessionJson;
+    }
+    const current: string = JsonUtil.getString(root, 'deviceId', '');
+    if (current === deviceId) {
+      return sessionJson;
+    }
+    root['deviceId'] = deviceId;
+    return JSON.stringify(root);
+  }
+
   static isAuthenticatedPayload(data: ESObject | null): boolean {
     if (data === null) {
       return false;
