@@ -142,15 +142,25 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
     std::vector<int> pending;
     int lastErrno = 0;
     int sock = -1;
+    // 只关一次：关闭后立即置 -1。
+    // 为什么必须这样：musl 的 FORTIFY 会在 fd 无效时经 __fd_chk **直接 abort**，
+    // 而"同一 fd 被关两次"在竞速连接 + select 多分支里很容易发生（设备实测崩溃栈：
+    // HttpClient::get → request → ConnectTcp(__fd_chk)）。用统一的关闭器把这类错误变成不可能。
+    auto closeOnce = [](int &fd) {
+        if (fd >= 0) {
+            close(fd);
+            fd = -1;
+        }
+    };
     for (addrinfo *p = res; p != nullptr && sock < 0; p = p->ai_next) {
-        const int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
+        int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
         if (fd < 0) {
             lastErrno = errno;
             continue;
         }
         if (!SetNonBlocking(fd, true)) {
             lastErrno = errno;
-            close(fd);
+            closeOnce(fd);
             continue;
         }
         if (connect(fd, p->ai_addr, static_cast<socklen_t>(p->ai_addrlen)) == 0) {
@@ -162,7 +172,7 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             continue;
         }
         lastErrno = errno;
-        close(fd);
+        closeOnce(fd);
     }
     freeaddrinfo(res);
 
@@ -202,7 +212,7 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         std::vector<int> next;
-        for (const int fd : pending) {
+        for (int fd : pending) {
             if (sock >= 0) {
                 next.push_back(fd);
                 continue;
@@ -221,18 +231,15 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             } else {
                 lastErrno = soError;
             }
-            close(fd);
+            closeOnce(fd);
         }
         pending.swap(next);
     }
-    for (const int fd : pending) {
-        // 只关闭"未被选中的"候选 fd：
-        // - 排除 sock：选中的 fd 是本次连接要用的，误关它会让后续 send/recv 作用在
-        //   已关闭（甚至已被复用）的 fd 上；
-        // - 排除负值：对无效 fd 调 close()/fcntl() 会被 musl FORTIFY 的 __fd_chk 直接 abort
-        //   （设备实测：崩溃栈正是 HttpClient::get → request → ConnectTcp(__fd_chk)）。
-        if (fd >= 0 && fd != sock) {
-            close(fd);
+    // 清理未被选中的候选 fd：`closeOnce` 保证"已关过就跳过"，
+    // 从根本上消除"重复关闭 → __fd_chk abort"（设备实测崩溃点就在这里）。
+    for (int &fd : pending) {
+        if (fd != sock) {
+            closeOnce(fd);
         }
     }
 
