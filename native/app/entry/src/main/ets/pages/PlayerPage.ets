@@ -203,6 +203,12 @@ struct PlayerPage {
         JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
       this.softDiag = `渲染自检${passed ? '通过' : '未通过'}：${report}`;
     }
+    // 渲染跑起来后自动导出一次帧缓冲（真实视频帧），无需再点任何按钮
+    setTimeout(() => {
+      if (this.softPlaying) {
+        this.autoDumpRenderedFrame();
+      }
+    }, 10000);
   }
 
   /** XComponent 的像素尺寸：优先用组件实测尺寸，未拿到时退化为整屏像素 */
@@ -291,6 +297,31 @@ struct PlayerPage {
       this.softStatus = `软解异常：${(err as Error).message}`;
     } finally {
       this.softPulling = false;
+    }
+  }
+
+  /**
+   * 诊断：软解运行一段时间后**自动**导出一次渲染缓冲（不含清屏自检，故回读到的是真实视频帧）。
+   *
+   * 为什么要自动：手动点「存帧」需要控制条处于显示状态，设备自动化下时序很难对齐；
+   * 这条路径只要软解在跑就必然产出文件，便于确证"软解画面确实渲染到了帧缓冲"。
+   */
+  private async autoDumpRenderedFrame(): Promise<void> {
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const path: string = `${ctx.cacheDir}/softrender_frame.png`;
+      const raw: string = JellyfinNative.softPlayDumpFrame(path);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (result.ok && result.data !== null) {
+        const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
+        const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
+        const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
+        this.softDiag = `已自动存帧：${source} ${w}x${h} → ${path}`;
+      } else {
+        this.softDiag = `自动存帧失败：${result.message}`;
+      }
+    } catch (err) {
+      this.softDiag = `自动存帧异常：${(err as Error).message}`;
     }
   }
 

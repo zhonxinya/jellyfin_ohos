@@ -1038,6 +1038,19 @@ std::vector<uint8_t> &SoftLastFrame()
     return frame;
 }
 
+/** 最近一帧的宽高（导出时需要，帧缓冲是 surface 尺寸、与解码尺寸不同） */
+int &SoftLastFrameWidth()
+{
+    static int width = 0;
+    return width;
+}
+
+int &SoftLastFrameHeight()
+{
+    static int height = 0;
+    return height;
+}
+
 std::mutex &SoftLastFrameMutex()
 {
     static std::mutex mutex;
@@ -1273,6 +1286,8 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
         {
             std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
             SoftLastFrame() = rgba;
+            SoftLastFrameWidth() = frameInfo.width;
+            SoftLastFrameHeight() = frameInfo.height;
         }
         if (SoftRenderer().isReady()) {
             rendered = SoftRenderer().renderRgba(rgba.data(), frameInfo.width, frameInfo.height, renderError);
@@ -1291,6 +1306,9 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
 
 /**
  * 回读当前渲染缓冲并写成 PNG（验证"真的渲染出来了"，与系统截图无关）。
+ *
+ * 关键：**先重绘最近一帧再回读**。`eglSwapBuffers` 之后后台缓冲内容未定义，
+ * 直接读会得到全黑（实测 1260x2619 全黑），会误判为"渲染失败"。
  * 参数：输出路径。渲染器未就绪时退化为导出最近一帧解码结果。
  */
 napi_value SoftPlayDumpFrame(napi_env env, napi_callback_info info)
@@ -1307,9 +1325,16 @@ napi_value SoftPlayDumpFrame(napi_env env, napi_callback_info info)
         std::vector<uint8_t> pixels;
         int w = 0;
         int h = 0;
-        if (SoftRenderer().readbackRgba(pixels, w, h, error)) {
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        const bool hasFrame = !SoftLastFrame().empty() && SoftLastFrameWidth() > 0 &&
+                              SoftLastFrameHeight() > 0;
+        const bool readOk = hasFrame
+            ? SoftRenderer().redrawAndReadback(SoftLastFrame().data(), SoftLastFrameWidth(),
+                                               SoftLastFrameHeight(), pixels, w, h, error)
+            : SoftRenderer().readbackRgba(pixels, w, h, error);
+        if (readOk) {
             ok = WriteRgbaPng(pixels, w, h, path, error);
-            out["source"] = "glReadPixels";
+            out["source"] = hasFrame ? "glReadPixels(after-redraw)" : "glReadPixels(no-frame)";
             out["width"] = w;
             out["height"] = h;
         }

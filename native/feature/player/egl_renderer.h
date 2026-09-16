@@ -56,10 +56,22 @@ public:
     bool initFromTexture(uint32_t textureId, std::string &error, int requestedWidth = 0,
                          int requestedHeight = 0);
 
+    /**
+     * 重绘最近一帧并在 **swap 之前** 回读帧缓冲（导出渲染结果的正确做法）。
+     *
+     * 为什么不能直接读：`eglSwapBuffers` 之后后台缓冲内容未定义，`glReadPixels` 会读到全黑
+     * （实测：swap 后导出 1260x2619 全黑；而 swap 前的清屏自检能正确读到 `rgba=(255,0,0,255)`）。
+     */
+    bool redrawAndReadback(const uint8_t *rgba, int width, int height, std::vector<uint8_t> &out,
+                           int &outWidth, int &outHeight, std::string &error);
+
     void destroy();
     bool isReady() const { return ready_; }
 
 private:
+    /** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
+    bool drawFrame(const uint8_t *rgba, int width, int height, std::string &error);
+
     bool buildProgram(std::string &error);
 
     uint64_t surfaceId_ = 0;

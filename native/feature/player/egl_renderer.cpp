@@ -203,6 +203,48 @@ bool EglRenderer::buildProgram(std::string &error)
 
 bool EglRenderer::renderRgba(const uint8_t *rgba, int width, int height, std::string &error)
 {
+    if (!drawFrame(rgba, width, height, error)) {
+        return false;
+    }
+    if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) != EGL_TRUE) {
+        error = "eglSwapBuffers 失败（EGL 0x" + std::to_string(eglGetError()) + "，几何 "
+                + std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_)
+                + "，初始化时几何 " + geometryAtInit_ + "）";
+        return false;
+    }
+    if (nativeImage_ != nullptr) {
+        // TEXTURE 路径：**先 swap 出 buffer 再发布**，否则 UpdateSurfaceImage 返回
+        // NATIVE_ERROR_NO_BUFFER(40601000)（实测过这个顺序错误）
+        const int32_t updated = OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
+        if (updated != 0) {
+            error = "OH_NativeImage_UpdateSurfaceImage 失败（" + std::to_string(updated) + "）";
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * 重绘最近一帧并在 **swap 之前** 回读帧缓冲。
+ *
+ * 为什么必须重绘：`eglSwapBuffers` 之后后台缓冲内容未定义，此时 `glReadPixels` 读到的是全黑
+ * （实测 autoDump 导出 1260x2619 全黑，而 swap 前的清屏自检能正确读到红色）。
+ * 因此导出渲染帧的正确做法是：重新绘制一次 → 立刻回读 → 不 swap（避免污染上屏内容）。
+ */
+bool EglRenderer::redrawAndReadback(const uint8_t *rgba, int width, int height,
+                                    std::vector<uint8_t> &out, int &outWidth, int &outHeight,
+                                    std::string &error)
+{
+    if (!drawFrame(rgba, width, height, error)) {
+        return false;
+    }
+    glFinish();
+    return readbackRgba(out, outWidth, outHeight, error);
+}
+
+/** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
+bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::string &error)
+{
     if (!ready_ || rgba == nullptr || width <= 0 || height <= 0) {
         error = "渲染器未就绪或帧无效";
         return false;
@@ -235,22 +277,6 @@ bool EglRenderer::renderRgba(const uint8_t *rgba, int width, int height, std::st
     glVertexAttribPointer(static_cast<GLuint>(attribUv_), 2, GL_FLOAT, GL_FALSE,
                           4 * sizeof(float), reinterpret_cast<void *>(2 * sizeof(float)));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) != EGL_TRUE) {
-        error = "eglSwapBuffers 失败（EGL 0x" + std::to_string(eglGetError()) + "，几何 "
-                + std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_)
-                + "，初始化时几何 " + geometryAtInit_ + "）";
-        return false;
-    }
-    if (nativeImage_ != nullptr) {
-        // TEXTURE 路径：**先 swap 出 buffer 再发布**，否则 UpdateSurfaceImage 返回
-        // NATIVE_ERROR_NO_BUFFER(40601000)（实测过这个顺序错误）
-        const int32_t updated = OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
-        if (updated != 0) {
-            error = "OH_NativeImage_UpdateSurfaceImage 失败（" + std::to_string(updated) + "）";
-            return false;
-        }
-    }
     return true;
 }
 
