@@ -1,0 +1,88 @@
+name: HarmonyOS CI
+
+# 触发条件：代码推送、PR 提交、手动触发
+on:
+  push:
+    branches: ["main", "master", "dev", "develop"]
+  pull_request:
+    branches: ["main", "master", "dev", "develop"]
+  workflow_dispatch:
+
+# 最小权限：构建仅需读取仓库内容，上传产物使用 Actions 内置机制而非 GITHUB_TOKEN
+permissions:
+  contents: read
+
+# 同一分支的重复推送取消上一次未完成的构建
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: C++ 核心单测（主机）
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # native/core 的单测是纯主机侧测试（不依赖 HarmonyOS SDK 与设备）：
+      # 每个测试文件自带 main()，按需链接被测实现后直接运行。
+      - name: Build and run native/core tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          INC="-I native/core -I native/core/api -I native/player -I native/third_party -I native/third_party/nlohmann"
+          OUT="$(mktemp -d)"
+          fail=0
+
+          for test_src in native/core/tests/test_*.cpp; do
+            name="$(basename "$test_src" .cpp)"
+            case "$name" in
+              test_url_util)
+                extra="native/core/url_util.cpp" ;;
+              test_http_response)
+                extra="native/core/http_response.cpp" ;;
+              test_image_url)
+                extra="native/core/image_url.cpp native/core/url_util.cpp" ;;
+              test_playback_resolve)
+                extra="native/core/api/playback_resolve.cpp native/core/url_util.cpp" ;;
+              test_player_engine)
+                extra="native/player/engine.cpp native/player/hw_decoder.cpp native/player/ffmpeg_decoder.cpp native/player/subtitle.cpp native/player/playback_policy.cpp native/core/url_util.cpp" ;;
+              *)
+                echo "::error::新增的测试 $name 尚未在本工作流登记编译源文件"
+                fail=1
+                continue ;;
+            esac
+
+            echo "==> 编译并运行 $name"
+            g++ -std=c++17 $INC "$test_src" $extra -o "$OUT/$name"
+            "$OUT/$name"
+          done
+
+          exit "$fail"
+
+  build:
+    name: 编译校验（debug，未签名）
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build HAP
+        id: build
+        uses: ./.github/actions/build-hap
+        with:
+          build-mode: debug
+
+      # 仓库不含签名材料，CI 产出的是未签名 HAP：仅用于编译校验，无法直接安装
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jellyfin-hmos-debug-unsigned
+          path: |
+            **/build/**/outputs/**/*.hap
+            **/build/**/outputs/**/*.app
+            **/build/**/outputs/**/*.hsp
+            **/build/**/outputs/**/*.har
+          if-no-files-found: error
+          retention-days: 14

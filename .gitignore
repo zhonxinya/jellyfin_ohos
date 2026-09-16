@@ -1,0 +1,47 @@
+# HarmonyOS native build output
+native/app/node_modules/
+native/app/oh_modules/
+native/app/**/build/
+native/app/**/.cxx/
+native/app/.hvigor/
+native/app/local.properties
+local.properties
+native/core/tests/out/
+
+# 签名材料与本机工程配置：禁止入库
+# native/app/build-profile.json5 由 DevEco 自动签名写入，含本机证书路径与密码；
+# 模板见 build-profile.json5.template，CI 使用 build-profile.ci.json5。
+native/app/build-profile.json5
+*.p12
+*.cer
+*.p7b
+*.csr
+.ohos/
+
+# Local IDE state
+.idea/
+
+# Editor / local artifacts
+.vscode/
+*.jpeg
+*.jpg
+*.log
+screen.png
+
+# Build artifacts
+.native-build-debug.exitcode
+.native-build-debug.log
+
+# Legacy root build output
+build/
+
+# 本地 Agent 配置，不随仓库发布
+AGENTS.md
+.agents/
+
+# Local agent tooling (session plans, etc.)
+.zcode/
+
+# Git worktrees (local isolation)
+.worktrees/
+

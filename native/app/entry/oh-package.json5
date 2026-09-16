@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Jellyfin HMOS entry module",
+  "main": "",
+  "author": "zhonxinya",
+  "license": "BSD-2-Clause",
+  "dependencies": {}
+}

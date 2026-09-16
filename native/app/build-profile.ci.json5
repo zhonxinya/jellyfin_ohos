@@ -1,0 +1,47 @@
+// CI / 无签名构建用工程配置（对应参考项目 mybooks_ohos 的 `ohos/build-profile.ci.json5`）
+//
+// 用途：CI 与本地无签名构建。`native/app/build-profile.json5` 已被 .gitignore 排除
+// （其中含本机证书路径与密码），因此工作流会把本文件复制为
+// `native/app/build-profile.json5` 后再执行 hvigor。
+//
+// 本文件**不含 `signingConfigs`**，构建产物为 `entry-default-unsigned.hap`：
+//   - 可用于编译校验（本仓库 CI 的用途）；
+//   - **不能安装到真机/模拟器**，安装报 `code:9568320 error: no signature file`。
+// 真机安装请按 README「签名」章节配置签名材料（模板见 `build-profile.json5.template`）。
+{
+  "app": {
+    "products": [
+      {
+        "name": "default",
+        "compatibleSdkVersion": "5.1.0(18)",
+        "runtimeOS": "HarmonyOS",
+        "targetSdkVersion": "6.1.0(23)"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "profile"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

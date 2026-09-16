@@ -1,0 +1,180 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Jellyfin 鸿蒙入口模块"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Jellyfin 鸿蒙入口 Ability"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Jellyfin HMOS"
+    },
+    {
+      "name": "app_name",
+      "value": "Jellyfin"
+    },
+    {
+      "name": "server_title",
+      "value": "连接服务器"
+    },
+    {
+      "name": "server_hint",
+      "value": "输入 Jellyfin 服务器地址（含 http/https）"
+    },
+    {
+      "name": "login_title",
+      "value": "登录"
+    },
+    {
+      "name": "home_title",
+      "value": "首页"
+    },
+    {
+      "name": "search_title",
+      "value": "搜索"
+    },
+    {
+      "name": "detail_title",
+      "value": "详情"
+    },
+    {
+      "name": "settings_title",
+      "value": "设置"
+    },
+    {
+      "name": "settings_theme",
+      "value": "主题"
+    },
+    {
+      "name": "person_title",
+      "value": "人物"
+    },
+    {
+      "name": "person_placeholder",
+      "value": "人物详情占位页，后续可接入演员/导演信息。"
+    },
+    {
+      "name": "admin_title",
+      "value": "管理"
+    },
+    {
+      "name": "admin_users",
+      "value": "用户"
+    },
+    {
+      "name": "admin_devices",
+      "value": "设备"
+    },
+    {
+      "name": "admin_tasks",
+      "value": "计划任务"
+    },
+    {
+      "name": "admin_system",
+      "value": "系统信息"
+    },
+    {
+      "name": "admin_libraries",
+      "value": "媒体库管理"
+    },
+    {
+      "name": "admin_streaming",
+      "value": "流媒体"
+    },
+    {
+      "name": "admin_transcoding",
+      "value": "转码"
+    },
+    {
+      "name": "admin_playback",
+      "value": "播放设置"
+    },
+    {
+      "name": "admin_logs",
+      "value": "日志"
+    },
+    {
+      "name": "admin_plugins",
+      "value": "插件"
+    },
+    {
+      "name": "admin_activity",
+      "value": "活动"
+    },
+    {
+      "name": "admin_apikeys",
+      "value": "API 密钥"
+    },
+    {
+      "name": "admin_general",
+      "value": "常规设置"
+    },
+    {
+      "name": "admin_users_meta",
+      "value": "用户元数据"
+    },
+    {
+      "name": "admin_libraries_meta",
+      "value": "媒体库元数据"
+    },
+    {
+      "name": "nav_search",
+      "value": "搜索"
+    },
+    {
+      "name": "nav_settings",
+      "value": "设置"
+    },
+    {
+      "name": "nav_admin",
+      "value": "管理"
+    },
+    {
+      "name": "action_continue",
+      "value": "继续"
+    },
+    {
+      "name": "action_login",
+      "value": "登录"
+    },
+    {
+      "name": "action_logout",
+      "value": "退出登录"
+    },
+    {
+      "name": "action_change_server",
+      "value": "更换服务器"
+    },
+    {
+      "name": "action_retry",
+      "value": "重试"
+    },
+    {
+      "name": "action_search",
+      "value": "搜索"
+    },
+    {
+      "name": "action_play",
+      "value": "播放"
+    },
+    {
+      "name": "action_pause",
+      "value": "暂停"
+    },
+    {
+      "name": "action_stop",
+      "value": "停止"
+    },
+    {
+      "name": "state_loading",
+      "value": "加载中…"
+    },
+    {
+      "name": "state_empty",
+      "value": "暂无数据"
+    }
+  ]
+}

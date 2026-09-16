@@ -1,0 +1,25 @@
+# Dependabot 配置
+#
+# 本仓库的第三方 native 依赖（`native/third_party/mbedtls`、`native/third_party/nlohmann`）
+# 是原样引入的上游源码，且**不含各自的依赖清单**（mbedtls 只保留 `library/` 与 `include/`，
+# 见 native/third_party/NOTICE），因此不属于本项目的依赖图，也不需要 Dependabot 跟踪。
+# 这些 vendored 依赖的升级由人工整体替换上游版本完成（见 native/third_party/README.md）。
+#
+# 目前只跟踪 GitHub Actions：仓库的工作流固定使用命令行工具链与
+# `actions/checkout`、`actions/cache`、`upload-artifact`、`codeql-action` 等，
+# 这些版本需要定期跟进。
+#
+# 未配置的生态及原因：
+# - `npm`：HarmonyOS 工程使用 `oh-package.json5`（由 ohpm 管理），Dependabot 不识别该清单；
+# - `pip`：仓库内没有任何 Python 依赖清单。
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+    labels:
+      - "dependencies"

@@ -1,0 +1,65 @@
+// HarmonyOS 工程配置模板（本地签名版）
+//
+// 用法：复制本文件为 `native/app/build-profile.json5`，再按下面说明填入本机签名材料。
+// `native/app/build-profile.json5` 已被 .gitignore 排除，里面的证书路径与密码不会入库。
+//
+// 证书/密钥获取方式（任选其一）：
+//   1. DevEco Studio 打开 `native/app/`，File → Project Structure → Signing Configs，
+//      勾选 `Automatically generate signature`，DevEco 会自动写回 build-profile.json5；
+//   2. 华为开发者联盟申请发布证书后，手工填写 material 各字段。
+//
+// 注意：`material` 中的路径使用绝对路径，且需转义反斜杠，例如
+//   "C:\\Users\\<用户名>\\.ohos\\config\\default_xxx.p12"
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "<你的证书路径>.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "<你的密钥密码>",
+          "profile": "<你的 profile 路径>.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "<你的 store 文件路径>.p12",
+          "storePassword": "<你的 store 密码>"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "compatibleSdkVersion": "5.1.0(18)",
+        "runtimeOS": "HarmonyOS",
+        "targetSdkVersion": "6.1.0(23)"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "profile"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

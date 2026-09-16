@@ -1,0 +1,89 @@
+name: HarmonyOS Release
+
+# 触发条件：推送 v* 标签、手动触发
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布的标签（如 v1.0.0，需已存在于仓库）
+        required: true
+
+# 默认最小权限，仅读取仓库内容
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: 构建并发布 Release
+    runs-on: ubuntu-latest
+    # 仅发布作业需要写权限以创建/更新 Release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Build HAP
+        id: build
+        uses: ./.github/actions/build-hap
+        with:
+          build-mode: release
+
+      - name: Package Artifact
+        id: package
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          REPO="${GITHUB_REPOSITORY##*/}"
+          HAP="dist/${REPO}-${TAG}-unsigned.hap"
+          cp "${{ steps.build.outputs.hap-path }}" "$HAP"
+
+          # 未签名 HAP 需签名后才能安装，随包附带说明
+          cat > dist/SIGNING.txt <<'EOF'
+          本 Release 中的 HAP 由 GitHub Actions 构建，未包含任何签名材料，属于未签名产物：
+            - 可用于编译校验与自行签名；
+            - 无法直接安装（安装报 code:9568320 error: no signature file）。
+
+          自行签名方式：
+            1. DevEco Studio 打开 native/app/，File → Project Structure → Signing Configs，
+               勾选 Automatically generate signature；
+            2. 或按仓库根目录 build-profile.json5.template 手工配置签名材料后重新构建：
+                 hvigorw assembleHap -p module=entry@default -p product=default -p buildMode=release
+          EOF
+          ls -lh dist/
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY##*/}"
+          HAP="dist/${REPO}-${TAG}-unsigned.hap"
+          NOTES="dist/SIGNING.txt"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，更新产物"
+            gh release upload "$TAG" "$HAP" "$NOTES" --clobber
+          else
+            echo "创建 Release $TAG"
+            gh release create "$TAG" "$HAP" "$NOTES" \
+              --title "${REPO} ${TAG}" \
+              --notes-file "$NOTES" \
+              --verify-tag
+          fi
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jellyfin-hmos-release-unsigned
+          path: dist/*.hap
+          if-no-files-found: error
+          retention-days: 30

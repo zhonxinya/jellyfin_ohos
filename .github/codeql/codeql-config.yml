@@ -1,0 +1,8 @@
+# CodeQL 分析配置
+#
+# 排除 vendored 第三方源码：`native/third_party/` 下的 mbedTLS（`native/third_party/mbedtls`）
+# 与 nlohmann/json（`native/third_party/nlohmann`）为上游原样引入（见 native/third_party/NOTICE），
+# 其中的告警属上游项目维护范围，本仓库的修复方式是升级上游版本，不应计入本仓库扫描结果。
+# 若不排除，上游代码的既有问题会持续占用 PR 检查。
+paths-ignore:
+  - 'native/third_party'

@@ -1,0 +1,38 @@
+Third-party dependencies for Jellyfin HMOS native
+
+This directory holds vendored native libraries. For entries marked as vendored,
+the license texts below are the ones to keep alongside the sources when
+packaging distributions.
+
+-------------------------------------------------------------------------------
+mbedTLS
+-------------------------------------------------------------------------------
+Status: vendored at third_party/mbedtls (3.6.2, library/ + include/ only)
+License: Apache-2.0 OR GPL-2.0-or-later (dual licensed)
+Upstream: https://github.com/MbedTLS/mbedtls
+Used by: native/core/http_tls.cpp (https:// Jellyfin servers)
+TODO: copy LICENSE from the exact mbedTLS revision used by this project.
+
+-------------------------------------------------------------------------------
+nlohmann/json
+-------------------------------------------------------------------------------
+Status: single-header vendored at third_party/nlohmann/json.hpp (v3.11.3)
+License: MIT
+Upstream: https://github.com/nlohmann/json
+TODO: keep LICENSE.MIT alongside the header when packaging distributions.
+
+-------------------------------------------------------------------------------
+libcurl
+-------------------------------------------------------------------------------
+Status: not yet vendored
+License: curl license (MIT/X-derived)
+Upstream: https://curl.se/
+TODO: copy COPYING from the exact libcurl revision used by this project.
+
+-------------------------------------------------------------------------------
+libass
+-------------------------------------------------------------------------------
+Status: not yet vendored
+License: ISC
+Upstream: https://github.com/libass/libass
+TODO: copy COPYING from the exact libass revision used by this project.

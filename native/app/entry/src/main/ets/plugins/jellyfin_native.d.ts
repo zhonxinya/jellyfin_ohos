@@ -1,0 +1,56 @@
+declare module 'libjellyfin_native.so' {
+  interface JellyfinNativeModule {
+    getVersion(): string;
+    configureServer(serverUrl: string): string;
+    login(username: string, password: string): string;
+    logout(): string;
+    restoreSession(sessionJson: string): string;
+    getSession(): string;
+    getHome(): string;
+    getHomeSection(section: string, limit: number): string;
+    getBrowseItems(browseType: string, startIndex: number, limit: number, parentId: string): string;
+    queryItems(optionsJson: string): string;
+    getGenres(parentId: string, startIndex: number, limit: number): string;
+    getStudios(parentId: string, startIndex: number, limit: number): string;
+    getSuggestions(parentId: string, limit: number): string;
+    getLibraryItems(parentId: string, startIndex: number, limit: number): string;
+    search(query: string, startIndex: number, limit: number): string;
+    getItemDetail(itemId: string): string;
+    getSeasonEpisodes(seriesId: string, seasonId: string): string;
+    getPlaybackInfo(itemId: string, optionsJson: string): string;
+    toggleFavorite(itemId: string, favorite: boolean): string;
+    togglePlayed(itemId: string, played: boolean): string;
+    getUserItemData(itemId: string): string;
+    getUserById(userId: string): string;
+    updateUserConfiguration(configurationJson: string): string;
+    searchHints(query: string, limit: number): string;
+    getPlaylists(): string;
+    createPlaylist(name: string, itemId: string): string;
+    addToPlaylist(playlistId: string, itemId: string): string;
+    reportPlaybackProgress(itemId: string, positionTicks: number, isPaused: boolean): string;
+    reportPlaybackStopped(itemId: string, positionTicks: number): string;
+    playerOpen(itemId: string, optionsJson: string): string;
+    playerPlay(): string;
+    playerPause(): string;
+    playerSeek(positionTicks: number): string;
+    playerStop(): string;
+    playerGetState(): string;
+    adminListUsers(): string;
+    adminListDevices(): string;
+    adminListTasks(): string;
+    adminGetSystemInfo(): string;
+    adminGenericGet(path: string): string;
+    adminGenericPost(path: string, bodyJson: string): string;
+    adminGenericPostNoBody(path: string): string;
+    adminGenericDelete(path: string): string;
+    setPreference(key: string, value: string): string;
+    getPreferences(): string;
+    getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;
+    setImageCacheDir(dir: string): string;
+    loadImage(url: string): string;
+    clearImageCache(): string;
+  }
+
+  const jellyfinNative: JellyfinNativeModule;
+  export default jellyfinNative;
+}

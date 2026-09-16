@@ -1,0 +1,18 @@
+# 签名配置模板
+#
+# 用法：复制本文件为 `local.properties`（与 `native/app/local.properties` 同级，
+# 或放在工程根目录），并填入实际值。`local.properties` 已被 .gitignore 排除。
+#
+# 说明：
+# - 这些字段供手工/脚本化签名使用；DevEco Studio 的自动签名把材料直接写入
+#   `native/app/build-profile.json5`，不会读取本文件。
+# - 路径建议使用正斜杠或双反斜杠，避免转义问题。
+signing.certpath=
+signing.keyAlias=
+signing.keyPassword=
+signing.profile=
+signing.storeFile=
+signing.storePassword=
+
+# HarmonyOS 命令行工具（hvigor / ohpm）定位 SDK 用；CI 中由工作流写入。
+hwsdk.dir=
