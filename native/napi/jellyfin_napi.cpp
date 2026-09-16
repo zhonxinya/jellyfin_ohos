@@ -1354,6 +1354,64 @@ napi_value SoftPlayStatus(napi_env env, napi_callback_info /*info*/)
     return ToNapiJson(env, MakeResult(true, 200, "ok", out));
 }
 
+/**
+ * 渲染目标判定（无需开始播放）：给 surfaceId 就初始化 EGL 并跑一次"清屏为红 + 回读"自检。
+ * 用途：打开播放页即可自动判定该设备/该 XComponent 类型能否作为 GL 渲染目标，
+ * 不依赖任何播放状态与控制条交互（设备自动化下最可靠）。
+ */
+napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
+{
+    std::string surfaceIdText;
+    int64_t width = 0;
+    int64_t height = 0;
+    std::string renderMode;
+    ReadStringArg(env, info, 0, surfaceIdText);
+    ReadIntArg(env, info, 1, width);
+    ReadIntArg(env, info, 2, height);
+    ReadStringArg(env, info, 3, renderMode);
+
+    nlohmann::json out;
+    out["mode"] = renderMode.empty() ? "surface" : renderMode;
+    if (surfaceIdText.empty()) {
+        out["ok"] = false;
+        out["error"] = "surfaceId 为空（surface 尚未就绪）";
+        return ToNapiJson(env, MakeResult(false, 0, "surfaceId required", out));
+    }
+    uint64_t surfaceId = 0;
+    try {
+        surfaceId = std::stoull(surfaceIdText);
+    } catch (...) {
+        surfaceId = 0;
+    }
+    if (surfaceId == 0) {
+        out["ok"] = false;
+        out["error"] = "surfaceId 解析为 0";
+        return ToNapiJson(env, MakeResult(false, 0, "invalid surfaceId", out));
+    }
+
+    std::string initError;
+    bool ready = false;
+    if (out["mode"] == "texture") {
+        ready = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId), initError,
+                                               static_cast<int>(width), static_cast<int>(height));
+    } else {
+        ready = SoftRenderer().init(surfaceId, initError, static_cast<int>(width),
+                                    static_cast<int>(height));
+    }
+    out["rendererReady"] = ready;
+    if (!ready) {
+        out["ok"] = false;
+        out["error"] = initError.empty() ? "EGL 初始化失败" : initError;
+        return ToNapiJson(env, MakeResult(false, 0, out["error"].get<std::string>(), out));
+    }
+    std::string report;
+    const bool renderable = SoftRenderer().selfTest(report);
+    out["ok"] = renderable;
+    out["renderable"] = renderable;
+    out["report"] = report;
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
 /** 渲染自检：清屏为红并回读，判断 surface 能否作为 GL 渲染目标 */
 napi_value SoftPlaySelfTest(napi_env env, napi_callback_info /*info*/)
 {
@@ -1912,6 +1970,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"softPlayDumpFrame", nullptr, SoftPlayDumpFrame, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlaySelfTest", nullptr, SoftPlaySelfTest, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"renderTargetProbe", nullptr, RenderTargetProbe, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},

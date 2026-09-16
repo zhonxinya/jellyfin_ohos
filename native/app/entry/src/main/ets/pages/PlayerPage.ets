@@ -218,6 +218,28 @@ struct PlayerPage {
     }
   }
 
+  /** surface 就绪即判定渲染目标可用性，结果写入常驻 softDiag（诊断入口，与播放状态无关） */
+  private async probeRenderTarget(): Promise<void> {
+    try {
+      const pxSize: number[] = this.surfacePixelSize();
+      const raw: string = JellyfinNative.renderTargetProbe(this.surfaceId, pxSize[0], pxSize[1],
+        'texture');
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        this.softDiag = `渲染目标判定失败：${result.message}`;
+        return;
+      }
+      const data: ESObject = result.data as ESObject;
+      const ok: boolean = JsonUtil.getBoolean(data, 'ok', false);
+      const report: string = JsonUtil.getString(data, 'report',
+        JsonUtil.getString(data, 'error', ''));
+      const mode: string = JsonUtil.getString(data, 'mode', '');
+      this.softDiag = `渲染目标(${mode}) ${ok ? '可用' : '不可用'}：${report}`;
+    } catch (err) {
+      this.softDiag = `渲染目标判定异常：${(err as Error).message}`;
+    }
+  }
+
   /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + PixelMap 创建的开销决定上限） */
   private startSoftTimer(): void {
     this.stopSoftTimer();
@@ -812,6 +834,9 @@ struct PlayerPage {
           if (this.avPlayer !== null && this.surfaceId.length > 0) {
             this.avPlayer.surfaceId = this.surfaceId;
           }
+          // surface 一就绪就判定"该设备能否把它当 GL 渲染目标"（清屏为红 + 回读），
+          // 结果进常驻 softDiag：打开播放页即可看到结论，无需任何播放/控制条交互
+          this.probeRenderTarget();
         })
         .onTouch((event: TouchEvent) => {
           if (this.controlsLocked) {

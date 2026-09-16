@@ -506,6 +506,16 @@ export class JellyfinNative {
     }
   }
 
+  /** 渲染目标判定：给定 surfaceId 即初始化 EGL 并清屏回读（无需开始播放） */
+  static renderTargetProbe(surfaceId: string, width: number, height: number,
+                           renderMode: string = 'texture'): string {
+    try {
+      return jellyfinNative.renderTargetProbe(surfaceId, width, height, renderMode);
+    } catch (error) {
+      return JellyfinNative.fail('renderTargetProbe', error);
+    }
+  }
+
   static softPlayClose(): string {
     try {
       return jellyfinNative.softPlayClose();
