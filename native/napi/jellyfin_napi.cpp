@@ -36,8 +36,10 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
+#include <hilog/log.h>
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -2037,6 +2039,24 @@ napi_value ClearImageCache(napi_env env, napi_callback_info /*info*/)
 
 napi_value jellyfin_napi_init(napi_env env, napi_value exports)
 {
+    // 提升进程 fd 软上限到硬上限（设备实测硬上限为 32768）。
+    //
+    // 为什么需要：musl FORTIFY 的 `__fd_chk` 会用**进程启动时的 fd 上限**校验，
+    // 而应用实际 fd 数在大图库/多图并发加载时会轻易超过较小的初始上限（实测 fd 涨到 1053
+    // 后立刻 SIGABRT：`__fd_chk` → `__fortify_error` → abort）。把软上限提到硬上限后，
+    // 合法 fd 不再被误判为非法；同时我们仍应限制并发请求数（见 ImageCache 的并发控制计划）。
+    struct rlimit fdLimit {};
+    if (getrlimit(RLIMIT_NOFILE, &fdLimit) == 0 && fdLimit.rlim_cur < fdLimit.rlim_max) {
+        struct rlimit raised {};
+        raised.rlim_cur = fdLimit.rlim_max;
+        raised.rlim_max = fdLimit.rlim_max;
+        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "jellyfin",
+                         "raised fd limit %{public}llu -> %{public}llu",
+                         static_cast<unsigned long long>(fdLimit.rlim_cur),
+                         static_cast<unsigned long long>(raised.rlim_cur));
+        }
+    }
     napi_property_descriptor desc[] = {
         {"getVersion", nullptr, GetVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
