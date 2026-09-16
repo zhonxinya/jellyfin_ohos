@@ -4,6 +4,7 @@ import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
 import image from '@ohos.multimedia.image';
 import componentSnapshot from '@ohos.arkui.componentSnapshot';
+import avSession from '@ohos.multimedia.avsession';
 import fs from '@ohos.file.fs';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
@@ -68,6 +69,8 @@ struct PlayerPage {
   /** 长按 2× 快进：计时器与"是否处于长按加速中"（主流播放器标配的手势） */
   private longPressTimerId: number = -1;
   private longPressBoosting: boolean = false;
+  /** 系统媒体会话（AVSession）；null 表示未创建 */
+  private avSessionRef: avSession.AVSession | null = null;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   private seekDragMs: number = 0;
@@ -403,6 +406,43 @@ struct PlayerPage {
    * 于是"继续观看"、跨端续播、观看记录都不会更新——功能上等于半成品。
    * 节流策略与硬解路径保持一致（避免高频请求）。
    */
+  /**
+   * 创建 AVSession（官方"媒体会话"能力）：让播放进入系统媒体控制/后台播放体系。
+   *
+   * 官方文档路径：`avSession.createAVSession(context, tag, 'video')` → `setAVMetadata` → `activate`，
+   * 并订阅 play/pause/stop/seek 回调，使系统媒体控件（通知栏/锁屏/耳机按键）能驱动本播放器。
+   * 结果写入探针文件（读屏对播放页不可靠，文件通道已验证可写）。
+   */
+  private async initAvSession(): Promise<void> {
+    try {
+      if (this.avSessionRef !== null) {
+        return;
+      }
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const session: avSession.AVSession = await avSession.createAVSession(ctx, 'jellyfin_player', 'video');
+      await session.setAVMetadata({ assetId: this.itemId, title: this.title,
+        artist: this.typeLabel.length > 0 ? this.typeLabel : 'Jellyfin' });
+      session.on('play', () => {
+        this.onPlayPause();
+      });
+      session.on('pause', () => {
+        this.onPlayPause();
+      });
+      session.on('stop', () => {
+        this.flushStop();
+      });
+      session.on('seek', (timeMs: number) => {
+        this.onSeek(timeMs - this.positionMs);
+      });
+      await session.activate();
+      this.avSessionRef = session;
+      this.appendProbeFile('player_avsession.txt', `created+activated item=${this.itemId}\n`);
+    } catch (err) {
+      this.appendProbeFile('player_avsession.txt',
+        `error ${(err as Error).message}\n`);
+    }
+  }
+
   private async reportSoftProgressThrottled(ptsSec: number): Promise<void> {
     if (this.itemId.length === 0) {
       return;
@@ -529,6 +569,8 @@ struct PlayerPage {
     }
     // 创建 AVPlayer 进行实际视频渲染
     this.createAvPlayer(resolvedUrl);
+    // 进入系统媒体会话体系（后台播放/媒体控件）；失败不影响播放
+    this.initAvSession();
   }
 
   private async createAvPlayer(url: string): Promise<void> {
