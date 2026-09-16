@@ -902,7 +902,8 @@ struct PlayerPage {
       // 次级操作行：把"倍速 / 软解 / 存帧"这类非播放主操作从主控制行移出。
       // 主行只保留 -10s / 播放暂停 / +10s，播放意图更聚焦；这也是主流播放器的分组方式
       // （主操作居中、次级操作单独一排，避免一排挤满 chip 导致主次不分）。
-      Row({ space: 8 }) {
+      // 次级操作行：与主控制行统一为 12vp 间距（本轮前为 8vp，两行间距不一致）
+      Row({ space: 12 }) {
         ChipButton({
           label: `${this.playbackSpeed}x`,
           selected: this.playbackSpeed !== 1,
