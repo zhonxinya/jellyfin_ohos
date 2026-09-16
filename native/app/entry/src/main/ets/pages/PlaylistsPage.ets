@@ -59,8 +59,8 @@ struct PlaylistsPage {
       } else {
         Row() {
           Text(`${this.items.length} 个播放列表`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .layoutWeight(1)
           // 刷新入口改用参考项目 TextButton（13fp Medium 品牌色 + 按下态），
           // 原来是 32vp/12fp 的临时小按钮

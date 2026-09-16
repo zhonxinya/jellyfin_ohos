@@ -12,9 +12,10 @@ import { PrimaryButton } from './PrimaryButton';
  */
 @Component
 export struct EmptyState {
-  @Prop message: string = '';
-  @Prop detail: string = '';
-  @Prop actionLabel: string = '';
+  // 文案支持普通字符串与 $r('app.string.*') 资源
+  @Prop message: ResourceStr = '';
+  @Prop detail: ResourceStr = '';
+  @Prop actionLabel: ResourceStr = '';
   @Prop icon: Resource = $r('sys.symbol.film');
   onAction: () => void = () => {};
 
@@ -22,22 +23,29 @@ export struct EmptyState {
     return AppViewModel.getInstance().colors();
   }
 
+  /** 文案是否非空（ResourceStr 可能是字符串或资源，资源按非空处理） */
+  private hasText(value: ResourceStr): boolean {
+    return typeof value === 'string' ? (value as string).length > 0 : true;
+  }
+
   build() {
     Column({ space: 12 }) {
       SymbolGlyph(this.icon)
         .fontSize(ThemeConstants.EMPTY_ICON_SIZE)
         .fontColor([this.colors().textTertiary])
-      Text(this.message)
-        .fontSize(ThemeConstants.STATE_TITLE)
-        .fontColor(this.colors().textPrimary)
-        .textAlign(TextAlign.Center)
-      if (this.detail.length > 0) {
+      if (this.hasText(this.message)) {
+        Text(this.message)
+          .fontSize(ThemeConstants.STATE_TITLE)
+          .fontColor(this.colors().textPrimary)
+          .textAlign(TextAlign.Center)
+      }
+      if (this.hasText(this.detail)) {
         Text(this.detail)
           .fontSize(ThemeConstants.STATE_DETAIL)
           .fontColor(this.colors().textSecondary)
           .textAlign(TextAlign.Center)
       }
-      if (this.actionLabel.length > 0) {
+      if (this.hasText(this.actionLabel)) {
         PrimaryButton({
           label: this.actionLabel,
           fullWidth: false,

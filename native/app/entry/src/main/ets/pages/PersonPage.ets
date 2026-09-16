@@ -12,6 +12,7 @@ import { AsyncStateView } from '../components/AsyncStateView';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { MediaCollectionView } from '../components/MediaCollectionView';
 import { SectionHeader } from '../components/SectionHeader';
+import { EmptyState } from '../components/EmptyState';
 
 @Entry
 @Component
@@ -98,18 +99,18 @@ struct PersonPage {
         Text(this.person.name)
           .fontSize(ThemeConstants.TITLE_LARGE)
           .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onSurface)
+          .fontColor(this.colors().textPrimary)
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.person.year.length > 0) {
           Text(`出生年份：${this.person.year}`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
         }
         if (this.person.overview.length > 0) {
           Text(this.person.overview)
             .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontColor(this.colors().textSecondary)
             .lineHeight(21)
             .maxLines(5)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -139,11 +140,15 @@ struct PersonPage {
           }
         })
       } else if (this.worksStatus === UiState.EMPTY) {
-        Text($r('app.string.person_no_works'))
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().onSurfaceVariant)
-          .width('100%')
-          .padding({ left: 16, right: 16, bottom: 24 })
+        // 空数据走参考项目 EmptyState（原来是一行手写提示文字）
+        Column() {
+          EmptyState({
+            message: $r('app.string.person_no_works'),
+            icon: $r('sys.symbol.video')
+          })
+        }
+        .width('100%')
+        .padding({ bottom: 24 })
       } else {
         MediaCollectionView({
           items: $works,
