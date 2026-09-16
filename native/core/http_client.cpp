@@ -168,6 +168,9 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             lastErrno = errno;
             continue;
         }
+        // 取证：每个请求创建 socket 时打印 fd。若 fd 随请求单调增长（而非回落到小值），
+        // 即说明有 fd 泄漏；这是区分"泄漏"与"瞬时并发尖峰"的唯一可靠手段。
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "socket fd=%{public}d", fd);
         if (!SetNonBlocking(fd, true)) {
             lastErrno = errno;
             closeOnce(fd);
