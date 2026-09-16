@@ -23,14 +23,14 @@ runs:
   using: composite
   steps:
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: '18'
 
     # 工具链约 2GB，缓存命中可省去大量下载时间
     - name: Cache Command Line Tools
       id: cache-tools
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ./command-line-tools
         key: ${{ runner.os }}-harmony-tools-${{ inputs.tools-version }}
