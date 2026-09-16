@@ -8,7 +8,8 @@ import { MediaItem } from '../models/MediaItem';
 import { SectionState } from '../models/SectionState';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { HorizontalShelf } from '../components/HorizontalShelf';
-import { AsyncStateView } from '../components/AsyncStateView';
+import { EmptyState } from '../components/EmptyState';
+import { LoadingState } from '../components/LoadingState';
 import { SectionHeader } from '../components/SectionHeader';
 import { MediaCollectionView, MediaViewToggle, LibraryShelf } from '../components/MediaCollectionView';
 import { HeroBannerLoader } from '../components/HeroBanner';
@@ -156,17 +157,25 @@ export struct HomePage {
           // 我的媒体（LibraryShelf 横滑卡片）
           if (this.librariesSection.status === UiState.LOADING) {
             SectionHeader({ title: $r('app.string.section_libraries'), icon: '\u{1F4DA}' })
-            AsyncStateView({ status: UiState.LOADING, minHeight: ThemeConstants.SHELF_LIBRARY_HEIGHT })
+            Column() {
+              LoadingState({})
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_LIBRARY_HEIGHT)
           } else if (this.librariesSection.status === UiState.ERROR) {
             SectionHeader({ title: $r('app.string.section_libraries'), icon: '\u{1F4DA}' })
-            AsyncStateView({
-              status: UiState.ERROR,
-              message: this.librariesSection.errorMsg,
-              minHeight: ThemeConstants.SHELF_LIBRARY_HEIGHT,
-              onRetry: () => {
-                this.loadSection('views', (s: SectionState) => { this.librariesSection = s; });
-              }
-            })
+            Column() {
+              EmptyState({
+                message: this.librariesSection.errorMsg,
+                actionLabel: '重试',
+                onAction: () => {
+                  this.loadSection('views', (s: SectionState) => { this.librariesSection = s; });
+                }
+              })
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_LIBRARY_HEIGHT)
+            .justifyContent(FlexAlign.Center)
           } else if (this.librariesSection.items.length > 0) {
             LibraryShelf({
               title: $r('app.string.section_libraries'),
@@ -184,17 +193,25 @@ export struct HomePage {
           // 继续观看
           if (this.resumeSection.status === UiState.LOADING) {
             SectionHeader({ title: $r('app.string.section_resume'), icon: '\u25B6\uFE0F' })
-            AsyncStateView({ status: UiState.LOADING, minHeight: ThemeConstants.SHELF_MEDIA_HEIGHT })
+            Column() {
+              LoadingState({})
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
           } else if (this.resumeSection.status === UiState.ERROR) {
             SectionHeader({ title: $r('app.string.section_resume'), icon: '\u25B6\uFE0F' })
-            AsyncStateView({
-              status: UiState.ERROR,
-              message: this.resumeSection.errorMsg,
-              minHeight: ThemeConstants.SHELF_MEDIA_HEIGHT,
-              onRetry: () => {
-                this.loadSection('resume', (s: SectionState) => { this.resumeSection = s; });
-              }
-            })
+            Column() {
+              EmptyState({
+                message: this.resumeSection.errorMsg,
+                actionLabel: '重试',
+                onAction: () => {
+                  this.loadSection('resume', (s: SectionState) => { this.resumeSection = s; });
+                }
+              })
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
+            .justifyContent(FlexAlign.Center)
           } else if (this.resumeSection.items.length > 0) {
             HorizontalShelf({
               title: $r('app.string.section_resume'),
@@ -215,17 +232,25 @@ export struct HomePage {
           // 接下来
           if (this.nextUpSection.status === UiState.LOADING) {
             SectionHeader({ title: $r('app.string.section_next_up'), icon: '\u{1F4FA}' })
-            AsyncStateView({ status: UiState.LOADING, minHeight: ThemeConstants.SHELF_MEDIA_HEIGHT })
+            Column() {
+              LoadingState({})
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
           } else if (this.nextUpSection.status === UiState.ERROR) {
             SectionHeader({ title: $r('app.string.section_next_up'), icon: '\u{1F4FA}' })
-            AsyncStateView({
-              status: UiState.ERROR,
-              message: this.nextUpSection.errorMsg,
-              minHeight: ThemeConstants.SHELF_MEDIA_HEIGHT,
-              onRetry: () => {
-                this.loadSection('nextUp', (s: SectionState) => { this.nextUpSection = s; });
-              }
-            })
+            Column() {
+              EmptyState({
+                message: this.nextUpSection.errorMsg,
+                actionLabel: '重试',
+                onAction: () => {
+                  this.loadSection('nextUp', (s: SectionState) => { this.nextUpSection = s; });
+                }
+              })
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
+            .justifyContent(FlexAlign.Center)
           } else if (this.nextUpSection.items.length > 0) {
             HorizontalShelf({
               title: $r('app.string.section_next_up'),
@@ -246,17 +271,25 @@ export struct HomePage {
           // 最新添加
           if (this.latestSection.status === UiState.LOADING) {
             SectionHeader({ title: $r('app.string.section_latest'), icon: '\u{1F195}' })
-            AsyncStateView({ status: UiState.LOADING, minHeight: ThemeConstants.SHELF_MEDIA_HEIGHT })
+            Column() {
+              LoadingState({})
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
           } else if (this.latestSection.status === UiState.ERROR) {
             SectionHeader({ title: $r('app.string.section_latest'), icon: '\u{1F195}' })
-            AsyncStateView({
-              status: UiState.ERROR,
-              message: this.latestSection.errorMsg,
-              minHeight: ThemeConstants.SHELF_MEDIA_HEIGHT,
-              onRetry: () => {
-                this.loadSection('latest', (s: SectionState) => { this.latestSection = s; });
-              }
-            })
+            Column() {
+              EmptyState({
+                message: this.latestSection.errorMsg,
+                actionLabel: '重试',
+                onAction: () => {
+                  this.loadSection('latest', (s: SectionState) => { this.latestSection = s; });
+                }
+              })
+            }
+            .width('100%')
+            .height(ThemeConstants.SHELF_MEDIA_HEIGHT)
+            .justifyContent(FlexAlign.Center)
           } else if (this.latestSection.items.length > 0) {
             HorizontalShelf({
               title: $r('app.string.section_latest'),
@@ -313,29 +346,28 @@ export struct HomePage {
   @Builder
   FavoritesTabContent() {
     Column() {
-      if (this.favoritesStatus === UiState.LOADING || this.favoritesStatus === UiState.ERROR) {
-        AsyncStateView({
-          status: this.favoritesStatus,
-          message: this.favoritesError,
-          minHeight: 240,
-          onRetry: () => {
-            this.reloadFavorites(false);
-          }
-        })
+      if (this.favoritesStatus === UiState.LOADING) {
+        LoadingState({})
+      } else if (this.favoritesStatus === UiState.ERROR) {
+        Column() {
+          EmptyState({
+            message: this.favoritesError.length > 0 ? this.favoritesError : '加载失败',
+            actionLabel: '重试',
+            onAction: () => {
+              this.reloadFavorites(false);
+            }
+          })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
       } else if (this.favoritesStatus === UiState.EMPTY) {
         Column() {
-          Text('\u2764\uFE0F')
-            .fontSize(64)
-            .fontColor(this.colors().outline)
-          Text($r('app.string.empty_favorites'))
-            .fontSize(ThemeConstants.TITLE_MEDIUM)
-            .fontColor(this.colors().onSurface)
-            .margin({ top: 16 })
-          Text($r('app.string.empty_favorites_hint'))
-            .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurfaceVariant)
-            .textAlign(TextAlign.Center)
-            .margin({ top: 8 })
+          EmptyState({
+            message: '暂无收藏',
+            detail: '在媒体详情页点击收藏按钮，即可在这里查看',
+            icon: $r('sys.symbol.star')
+          })
         }
         .width('100%')
         .layoutWeight(1)
@@ -343,8 +375,8 @@ export struct HomePage {
       } else {
         Row() {
           Text(`${this.favorites.length} 项`)
-            .fontSize(ThemeConstants.LABEL_SMALL)
-            .fontColor(this.colors().onSurfaceVariant)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
             .layoutWeight(1)
           MediaViewToggle({
             mode: this.favoritesViewMode,
