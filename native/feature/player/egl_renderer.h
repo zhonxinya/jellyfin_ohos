@@ -48,6 +48,14 @@ public:
      */
     bool selfTest(std::string &report);
 
+    /**
+     * 另一条渲染目标路径：XComponent 为 `TEXTURE` 类型时，surfaceId 实际是 GL 纹理 id，
+     * 需经 `OH_NativeImage` 取得可渲染的 native window，渲染后调用 `UpdateSurfaceImage` 发布。
+     * 用于绕开「SURFACE 类型 surface 无法作为 GL 目标」的平台限制（实测见于 DevEco x86_64 模拟器）。
+     */
+    bool initFromTexture(uint32_t textureId, std::string &error, int requestedWidth = 0,
+                         int requestedHeight = 0);
+
     void destroy();
     bool isReady() const { return ready_; }
 
@@ -72,6 +80,8 @@ private:
     /** 初始化时从 native window 读到的缓冲几何（诊断用） */
     std::string geometryAtInit_;
     bool ready_ = false;
+    /** 非空表示走 OH_NativeImage（TEXTURE）路径，渲染后需 UpdateSurfaceImage */
+    void *nativeImage_ = nullptr;
 };
 
 } // namespace player

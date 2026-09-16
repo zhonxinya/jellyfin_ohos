@@ -72,6 +72,7 @@ target_link_libraries(jellyfin_native PUBLIC
   EGL
   GLESv3
   native_window
+  native_image
 )
 
 # ── FFmpeg 软解码（可选）────────────────────────────────────────────────────────

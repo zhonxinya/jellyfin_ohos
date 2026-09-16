@@ -5,6 +5,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
+#include <native_image/native_image.h>
 #include <native_window/external_window.h>
 
 namespace jellyfin {
@@ -241,6 +242,15 @@ bool EglRenderer::renderRgba(const uint8_t *rgba, int width, int height, std::st
                 + "，初始化时几何 " + geometryAtInit_ + "）";
         return false;
     }
+    if (nativeImage_ != nullptr) {
+        // TEXTURE 路径：**先 swap 出 buffer 再发布**，否则 UpdateSurfaceImage 返回
+        // NATIVE_ERROR_NO_BUFFER(40601000)（实测过这个顺序错误）
+        const int32_t updated = OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
+        if (updated != 0) {
+            error = "OH_NativeImage_UpdateSurfaceImage 失败（" + std::to_string(updated) + "）";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -270,6 +280,102 @@ bool EglRenderer::readbackRgba(std::vector<uint8_t> &out, int &width, int &heigh
         std::memcpy(top, bottom, stride);
         std::memcpy(bottom, tmp.data(), stride);
     }
+    return true;
+}
+
+bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int requestedWidth,
+                                int requestedHeight)
+{
+    destroy();
+    requestedWidth_ = requestedWidth;
+    requestedHeight_ = requestedHeight;
+
+    OH_NativeImage *image = OH_NativeImage_Create(textureId, GL_TEXTURE_2D);
+    if (image == nullptr) {
+        error = "OH_NativeImage_Create 失败（textureId=" + std::to_string(textureId) + "）";
+        return false;
+    }
+    nativeImage_ = image;
+    OHNativeWindow *window = OH_NativeImage_AcquireNativeWindow(image);
+    if (window == nullptr) {
+        error = "OH_NativeImage_AcquireNativeWindow 失败";
+        destroy();
+        return false;
+    }
+    nativeWindow_ = window;
+
+    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    EGLint major = 0;
+    EGLint minor = 0;
+    if (display == EGL_NO_DISPLAY || eglInitialize(display, &major, &minor) != EGL_TRUE) {
+        error = "eglInitialize 失败";
+        destroy();
+        return false;
+    }
+    display_ = display;
+
+    const EGLint configAttribs[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE
+    };
+    EGLConfig config = nullptr;
+    EGLint numConfigs = 0;
+    if (eglChooseConfig(display, configAttribs, &config, 1, &numConfigs) != EGL_TRUE || numConfigs < 1) {
+        error = "eglChooseConfig 失败";
+        destroy();
+        return false;
+    }
+    int32_t bufW = 0;
+    int32_t bufH = 0;
+    OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY, &bufW, &bufH);
+    if (requestedWidth_ > 0 && requestedHeight_ > 0) {
+        OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, requestedWidth_,
+                                             requestedHeight_);
+        bufW = requestedWidth_;
+        bufH = requestedHeight_;
+    }
+    geometryAtInit_ = std::to_string(bufW) + "x" + std::to_string(bufH);
+
+    EGLSurface surface = eglCreateWindowSurface(display, config,
+                                                reinterpret_cast<EGLNativeWindowType>(window), nullptr);
+    if (surface == EGL_NO_SURFACE) {
+        error = "eglCreateWindowSurface(纹理路径) 失败";
+        destroy();
+        return false;
+    }
+    surface_ = surface;
+    const EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttribs);
+    if (context == EGL_NO_CONTEXT || eglMakeCurrent(display, surface, surface, context) != EGL_TRUE) {
+        error = "EGL 上下文创建/切换失败（纹理路径）";
+        destroy();
+        return false;
+    }
+    context_ = context;
+    eglQuerySurface(display, surface, EGL_WIDTH, &surfaceWidth_);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &surfaceHeight_);
+    if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
+        surfaceWidth_ = bufW > 0 ? bufW : requestedWidth_;
+        surfaceHeight_ = bufH > 0 ? bufH : requestedHeight_;
+    }
+    if (!buildProgram(error)) {
+        destroy();
+        return false;
+    }
+    glGenTextures(1, &texture_);
+    glBindTexture(GL_TEXTURE_2D, texture_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    static const float kQuad[] = {
+        -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f,
+        -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f
+    };
+    glGenBuffers(1, &vbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kQuad), kQuad, GL_STATIC_DRAW);
+    ready_ = true;
     return true;
 }
 
@@ -335,7 +441,11 @@ void EglRenderer::destroy()
         eglTerminate(static_cast<EGLDisplay>(display_));
         display_ = nullptr;
     }
-    if (nativeWindow_ != nullptr) {
+    if (nativeImage_ != nullptr) {
+        OH_NativeImage *image = static_cast<OH_NativeImage *>(nativeImage_);
+        OH_NativeImage_Destroy(&image);
+        nativeImage_ = nullptr;
+    } else if (nativeWindow_ != nullptr) {
         OH_NativeWindow_DestroyNativeWindow(static_cast<OHNativeWindow *>(nativeWindow_));
         nativeWindow_ = nullptr;
     }

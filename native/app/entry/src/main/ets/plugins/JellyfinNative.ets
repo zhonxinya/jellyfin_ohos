@@ -461,11 +461,11 @@ export class JellyfinNative {
    * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 SoftPlayOpen。
    */
   static async softPlayOpen(itemId: string, surfaceId: string = '', surfaceWidth: number = 0,
-                            surfaceHeight: number = 0,
+                            surfaceHeight: number = 0, renderMode: string = 'surface',
                             optionsJson: string = '{}'): Promise<string> {
     try {
       return await jellyfinNative.softPlayOpen(itemId, surfaceId, surfaceWidth, surfaceHeight,
-                                              optionsJson);
+                                              renderMode, optionsJson);
     } catch (error) {
       return JellyfinNative.fail('softPlayOpen', error);
     }

@@ -1141,19 +1141,21 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
     std::string surfaceIdText;
     int64_t surfaceWidth = 0;
     int64_t surfaceHeight = 0;
+    std::string renderMode;
     ReadStringArg(env, info, 0, itemId);
     ReadStringArg(env, info, 1, surfaceIdText);
     ReadIntArg(env, info, 2, surfaceWidth);
     ReadIntArg(env, info, 3, surfaceHeight);
+    ReadStringArg(env, info, 4, renderMode);
     if (itemId.empty()) {
         return ToNapiJson(env, MakeResult(false, 0, "itemId required"));
     }
     nlohmann::json optionsJson;
-    ReadJsonArg(env, info, 4, optionsJson);
+    ReadJsonArg(env, info, 5, optionsJson);
     const auto options = ParsePlaybackOptionsJson(optionsJson);
     const std::string userId = session.userId();
 
-    return RunAsync(env, [userId, itemId, surfaceIdText, surfaceWidth, surfaceHeight, options]() {
+    return RunAsync(env, [userId, itemId, surfaceIdText, surfaceWidth, surfaceHeight, renderMode, options]() {
         nlohmann::json out;
         out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
         auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
@@ -1187,8 +1189,18 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
                 surfaceId = 0;
             }
             if (surfaceId != 0) {
-                renderReady = SoftRenderer().init(surfaceId, renderError, static_cast<int>(surfaceWidth),
-                                                  static_cast<int>(surfaceHeight));
+                if (renderMode == "texture") {
+                    // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
+                    renderReady = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId),
+                                                                 renderError,
+                                                                 static_cast<int>(surfaceWidth),
+                                                                 static_cast<int>(surfaceHeight));
+                } else {
+                    renderReady = SoftRenderer().init(surfaceId, renderError,
+                                                      static_cast<int>(surfaceWidth),
+                                                      static_cast<int>(surfaceHeight));
+                }
+                out["renderMode"] = renderMode.empty() ? "surface" : renderMode;
             }
         }
         out["renderReady"] = renderReady;

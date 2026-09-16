@@ -172,8 +172,9 @@ struct PlayerPage {
     // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
     this.softStopAvPlayer();
     const pxSize: number[] = this.surfacePixelSize();
+    // XComponent 为 TEXTURE 类型：surfaceId 是 GL 纹理 id，原生侧走 OH_NativeImage 渲染并发布
     const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, pxSize[0],
-                                                          pxSize[1], this.playbackOptions);
+                                                          pxSize[1], 'texture', this.playbackOptions);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.softStatus = `软解打开失败：${result.message}`;
@@ -786,7 +787,7 @@ struct PlayerPage {
   build() {
     Stack() {
       // XComponent 始终存在：软解时 EGL 直接渲染到它的 surface（不再走 PixelMap 逐帧刷新）
-      XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE, controller: this.surfaceController })
+      XComponent({ id: 'jellyfin_player', type: XComponentType.TEXTURE, controller: this.surfaceController })
         .width('100%')
         .height('100%')
         .backgroundColor(this.colors().videoBackground)
