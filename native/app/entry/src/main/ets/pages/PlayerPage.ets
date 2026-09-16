@@ -71,6 +71,12 @@ struct PlayerPage {
   private longPressBoosting: boolean = false;
   /** 系统媒体会话（AVSession）；null 表示未创建 */
   private avSessionRef: avSession.AVSession | null = null;
+  /** 可切换的媒体流列表（由详情页随路由参数传入）与当前音频/字幕索引 */
+  @State private mediaStreams: Object[] = [];
+  @State private audioStreamIndex: number = -1;
+  @State private subtitleStreamIndex: number = -1;
+  /** 音频/字幕选择面板是否展开（播放页自有覆盖层，不依赖详情页的 bindSheet 机制） */
+  @State private showTrackSheet: boolean = false;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   private seekDragMs: number = 0;
@@ -106,6 +112,23 @@ struct PlayerPage {
       if (typeof optsVal === 'string') {
         this.playbackOptions = optsVal;
       }
+      const streamsVal: Object | undefined = params['mediaStreams'];
+      if (typeof streamsVal === 'string' && streamsVal.length > 2) {
+        try {
+          this.mediaStreams = JSON.parse(streamsVal) as Object[];
+        } catch (err) {
+          this.mediaStreams = [];
+        }
+      }
+    }
+    // 从传入的播放参数里取出当前音频/字幕索引，供播放中切换时显示与改值
+    try {
+      const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
+      this.audioStreamIndex = JsonUtil.getNumber(opts, 'audioStreamIndex', -1);
+      this.subtitleStreamIndex = JsonUtil.getNumber(opts, 'subtitleStreamIndex', -1);
+    } catch (err) {
+      this.audioStreamIndex = -1;
+      this.subtitleStreamIndex = -1;
     }
     this.typeLabel = this.computeTypeLabel();
     this.openPlayer();
@@ -453,6 +476,119 @@ struct PlayerPage {
       this.appendProbeFile('player_avsession.txt',
         `error ${(err as Error).message}\n`);
     }
+  }
+
+  /**
+   * 播放中切换音频/字幕。
+   *
+   * Jellyfin 的轨道选择是 `PlaybackInfo` 的参数（`AudioStreamIndex`/`SubtitleStreamIndex`），
+   * 因此切换的做法是：**记录当前位置 → 用新索引重新请求播放地址 → 拉起播放并 seek 回原位置**。
+   * 这样硬解与软解两条路径都自然支持（无需各自实现轨道切换）。
+   */
+  private async switchTrack(audioIndex: number, subtitleIndex: number): Promise<void> {
+    const resumeMs: number = this.positionMs;
+    this.audioStreamIndex = audioIndex;
+    this.subtitleStreamIndex = subtitleIndex;
+    try {
+      const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
+      opts['audioStreamIndex'] = audioIndex;
+      opts['subtitleStreamIndex'] = subtitleIndex;
+      this.playbackOptions = JSON.stringify(opts);
+    } catch (err) {
+      // 解析失败则保持原参数，切换不生效但不影响当前播放
+      this.appendProbeFile('player_tracks.txt', `switchTrack parse error ${(err as Error).message}\n`);
+      return;
+    }
+    this.appendProbeFile('player_tracks.txt',
+      `switch audio=${audioIndex} subtitle=${subtitleIndex} resumeMs=${resumeMs}\n`);
+    await this.openPlayer();
+    // 回到切换前的位置（AVPlayer 在 prepared 后 seek 最稳妥，这里做一次兜底 seek）
+    setTimeout(() => {
+      if (this.avPlayer !== null && resumeMs > 1000) {
+        this.avPlayer.seek(resumeMs);
+        this.positionMs = resumeMs;
+      }
+    }, 1200);
+  }
+
+  /** 流列表 → 选项文案：优先显示语言/标题，其次编码与声道 */
+  private trackLabel(stream: ESObject): string {
+    const type: string = JsonUtil.getString(stream, 'Type', '');
+    const lang: string = JsonUtil.getString(stream, 'Language', '');
+    const display: string = JsonUtil.getString(stream, 'DisplayTitle', '');
+    const name: string = display.length > 0 ? display : JsonUtil.getString(stream, 'Title', '');
+    const codec: string = JsonUtil.getString(stream, 'Codec', '');
+    const channels: number = JsonUtil.getNumber(stream, 'Channels', 0);
+    let text: string = name.length > 0 ? name : (lang.length > 0 ? lang : type);
+    if (codec.length > 0) {
+      text += ` · ${codec}`;
+    }
+    if (channels > 0) {
+      text += ` · ${channels}ch`;
+    }
+    return text;
+  }
+
+  /** 音频/字幕选择面板 */
+  @Builder
+  TrackSheet() {
+    Column({ space: 10 }) {
+      Text('音频 / 字幕')
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+      Text('切换后将从当前位置继续播放')
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().textTertiary)
+      Scroll() {
+        Column({ space: 8 }) {
+          ForEach(this.mediaStreams, (item: Object) => {
+            if (JsonUtil.getString(item as ESObject, 'Type', '') === 'Audio') {
+              ChipButton({
+                label: this.trackLabel(item as ESObject),
+                selected: this.audioStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -1),
+                heightOverride: 48,
+                onTap: () => {
+                  this.switchTrack(JsonUtil.getNumber(item as ESObject, 'Index', -1), this.subtitleStreamIndex);
+                }
+              })
+            }
+          }, (item: Object) => `a${JsonUtil.getNumber(item as ESObject, 'Index', -1)}`)
+          // 关闭字幕
+          ChipButton({
+            label: '关闭字幕',
+            selected: this.subtitleStreamIndex < 0,
+            heightOverride: 48,
+            onTap: () => {
+              this.switchTrack(this.audioStreamIndex, -1);
+            }
+          })
+          ForEach(this.mediaStreams, (item: Object) => {
+            if (JsonUtil.getString(item as ESObject, 'Type', '') === 'Subtitle') {
+              ChipButton({
+                label: this.trackLabel(item as ESObject),
+                selected: this.subtitleStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -1),
+                heightOverride: 48,
+                onTap: () => {
+                  this.switchTrack(this.audioStreamIndex, JsonUtil.getNumber(item as ESObject, 'Index', -1));
+                }
+              })
+            }
+          }, (item: Object) => `s${JsonUtil.getNumber(item as ESObject, 'Index', -1)}`)
+        }
+        .width('100%')
+      }
+      .constraintSize({ maxHeight: 520 })
+      // 播放页没有详情页那套 bindSheet，这里用 ChipButton 作为关闭动作（组件已存在、样式统一）
+      ChipButton({
+        label: '关闭',
+        heightOverride: 48,
+        onTap: () => {
+          this.showTrackSheet = false;
+        }
+      })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
   }
 
   private async reportSoftProgressThrottled(ptsSec: number): Promise<void> {
