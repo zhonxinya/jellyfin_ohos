@@ -31,6 +31,8 @@ struct PlayerPage {
   @State private status: string = UiState.INITIAL;
   /** FFmpeg 软解回放状态：逐帧拉取并用 PixelMap 渲染（硬解不支持的编码走这条路） */
   @State private softPlaying: boolean = false;
+  /** 是否已因硬解失败自动回退过软解（只回退一次） */
+  private softFallbackTried: boolean = false;
   @State private softStatus: string = '';
   /** 诊断结果（渲染自检/存帧），独立于逐帧状态，避免被 70ms 刷新覆盖 */
   @State private softDiag: string = '';
@@ -439,13 +441,11 @@ struct PlayerPage {
             JellyfinNative.reportPlaybackStopped(this.itemId, this.positionMs * 10000);
           }
         } else if (state === 'error') {
-          this.status = UiState.ERROR;
-          this.errorMsg = '播放出错';
+          this.handlePlaybackFailure('播放出错');
         }
       });
       this.avPlayer.on('error', (_err: Error) => {
-        this.status = UiState.ERROR;
-        this.errorMsg = '播放器错误';
+        this.handlePlaybackFailure('播放器错误');
       });
       // 如果 surfaceId 已经从 XComponent.onLoad 获取到，立即绑定
       if (this.surfaceId.length > 0) {
@@ -454,8 +454,33 @@ struct PlayerPage {
       // 设置 URL 触发 AVPlayer 加载视频流
       this.avPlayer.url = url;
     } catch (_err) {
+      this.handlePlaybackFailure('初始化播放器失败');
+    }
+  }
+
+  /**
+   * 播放失败统一入口：进入错误态，并尝试**自动回退到 FFmpeg 软解**。
+   *
+   * 这是"播放功能（硬解 + 软解）"的落地：系统硬解解不了的编码（如模拟器上的 HEVC、
+   * 设备上不支持的 profile）不应直接把用户丢在错误页，而应自动改用 CPU 软解续播。
+   * 只回退一次，避免与用户手动"重试"互相打架。
+   */
+  private handlePlaybackFailure(message: string): void {
+    this.status = UiState.ERROR;
+    this.errorMsg = message;
+    this.maybeFallbackToSoftDecode(message);
+  }
+
+  private async maybeFallbackToSoftDecode(reason: string): Promise<void> {
+    if (this.softFallbackTried || this.softPlaying) {
+      return;
+    }
+    this.softFallbackTried = true;
+    this.softDiag = `硬解不可用（${reason}）→ 自动切换 FFmpeg 软解…`;
+    await this.startSoftPlay();
+    if (!this.softPlaying) {
+      // 软解也起不来时回到错误态，让用户看到原因并手动重试
       this.status = UiState.ERROR;
-      this.errorMsg = '初始化播放器失败';
     }
   }
 
