@@ -50,11 +50,11 @@ struct LibrariesMetadataPage {
     Row({ space: 12 }) {
       Text('📁')
         .fontSize(ThemeConstants.TITLE_LARGE)
-        .fontColor(this.colors().primary)
+        .fontColor(this.colors().brandPrimary)
         .width(28)
       Text(path)
         .fontSize(ThemeConstants.TITLE_MEDIUM)
-        .fontColor(this.colors().onSurface)
+        .fontColor(this.colors().textPrimary)
         .layoutWeight(1)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -95,8 +95,8 @@ struct LibrariesMetadataPage {
               .height(28)
               .fontSize(ThemeConstants.META_SMALL)
               .padding({ left: 10, right: 10 })
-              .backgroundColor(this.colors().surfaceElevated)
-              .fontColor(this.colors().onSurface)
+              .backgroundColor(this.colors().surfacePressed)
+              .fontColor(this.colors().textPrimary)
               .onClick(() => {
                 this.reload();
               })
@@ -119,11 +119,11 @@ struct LibrariesMetadataPage {
         }
         .width('100%')
         .height('100%')
-        .backgroundColor(this.colors().background)
+        .backgroundColor(this.colors().pageBackground)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.colors().background)
+    .backgroundColor(this.colors().pageBackground)
   }
 }

@@ -57,11 +57,11 @@ export struct AdminConfigEditor {
         Column({ space: 2 }) {
           Text(field.label)
             .fontSize(ThemeConstants.BODY_MEDIUM)
-            .fontColor(this.colors().onSurface)
+            .fontColor(this.colors().textPrimary)
           if (field.description.length > 0) {
             Text(field.description)
               .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onSurfaceVariant)
+              .fontColor(this.colors().textSecondary)
           }
         }
         .alignItems(HorizontalAlign.Start)
@@ -69,7 +69,7 @@ export struct AdminConfigEditor {
 
         if (field.type === 'toggle') {
           Toggle({ type: ToggleType.Switch, isOn: this.booleanValue(field.key) })
-            .selectedColor(this.colors().primary)
+            .selectedColor(this.colors().brandPrimary)
             .enabled(!this.saving)
             .onChange((value: boolean) => {
               this.onChange(field.key, value);
@@ -83,8 +83,8 @@ export struct AdminConfigEditor {
         TextInput({ text: this.textValue(field.key), placeholder: field.label })
           .width('100%')
           .enabled(!this.saving)
-          .fontColor(this.colors().onSurface)
-          .backgroundColor(this.colors().surfaceElevated)
+          .fontColor(this.colors().textPrimary)
+          .backgroundColor(this.colors().surfacePressed)
           .onChange((value: string) => {
             this.onChange(field.key, value);
           })
@@ -93,8 +93,8 @@ export struct AdminConfigEditor {
           .width('100%')
           .enabled(!this.saving)
           .type(InputType.Number)
-          .fontColor(this.colors().onSurface)
-          .backgroundColor(this.colors().surfaceElevated)
+          .fontColor(this.colors().textPrimary)
+          .backgroundColor(this.colors().surfacePressed)
           .onChange((value: string) => {
             const parsed: number = Number(value);
             if (!Number.isNaN(parsed)) {
@@ -120,24 +120,24 @@ export struct AdminConfigEditor {
               LoadingProgress()
                 .width(18)
                 .height(18)
-                .color(this.colors().onPrimary)
+                .color(this.colors().onBrand)
             }
             Text(this.saving ? '保存中...' : '保存')
               .fontSize(ThemeConstants.BODY_MEDIUM)
-              .fontColor(this.colors().onPrimary)
+              .fontColor(this.colors().onBrand)
           }
         }
         .width('100%')
         .height(42)
         .margin({ left: 16, right: 16, top: 8, bottom: 8 })
-        .backgroundColor(this.saving ? this.colors().onSurfaceVariant : this.colors().primary)
+        .backgroundColor(this.saving ? this.colors().textSecondary : this.colors().brandPrimary)
         .enabled(!this.saving)
         .onClick(() => {
           this.onSave();
         })
       }
       .width('100%')
-      .backgroundColor(this.colors().surface)
+      .backgroundColor(this.colors().cardBackground)
       .borderRadius(12)
       .clip(true)
 
