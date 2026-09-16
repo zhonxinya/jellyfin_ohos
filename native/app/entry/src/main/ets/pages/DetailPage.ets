@@ -9,6 +9,7 @@ import { PageHeader } from '../components/PageHeader';
 import { AsyncStateView } from '../components/AsyncStateView';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { HorizontalShelf } from '../components/HorizontalShelf';
+import { AppIconButton } from '../components/AppIconButton';
 
 /** 预计算的媒体流条目，供 Builder 使用 */
 interface StreamEntry {
@@ -434,7 +435,7 @@ struct DetailPage {
                 .height('100%')
                 .linearGradient({
                   angle: 180,
-                  colors: [['#00000066', 0.0], [this.colors().background, 1.0]]
+                  colors: [[this.colors().posterScrim, 0.0], [this.colors().background, 1.0]]
                 })
             }
             .width('100%')
@@ -489,58 +490,71 @@ struct DetailPage {
                   }, (genre: string) => genre)
                 }
                 .width('100%')
-                // 播放按钮行
+                // 播放按钮行 —— 主操作按参考项目规格（48vp / 12vp 圆角 / 品牌实底 + 微光投影），
+                // 其余操作用 40vp 圆形图标按钮 + 系统符号（原来用的是 ▼ ★ ⏱ ⋮ 文本字符）
                 Flex({ wrap: FlexWrap.Wrap }) {
-                  Button(this.item.type === 'Episode' ? '\u64ad\u653e\u672c\u96c6' : '\u64ad\u653e')
-                    .height(40)
+                  Button(this.item.type === 'Episode' ? '\u64ad\u653e\u672c\u96c6' : '\u64ad\u653e',
+                    { type: ButtonType.Normal, stateEffect: false })
+                    .height(ThemeConstants.BUTTON_HEIGHT)
                     .width(this.item.type === 'Series' || this.item.type === 'Episode' ? 150 : '100%')
-                    .backgroundColor(this.colors().primary)
-                    .fontColor(this.colors().onPrimary)
+                    .fontSize(ThemeConstants.TITLE_MEDIUM)
+                    .fontWeight(FontWeight.Medium)
+                    .backgroundColor(this.colors().brandPrimary)
+                    .fontColor(this.colors().onBrand)
+                    .borderRadius(ThemeConstants.BUTTON_RADIUS)
+                    .shadow({
+                      radius: 10,
+                      color: this.colors().buttonShadow,
+                      offsetX: 0,
+                      offsetY: 4
+                    })
+                    .stateStyles({
+                      pressed: {
+                        .backgroundColor(this.colors().brandPrimaryPressed)
+                      }
+                    })
                     .margin({ right: 4, bottom: 4 })
                     .onClick(() => {
                       this.playItem(this.item.id);
                     })
-                  Button('\u25BC')
-                    .height(40)
-                    .width(40)
-                    .fontSize(16)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
+                  AppIconButton({
+                    icon: $r('sys.symbol.chevron_down'),
+                    variant: 'surface',
+                    iconSize: 18,
+                    onTap: () => {
                       this.showPlayOptions = true;
-                    })
-                  Button(this.item.isFavorite ? '\u2605' : '\u2606')
-                    .height(40)
-                    .width(40)
-                    .fontSize(18)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.item.isFavorite ? this.colors().primary : this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
+                    }
+                  })
+                    .margin({ right: 4, bottom: 4 })
+                  AppIconButton({
+                    icon: this.item.isFavorite ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'),
+                    variant: this.item.isFavorite ? 'soft' : 'surface',
+                    iconSize: 19,
+                    onTap: () => {
                       this.toggleFavorite();
-                    })
-                  Button('\u{23F1}')
-                    .height(40)
-                    .width(40)
-                    .fontSize(14)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.item.isPlayed ? this.colors().success : this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
+                    }
+                  })
+                    .margin({ right: 4, bottom: 4 })
+                  AppIconButton({
+                    icon: $r('sys.symbol.clock'),
+                    variant: 'surface',
+                    iconSize: 18,
+                    iconColorOverride: this.item.isPlayed ? this.colors().success : '',
+                    onTap: () => {
                       this.showMarkPlayed = true;
-                    })
-                  Button('\u22EE')
-                    .height(40)
-                    .width(40)
-                    .fontSize(16)
-                    .backgroundColor(this.colors().surfaceElevated)
-                    .fontColor(this.colors().onSurface)
-                    .margin({ bottom: 4 })
-                    .onClick(() => {
+                    }
+                  })
+                    .margin({ right: 4, bottom: 4 })
+                  AppIconButton({
+                    icon: $r('sys.symbol.ellipsis_circle'),
+                    variant: 'surface',
+                    iconSize: 18,
+                    onTap: () => {
                       // 更多菜单
                       this.showMediaInfo = true;
-                    })
+                    }
+                  })
+                    .margin({ bottom: 4 })
                 }
                 .width('100%')
               }
@@ -623,8 +637,11 @@ struct DetailPage {
                         .fontSize(ThemeConstants.BODY_MEDIUM)
                         .fontColor(this.colors().onSurface)
                         .layoutWeight(1)
-                      Text(this.expandedSeasonId === season.id ? 'v' : '>')
-                        .fontColor(this.colors().outline)
+                      SymbolGlyph(this.expandedSeasonId === season.id
+                        ? $r('sys.symbol.chevron_down')
+                        : $r('sys.symbol.chevron_right'))
+                        .fontSize(16)
+                        .fontColor([this.colors().textTertiary])
                     }
                     .width('100%')
                     .padding({ left: 16, right: 16, top: 10, bottom: 10 })
