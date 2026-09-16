@@ -1,5 +1,6 @@
 import router from '@ohos.router';
 import media from '@ohos.multimedia.media';
+import image from '@ohos.multimedia.image';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -24,6 +25,14 @@ struct PlayerPage {
   @State private durationMs: number = 0;
   @State private isPlaying: boolean = false;
   @State private status: string = UiState.INITIAL;
+  /** FFmpeg 软解回放状态：逐帧拉取并用 PixelMap 渲染（硬解不支持的编码走这条路） */
+  @State private softPlaying: boolean = false;
+  @State private softStatus: string = '';
+  @State private softFrame: image.PixelMap | undefined = undefined;
+  private softTimerId: number = -1;
+  private softPulling: boolean = false;
+  /** 当前帧的像素缓冲：PixelMap 可能引用它，必须持有引用避免被回收导致黑屏 */
+  private softPixelRef: ArrayBuffer | undefined = undefined;
   @State private errorMsg: string = '';
   @State private showControls: boolean = true;
   @State private playbackSpeed: number = 1.0;
@@ -88,6 +97,8 @@ struct PlayerPage {
   }
 
   aboutToDisappear(): void {
+    // 离开播放页必须停掉软解会话（解码线程 + 取流都要释放）
+    this.stopSoftPlay();
     if (this.timerId >= 0) {
       clearInterval(this.timerId);
       this.timerId = -1;
@@ -142,6 +153,129 @@ struct PlayerPage {
 
   private formatTime(ms: number): string {
     return formatSeconds(Math.max(0, Math.floor(ms / 1000)));
+  }
+
+  /**
+   * 启动 FFmpeg 软解回放：打开流式软解会话，然后由定时器逐帧拉取并用 PixelMap 渲染。
+   *
+   * 为什么需要：系统 AVPlayer 只走硬解，模拟器/部分设备解不了 HEVC 等编码；
+   * 软解用 FFmpeg 在 CPU 上解码，虽然帧率有限，但能把这些内容放出来。
+   */
+  private async startSoftPlay(): Promise<void> {
+    this.softStatus = '正在打开软解会话…';
+    // 硬解失败后应停掉 AVPlayer，避免两路同时读流
+    this.softStopAvPlayer();
+    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.playbackOptions);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      this.softStatus = `软解打开失败：${result.message}`;
+      return;
+    }
+    const data: ESObject = result.data as ESObject;
+    if (!JsonUtil.getBoolean(data, 'ok', false)) {
+      this.softStatus = `软解打开失败：${JsonUtil.getString(data, 'error', '未知错误')}`;
+      return;
+    }
+    this.softPlaying = true;
+    this.softStatus = `软解中：${JsonUtil.getString(data, 'videoCodec', '?')} `
+      + `${JsonUtil.getNumber(data, 'width', 0)}x${JsonUtil.getNumber(data, 'height', 0)}`
+      + ` (${JsonUtil.getString(data, 'playMethod', '')})`;
+    this.startSoftTimer();
+  }
+
+  /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + PixelMap 创建的开销决定上限） */
+  private startSoftTimer(): void {
+    this.stopSoftTimer();
+    this.softTimerId = setInterval(() => {
+      this.pullSoftFrame();
+    }, 70);
+  }
+
+  private stopSoftTimer(): void {
+    if (this.softTimerId !== -1) {
+      clearInterval(this.softTimerId);
+      this.softTimerId = -1;
+    }
+  }
+
+  private async pullSoftFrame(): Promise<void> {
+    if (this.softPulling || !this.softPlaying) {
+      return;
+    }
+    this.softPulling = true;
+    try {
+      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(480);
+      if (frame === null) {
+        return;
+      }
+      const ok: boolean = JsonUtil.getBoolean(frame, 'ok', false);
+      if (!ok) {
+        const reason: string = JsonUtil.getString(frame, 'error', '');
+        if (reason === 'eof') {
+          this.softStatus = '软解播放结束';
+        } else if (reason.length > 0) {
+          this.softStatus = `软解失败：${reason}`;
+        }
+        this.stopSoftPlay();
+        return;
+      }
+      const w: number = JsonUtil.getNumber(frame, 'width', 0);
+      const h: number = JsonUtil.getNumber(frame, 'height', 0);
+      const pixels: ESObject = frame['pixels'] as ESObject;
+      if (w <= 0 || h <= 0 || pixels === undefined || pixels === null) {
+        return;
+      }
+      const opts: image.InitializationOptions = {
+        size: { width: w, height: h },
+        srcPixelFormat: image.PixelMapFormat.RGBA_8888,
+        pixelFormat: image.PixelMapFormat.RGBA_8888,
+        editable: false
+      };
+      const pixelMap: image.PixelMap = await image.createPixelMap(pixels as ArrayBuffer, opts);
+      this.softFrame = pixelMap;
+      const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
+      const idx: number = JsonUtil.getNumber(frame, 'frameIndex', 0);
+      const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
+      // 诊断：抽样 NAPI 返回的 RGBA 缓冲，确认不是"全黑数据"（用于区分解码问题与渲染问题）
+      const view: Uint8Array = new Uint8Array(pixels as ArrayBuffer);
+      let checksum: number = 0;
+      for (let i = 0; i < view.length; i += 997) {
+        checksum += view[i];
+      }
+      // 关键：PixelMap 可能引用（而非拷贝）该 ArrayBuffer；若不持有引用，
+      // 帧缓冲被回收后画面会变黑。这里显式保留到下一帧到来。
+      this.softPixelRef = pixels as ArrayBuffer;
+      this.softStatus = `软解中 ${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
+        + ` · 第 ${idx} 帧 · 已取流 ${(fetched / 1048576).toFixed(1)} MB`
+        + ` · 像素校验 ${checksum}`;
+    } catch (err) {
+      this.softStatus = `软解渲染异常：${(err as Error).message}`;
+    } finally {
+      this.softPulling = false;
+    }
+  }
+
+  private pad2(v: number): string {
+    return v < 10 ? `0${v}` : `${v}`;
+  }
+
+  private softStopAvPlayer(): void {
+    if (this.avPlayer !== null) {
+      try {
+        this.avPlayer.stop();
+        this.avPlayer.release();
+      } catch (err) {
+        // 忽略：AVPlayer 已在错误态
+      }
+      this.avPlayer = null;
+    }
+  }
+
+  private stopSoftPlay(): void {
+    this.stopSoftTimer();
+    JellyfinNative.softPlayClose();
+    this.softPlaying = false;
+    this.softFrame = undefined;
   }
 
   private async openPlayer(): Promise<void> {
@@ -485,6 +619,19 @@ struct PlayerPage {
             this.cycleSpeed();
           }
         })
+        // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
+        ChipButton({
+          label: '软解',
+          selected: this.softPlaying,
+          onTap: () => {
+            if (this.softPlaying) {
+              this.stopSoftPlay();
+              this.softStatus = '已停止软解';
+            } else {
+              this.startSoftPlay();
+            }
+          }
+        })
       }
       .width('100%')
     }
@@ -594,7 +741,9 @@ struct PlayerPage {
 
   build() {
     Stack() {
-      XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE })
+      // 软解回放时不渲染 XComponent：SURFACE 类型视频面会盖住 ArkUI 上的软解画面（PixelMap）
+      if (!this.softPlaying && this.softFrame === undefined) {
+        XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE })
         .width('100%')
         .height('100%')
         .backgroundColor(this.colors().videoBackground)
@@ -686,6 +835,7 @@ struct PlayerPage {
             this.revealControls();
           }
         })
+      }
 
       // 手势反馈浮层
       if (this.showFeedback && this.gestureFeedback.length > 0) {
@@ -742,7 +892,7 @@ struct PlayerPage {
       }
 
       if (this.status === UiState.ERROR) {
-        Column() {
+        Column({ space: 16 }) {
           // 错误态复用 EmptyState（参考项目约定：错误不另造组件，配"重试"动作）
           EmptyState({
             message: this.errorMsg.length > 0 ? this.errorMsg : '播放出错',
@@ -752,12 +902,58 @@ struct PlayerPage {
               this.openPlayer();
             }
           })
+          // 硬解不支持该编码（如 HEVC）时，提供 FFmpeg 软解回放
+          if (this.softStatus.length > 0) {
+            Text(this.softStatus)
+              .fontSize(ThemeConstants.META_MEDIUM)
+              .fontColor(this.colors().onOverlayMuted)
+              .textAlign(TextAlign.Center)
+          }
+          Button(this.softPlaying ? '停止软解' : '用 FFmpeg 软解播放',
+            { type: ButtonType.Normal, stateEffect: false })
+            .height(ThemeConstants.BUTTON_HEIGHT)
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontColor(this.colors().onBrand)
+            .backgroundColor(this.colors().brandPrimary)
+            .borderRadius(ThemeConstants.BUTTON_RADIUS)
+            .stateStyles({
+              pressed: {
+                .backgroundColor(this.colors().brandPrimaryPressed)
+              }
+            })
+            .onClick(() => {
+              if (this.softPlaying) {
+                this.stopSoftPlay();
+              } else {
+                this.startSoftPlay();
+              }
+            })
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
         .backgroundColor(this.colors().videoBackground)
+      }
+
+      // 软解画面（FFmpeg 逐帧 → PixelMap）：覆盖视频区域，可截图验证
+      if (this.softFrame !== undefined) {
+        Image(this.softFrame)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Contain)
+          .backgroundColor(this.colors().videoBackground)
+      }
+
+      // 软解状态常驻浮层（不随控制条自动隐藏，便于用户与诊断查看进度）
+      if (this.softStatus.length > 0) {
+        Text(this.softStatus)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlay)
+          .backgroundColor(this.colors().badgeScrim)
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(ThemeConstants.BADGE_RADIUS)
+          .margin({ top: 72 })
       }
     }
     .width('100%')

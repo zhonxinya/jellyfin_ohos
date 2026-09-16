@@ -42,6 +42,8 @@ build/
 # 设备实测证据（截图/解出的首帧等），不入库
 ui-screen*.jpeg
 ui-softdecode-firstframe.png
+ui-*.png
+ui-*.jpeg
 
 # 本地 Agent 配置，不随仓库发布
 AGENTS.md

@@ -456,6 +456,43 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * 软解播放会话：打开流式软解（FFmpeg Range 取流 + 逐帧 RGBA），供逐帧渲染使用。
+   * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 SoftPlayOpen。
+   */
+  static async softPlayOpen(itemId: string, optionsJson: string = '{}'): Promise<string> {
+    try {
+      return await jellyfinNative.softPlayOpen(itemId, optionsJson);
+    } catch (error) {
+      return JellyfinNative.fail('softPlayOpen', error);
+    }
+  }
+
+  /** 取下一帧（同步）：返回 {ok,width,height,ptsSec,frameIndex,pixels} */
+  static softPlayNextFrame(maxWidth: number): ESObject | null {
+    try {
+      return jellyfinNative.softPlayNextFrame(maxWidth) as ESObject;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  static softPlayStatus(): string {
+    try {
+      return jellyfinNative.softPlayStatus();
+    } catch (error) {
+      return JellyfinNative.fail('softPlayStatus', error);
+    }
+  }
+
+  static softPlayClose(): string {
+    try {
+      return jellyfinNative.softPlayClose();
+    } catch (error) {
+      return JellyfinNative.fail('softPlayClose', error);
+    }
+  }
+
   /** 配置 HTTPS 用的 CA 根证书 PEM 路径（未配置则 https 连接会明确失败） */
   static setCaBundlePath(path: string): string {
     try {

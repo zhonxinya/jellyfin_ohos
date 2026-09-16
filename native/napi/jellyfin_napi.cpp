@@ -22,6 +22,8 @@
 #include "../player/version.h"
 // FFmpeg 软解码器（未链接 FFmpeg 时其 available() 返回 false，probe 会如实报错）
 #include "../player/ffmpeg_decoder.h"
+// 流式软解会话（播放用：Range 分页取流 + 逐帧 RGBA 输出）
+#include "../player/soft_decode_session.h"
 
 #include <cctype>
 #include <functional>
@@ -979,6 +981,155 @@ napi_value ReportPlaybackStopped(napi_env env, napi_callback_info info)
 }
 
 /**
+ * 软解播放会话（流式）：open / nextFrame / close / status。
+ *
+ * 用途：系统硬解不支持的编码（如模拟器上的 HEVC）用 FFmpeg 软解逐帧出图，
+ * 由 ArkTS 定时器拉帧并渲染（后续可替换为 EGL 直渲以提升帧率）。
+ */
+std::unique_ptr<jellyfin::player::SoftDecodeSession> &SoftSession()
+{
+    static std::unique_ptr<jellyfin::player::SoftDecodeSession> session;
+    return session;
+}
+
+/** 打开软解会话：解析该条目的播放地址并开始按需取流 */
+napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string itemId;
+    ReadStringArg(env, info, 0, itemId);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "itemId required"));
+    }
+    nlohmann::json optionsJson;
+    ReadJsonArg(env, info, 1, optionsJson);
+    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const std::string userId = session.userId();
+
+    return RunAsync(env, [userId, itemId, options]() {
+        nlohmann::json out;
+        out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
+        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        if (!playback.ok()) {
+            out["ok"] = false;
+            out["error"] = "获取播放信息失败：" + playback.error.message;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        if (playback.data.is_object() && !playback.data.contains("ItemId")) {
+            playback.data["ItemId"] = itemId;
+        }
+        auto &sess = jellyfin::SessionManager::instance();
+        jellyfin::player::PlaybackSession pbSession;
+        std::string resolveError;
+        if (!jellyfin::player::ResolvePlaybackSession(playback.data, sess.baseUrl(), sess.accessToken(),
+                                                     pbSession, resolveError)) {
+            out["ok"] = false;
+            out["error"] = resolveError.empty() ? "无法解析播放地址" : resolveError;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        out["playMethod"] = jellyfin::player::PlayMethodToString(pbSession.method);
+
+        SoftSession().reset(new jellyfin::player::SoftDecodeSession());
+        std::string error;
+        if (!SoftSession()->openUrl(pbSession.playUrl, error)) {
+            SoftSession().reset();
+            out["ok"] = false;
+            out["error"] = error;
+            return MakeResult(true, 200, "ok", out).dump();
+        }
+        out["ok"] = true;
+        out["container"] = SoftSession()->container();
+        out["videoCodec"] = SoftSession()->videoCodec();
+        out["width"] = SoftSession()->width();
+        out["height"] = SoftSession()->height();
+        out["durationSec"] = SoftSession()->durationSec();
+        return MakeResult(true, 200, "ok", out).dump();
+    });
+}
+
+/** 取下一帧 RGBA（ArrayBuffer 通过 result.data 返回，供 ArkTS 生成 PixelMap） */
+napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
+{
+    if (SoftSession() == nullptr) {
+        return ToNapiJson(env, MakeResult(false, 0, "会话未打开"));
+    }
+    int64_t maxWidth = 0;
+    ReadIntArg(env, info, 0, maxWidth);
+
+    napi_value result = nullptr;
+    napi_create_object(env, &result);
+
+    std::vector<uint8_t> rgba;
+    jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
+    const bool ok = SoftSession()->nextFrameRgba(maxWidth > 0 ? maxWidth : 480, rgba, frameInfo);
+
+    napi_value status = nullptr;
+    napi_get_boolean(env, ok, &status);
+    napi_set_named_property(env, result, "ok", status);
+    napi_value w = nullptr;
+    napi_create_int32(env, frameInfo.width, &w);
+    napi_set_named_property(env, result, "width", w);
+    napi_value h = nullptr;
+    napi_create_int32(env, frameInfo.height, &h);
+    napi_set_named_property(env, result, "height", h);
+    napi_value pts = nullptr;
+    napi_create_double(env, frameInfo.ptsSec, &pts);
+    napi_set_named_property(env, result, "ptsSec", pts);
+    napi_value frames = nullptr;
+    napi_create_int64(env, frameInfo.frameIndex, &frames);
+    napi_set_named_property(env, result, "frameIndex", frames);
+    if (!frameInfo.error.empty()) {
+        napi_value err = nullptr;
+        napi_create_string_utf8(env, frameInfo.error.c_str(), NAPI_AUTO_LENGTH, &err);
+        napi_set_named_property(env, result, "error", err);
+    }
+    napi_value bytes = nullptr;
+    napi_create_int64(env, SoftSession()->bytesFetched(), &bytes);
+    napi_set_named_property(env, result, "bytesFetched", bytes);
+
+    if (ok && !rgba.empty()) {
+        void *data = nullptr;
+        napi_value buffer = nullptr;
+        if (napi_create_arraybuffer(env, rgba.size(), &data, &buffer) == napi_ok) {
+            std::memcpy(data, rgba.data(), rgba.size());
+            napi_set_named_property(env, result, "pixels", buffer);
+        }
+    }
+    return result;
+}
+
+napi_value SoftPlayStatus(napi_env env, napi_callback_info /*info*/)
+{
+    nlohmann::json out;
+    out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
+    if (SoftSession() != nullptr) {
+        out["open"] = SoftSession()->isOpen();
+        out["videoCodec"] = SoftSession()->videoCodec();
+        out["container"] = SoftSession()->container();
+        out["width"] = SoftSession()->width();
+        out["height"] = SoftSession()->height();
+        out["durationSec"] = SoftSession()->durationSec();
+        out["framesDecoded"] = SoftSession()->framesDecoded();
+        out["bytesFetched"] = SoftSession()->bytesFetched();
+    } else {
+        out["open"] = false;
+    }
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
+napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
+{
+    if (SoftSession() != nullptr) {
+        SoftSession()->close();
+        SoftSession().reset();
+    }
+    return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"closed", true}}));
+}
+
+/**
  * 软解码探测：解析播放地址 → 取文件前缀字节 → 用 FFmpeg 软解出前若干帧。
  *
  * 用途：
@@ -1500,6 +1651,12 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"setDeviceId", nullptr, SetDeviceId, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"playerSoftDecodeProbe", nullptr, PlayerSoftDecodeProbe, nullptr, nullptr, nullptr,
          napi_default, nullptr},
+        {"softPlayOpen", nullptr, SoftPlayOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"softPlayNextFrame", nullptr, SoftPlayNextFrame, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlayStatus", nullptr, SoftPlayStatus, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlayClose", nullptr, SoftPlayClose, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreSession", nullptr, RestoreSession, nullptr, nullptr, nullptr, napi_default,
