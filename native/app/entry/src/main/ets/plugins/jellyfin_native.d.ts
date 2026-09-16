@@ -44,10 +44,11 @@ declare module 'libjellyfin_native.so' {
     reportPlaybackStopped(itemId: string, positionTicks: number): string;
     playerOpen(itemId: string, optionsJson: string): string;
     playerSoftDecodeProbe(itemId: string, cacheDir: string, optionsJson: string): string;
-    softPlayOpen(itemId: string, optionsJson: string): string;
+    softPlayOpen(itemId: string, surfaceId: string, optionsJson: string): string;
     softPlayNextFrame(maxWidth: number): SoftFrameResult;
     softPlayStatus(): string;
     softPlayClose(): string;
+    softPlayDumpFrame(path: string): string;
     playerPlay(): string;
     playerPause(): string;
     playerSeek(positionTicks: number): string;

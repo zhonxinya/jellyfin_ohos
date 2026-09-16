@@ -65,6 +65,14 @@ target_link_libraries(jellyfin_native PUBLIC
   libhilog_ndk.z.so
 )
 
+# 软解渲染：EGL + GLES3 把解码帧直接画进 XComponent surface；
+# native_window 用于从 surfaceId 创建 EGLNativeWindowType。
+target_link_libraries(jellyfin_native PUBLIC
+  EGL
+  GLESv3
+  native_window
+)
+
 # ── FFmpeg 软解码（可选）────────────────────────────────────────────────────────
 # 由 scripts/build_ffmpeg_ohos.sh 交叉编译产出。查找顺序：
 #   1) 模块内预编译目录  native/app/entry/libs/<abi>/   （hvigor 会打进 HAP）

@@ -1,4 +1,5 @@
 import router from '@ohos.router';
+import common from '@ohos.app.ability.common';
 import media from '@ohos.multimedia.media';
 import image from '@ohos.multimedia.image';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
@@ -28,11 +29,8 @@ struct PlayerPage {
   /** FFmpeg 软解回放状态：逐帧拉取并用 PixelMap 渲染（硬解不支持的编码走这条路） */
   @State private softPlaying: boolean = false;
   @State private softStatus: string = '';
-  @State private softFrame: image.PixelMap | undefined = undefined;
   private softTimerId: number = -1;
   private softPulling: boolean = false;
-  /** 当前帧的像素缓冲：PixelMap 可能引用它，必须持有引用避免被回收导致黑屏 */
-  private softPixelRef: ArrayBuffer | undefined = undefined;
   @State private errorMsg: string = '';
   @State private showControls: boolean = true;
   @State private playbackSpeed: number = 1.0;
@@ -58,6 +56,8 @@ struct PlayerPage {
   private lastSeekForward: boolean = true;
   private avPlayer: media.AVPlayer | null = null;
   private surfaceId: string = '';
+  /** XComponent 控制器：surface 就绪后用它拿到 surfaceId（软解 EGL 渲染与 AVPlayer 共用） */
+  private surfaceController: XComponentController = new XComponentController();
 
   // 支持倍速列表
   static readonly SPEEDS: number[] = [0.5, 1.0, 1.25, 1.5, 2.0];
@@ -163,9 +163,9 @@ struct PlayerPage {
    */
   private async startSoftPlay(): Promise<void> {
     this.softStatus = '正在打开软解会话…';
-    // 硬解失败后应停掉 AVPlayer，避免两路同时读流
+    // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
     this.softStopAvPlayer();
-    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.playbackOptions);
+    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, this.playbackOptions);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.softStatus = `软解打开失败：${result.message}`;
@@ -177,9 +177,12 @@ struct PlayerPage {
       return;
     }
     this.softPlaying = true;
+    const renderReady: boolean = JsonUtil.getBoolean(data, 'renderReady', false);
+    const renderError: string = JsonUtil.getString(data, 'renderError', '');
     this.softStatus = `软解中：${JsonUtil.getString(data, 'videoCodec', '?')} `
       + `${JsonUtil.getNumber(data, 'width', 0)}x${JsonUtil.getNumber(data, 'height', 0)}`
-      + ` (${JsonUtil.getString(data, 'playMethod', '')})`;
+      + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
+      + (renderError.length > 0 ? `（${renderError}）` : '');
     this.startSoftTimer();
   }
 
@@ -204,7 +207,8 @@ struct PlayerPage {
     }
     this.softPulling = true;
     try {
-      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(480);
+      // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）
+      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(0);
       if (frame === null) {
         return;
       }
@@ -213,45 +217,46 @@ struct PlayerPage {
         const reason: string = JsonUtil.getString(frame, 'error', '');
         if (reason === 'eof') {
           this.softStatus = '软解播放结束';
+          this.stopSoftPlay();
         } else if (reason.length > 0) {
           this.softStatus = `软解失败：${reason}`;
+          this.stopSoftPlay();
         }
-        this.stopSoftPlay();
         return;
       }
-      const w: number = JsonUtil.getNumber(frame, 'width', 0);
-      const h: number = JsonUtil.getNumber(frame, 'height', 0);
-      const pixels: ESObject = frame['pixels'] as ESObject;
-      if (w <= 0 || h <= 0 || pixels === undefined || pixels === null) {
-        return;
-      }
-      const opts: image.InitializationOptions = {
-        size: { width: w, height: h },
-        srcPixelFormat: image.PixelMapFormat.RGBA_8888,
-        pixelFormat: image.PixelMapFormat.RGBA_8888,
-        editable: false
-      };
-      const pixelMap: image.PixelMap = await image.createPixelMap(pixels as ArrayBuffer, opts);
-      this.softFrame = pixelMap;
       const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
       const idx: number = JsonUtil.getNumber(frame, 'frameIndex', 0);
       const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
-      // 诊断：抽样 NAPI 返回的 RGBA 缓冲，确认不是"全黑数据"（用于区分解码问题与渲染问题）
-      const view: Uint8Array = new Uint8Array(pixels as ArrayBuffer);
-      let checksum: number = 0;
-      for (let i = 0; i < view.length; i += 997) {
-        checksum += view[i];
-      }
-      // 关键：PixelMap 可能引用（而非拷贝）该 ArrayBuffer；若不持有引用，
-      // 帧缓冲被回收后画面会变黑。这里显式保留到下一帧到来。
-      this.softPixelRef = pixels as ArrayBuffer;
-      this.softStatus = `软解中 ${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
-        + ` · 第 ${idx} 帧 · 已取流 ${(fetched / 1048576).toFixed(1)} MB`
-        + ` · 像素校验 ${checksum}`;
+      const rendered: boolean = JsonUtil.getBoolean(frame, 'rendered', false);
+      const renderError: string = JsonUtil.getString(frame, 'renderError', '');
+      this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
+        + ` · 第 ${idx} 帧 · ${(fetched / 1048576).toFixed(1)} MB`
+        + ` · ${rendered ? 'EGL 已渲染' : '未渲染'}`
+        + (renderError.length > 0 ? `（${renderError}）` : '');
     } catch (err) {
-      this.softStatus = `软解渲染异常：${(err as Error).message}`;
+      this.softStatus = `软解异常：${(err as Error).message}`;
     } finally {
       this.softPulling = false;
+    }
+  }
+
+  /** 诊断：把 EGL 当前渲染缓冲回读成 PNG（原生侧 glReadPixels → 编码），路径显示在状态栏 */
+  private async dumpSoftFrame(): Promise<void> {
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const path: string = `${ctx.cacheDir}/softplay_frame.png`;
+      const raw: string = JellyfinNative.softPlayDumpFrame(path);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (result.ok && result.data !== null) {
+        const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
+        const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
+        const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
+        this.softStatus = `已存帧：${source} ${w}x${h} → ${path}`;
+      } else {
+        this.softStatus = `存帧失败：${result.message}`;
+      }
+    } catch (err) {
+      this.softStatus = `存帧异常：${(err as Error).message}`;
     }
   }
 
@@ -275,7 +280,6 @@ struct PlayerPage {
     this.stopSoftTimer();
     JellyfinNative.softPlayClose();
     this.softPlaying = false;
-    this.softFrame = undefined;
   }
 
   private async openPlayer(): Promise<void> {
@@ -632,6 +636,16 @@ struct PlayerPage {
             }
           }
         })
+        // 诊断：回读 EGL 渲染缓冲并写成 PNG（验证"确实渲染出来了"，不依赖系统截图是否含 surface）
+        if (this.softPlaying) {
+          ChipButton({
+            label: '存帧',
+            selected: false,
+            onTap: () => {
+              this.dumpSoftFrame();
+            }
+          })
+        }
       }
       .width('100%')
     }
@@ -741,14 +755,14 @@ struct PlayerPage {
 
   build() {
     Stack() {
-      // 软解回放时不渲染 XComponent：SURFACE 类型视频面会盖住 ArkUI 上的软解画面（PixelMap）
-      if (!this.softPlaying && this.softFrame === undefined) {
-        XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE })
+      // XComponent 始终存在：软解时 EGL 直接渲染到它的 surface（不再走 PixelMap 逐帧刷新）
+      XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE, controller: this.surfaceController })
         .width('100%')
         .height('100%')
         .backgroundColor(this.colors().videoBackground)
         .onLoad(() => {
-          // XComponent surface is created after load; bind to AVPlayer if available
+          // 关键：surfaceId 必须由 controller 取回；否则 AVPlayer 与软解 EGL 都拿不到视频面
+          this.surfaceId = this.surfaceController.getXComponentSurfaceId();
           if (this.avPlayer !== null && this.surfaceId.length > 0) {
             this.avPlayer.surfaceId = this.surfaceId;
           }
@@ -835,7 +849,6 @@ struct PlayerPage {
             this.revealControls();
           }
         })
-      }
 
       // 手势反馈浮层
       if (this.showFeedback && this.gestureFeedback.length > 0) {
@@ -934,15 +947,6 @@ struct PlayerPage {
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
         .backgroundColor(this.colors().videoBackground)
-      }
-
-      // 软解画面（FFmpeg 逐帧 → PixelMap）：覆盖视频区域，可截图验证
-      if (this.softFrame !== undefined) {
-        Image(this.softFrame)
-          .width('100%')
-          .height('100%')
-          .objectFit(ImageFit.Contain)
-          .backgroundColor(this.colors().videoBackground)
       }
 
       // 软解状态常驻浮层（不随控制条自动隐藏，便于用户与诊断查看进度）
