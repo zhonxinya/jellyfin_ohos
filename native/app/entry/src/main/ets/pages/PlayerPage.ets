@@ -1066,17 +1066,31 @@ struct PlayerPage {
         .height('100%')
       }
 
-      // 加载状态
+      // 加载状态：不只是转圈，同时给出"在播什么"与"在做什么"，
+      // 避免打开播放器时只看到一块空白黑背景（观感与信息量都更接近成熟播放器）。
       if (this.status === UiState.LOADING) {
-        Column() {
+        Column({ space: 4 }) {
+          Text(this.title.length > 0 ? this.title : '正在准备播放')
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.colors().onOverlay)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .padding({ left: 32, right: 32 })
+          if (this.typeLabel.length > 0) {
+            Text(this.typeLabel)
+              .fontSize(ThemeConstants.LABEL_SMALL)
+              .fontColor(this.colors().onOverlayMuted)
+          }
           LoadingProgress()
-            .width(48)
-            .height(48)
+            .width(40)
+            .height(40)
             .color(this.colors().brandPrimary)
-          Text('加载播放器...')
-            .fontSize(ThemeConstants.BODY_MEDIUM)
+            .margin({ top: 20 })
+          Text(this.stateText.length > 0 ? `正在加载 · ${this.stateText}` : '正在加载…')
+            .fontSize(ThemeConstants.META_SMALL)
             .fontColor(this.colors().onOverlayMuted)
-            .margin({ top: 16 })
+            .margin({ top: 10 })
         }
         .width('100%')
         .height('100%')
