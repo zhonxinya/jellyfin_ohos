@@ -304,6 +304,9 @@ struct PlayerPage {
       this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
         + ` · 第 ${idx} 帧 · ${(fetched / 1048576).toFixed(1)} MB`
         + ` · ${rendered ? 'EGL 已渲染' : '未渲染'}`
+        // 把交互状态也放进常驻诊断行：锁定/控制条这类状态无法靠"看覆盖层"可靠判断
+        // （UI 可能被其它层遮挡或自动隐藏），写进文字后一次 dump 即可确知真实状态。
+        + ` · 锁定=${this.controlsLocked ? '是' : '否'} 控件=${this.showControls ? '显示' : '隐藏'}`
         + (renderError.length > 0 ? `（${renderError}）` : '');
     } catch (err) {
       this.softStatus = `软解异常：${(err as Error).message}`;
@@ -647,6 +650,7 @@ struct PlayerPage {
             // 同一次点击的抬手事件会"穿透"到刚出现的覆盖层上把它立刻解锁
             // （实测表现为"点了锁定却没锁上"）。
             this.lockChangedAt = Date.now();
+            this.refreshStateDiag(this.controlsLocked ? '锁定' : '取消锁定');
           }
         })
       }
@@ -906,6 +910,18 @@ struct PlayerPage {
     this.controlsLocked = false;
     this.lockChangedAt = Date.now();
     this.revealControls();
+    this.refreshStateDiag('解锁');
+  }
+
+  /**
+   * 把交互状态写进常驻诊断行（渲染目标探测行）。
+   *
+   * 为什么需要：锁定/控制条显隐这类状态无法靠"看覆盖层是否存在"可靠判断
+   * （覆盖层可能被遮挡、控件会自动隐藏），写进文字后一次 dump 即可确知真实状态，
+   * 无需依赖"猜坐标点击 + 目视判断"。
+   */
+  private refreshStateDiag(action: string): void {
+    this.softDiag = `[${action}] 锁定=${this.controlsLocked ? '是' : '否'} 控件=${this.showControls ? '显示' : '隐藏'}`;
   }
 
   /** 手势反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
