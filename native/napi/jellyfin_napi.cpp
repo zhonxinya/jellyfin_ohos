@@ -922,13 +922,16 @@ napi_value CreatePlaylist(napi_env env, napi_callback_info info)
     }
     std::string name;
     std::string itemId;
+    std::string mediaType;
     if (!ReadStringArg(env, info, 0, name) || name.empty() ||
         !ReadStringArg(env, info, 1, itemId) || itemId.empty()) {
         return ToNapiJson(env, MakeResult(false, 0, "name and itemId required"));
     }
+    // 第 3 个参数可选：媒体类型（默认 Video）。音乐曲目应传 Audio，否则服务端把它归到视频列表。
+    ReadStringArg(env, info, 2, mediaType);
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, name, itemId]() {
-        return FromApi(jellyfin::api::createPlaylist(Api(), userId, name, itemId)).dump();
+    return RunAsync(env, [userId, name, itemId, mediaType]() {
+        return FromApi(jellyfin::api::createPlaylist(Api(), userId, name, itemId, mediaType)).dump();
     });
 }
 
@@ -947,6 +950,86 @@ napi_value AddToPlaylist(napi_env env, napi_callback_info info)
     const std::string userId = session.userId();
     return RunAsync(env, [userId, playlistId, itemId]() {
         return FromApi(jellyfin::api::addToPlaylist(Api(), playlistId, userId, itemId)).dump();
+    });
+}
+
+napi_value GetPlaylistItems(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    int64_t startIndex = 0;
+    int64_t limit = 200;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId required"));
+    }
+    ReadIntArg(env, info, 1, startIndex);
+    ReadIntArg(env, info, 2, limit);
+    const std::string userId = session.userId();
+    return RunAsync(env, [userId, playlistId, startIndex, limit]() {
+        // userId 必填（缺省时服务端 400），这里显式传
+        return FromApi(jellyfin::api::getPlaylistItems(Api(), playlistId, userId,
+                                                       static_cast<int>(startIndex),
+                                                       static_cast<int>(limit)))
+            .dump();
+    });
+}
+
+napi_value RemoveFromPlaylist(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    std::string entryIds;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty() ||
+        !ReadStringArg(env, info, 1, entryIds) || entryIds.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId and entryIds required"));
+    }
+    return RunAsync(env, [playlistId, entryIds]() {
+        return FromApi(jellyfin::api::removeFromPlaylist(Api(), playlistId, entryIds)).dump();
+    });
+}
+
+napi_value MovePlaylistItem(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    std::string entryId;
+    int64_t newIndex = -1;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty() ||
+        !ReadStringArg(env, info, 1, entryId) || entryId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId and entryId required"));
+    }
+    ReadIntArg(env, info, 2, newIndex);
+    if (newIndex < 0) {
+        return ToNapiJson(env, MakeResult(false, 0, "newIndex required"));
+    }
+    return RunAsync(env, [playlistId, entryId, newIndex]() {
+        return FromApi(jellyfin::api::movePlaylistItem(Api(), playlistId, entryId,
+                                                       static_cast<int>(newIndex)))
+            .dump();
+    });
+}
+
+napi_value DeletePlaylist(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId required"));
+    }
+    return RunAsync(env, [playlistId]() {
+        return FromApi(jellyfin::api::deletePlaylist(Api(), playlistId)).dump();
     });
 }
 
@@ -2158,6 +2241,14 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"createPlaylist", nullptr, CreatePlaylist, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"addToPlaylist", nullptr, AddToPlaylist, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"getPlaylistItems", nullptr, GetPlaylistItems, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"removeFromPlaylist", nullptr, RemoveFromPlaylist, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"movePlaylistItem", nullptr, MovePlaylistItem, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"deletePlaylist", nullptr, DeletePlaylist, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"reportPlaybackProgress", nullptr, ReportPlaybackProgress, nullptr, nullptr, nullptr,
          napi_default, nullptr},
