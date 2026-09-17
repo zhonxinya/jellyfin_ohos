@@ -1,5 +1,7 @@
 import router from '@ohos.router';
 import common from '@ohos.app.ability.common';
+import { BusinessError } from '@ohos.base';
+import window from '@ohos.window';
 import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
 import image from '@ohos.multimedia.image';
@@ -11,15 +13,39 @@ import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { WindowLayout } from '../common/WindowLayout';
+import { PlayerAspect, PlayerAspectMode, AspectBox, kScaleTypeFitCrop } from '../common/PlayerAspect';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { formatSeconds } from '../common/format';
 import { AppIconButton } from '../components/AppIconButton';
-import { ChipButton } from '../components/ChipButton';
+import { PlayerToolButton } from '../components/PlayerToolButton';
 import { EmptyState } from '../components/EmptyState';
 import { PlaybackState } from '../common/PlaybackState';
 
 /** 控制条自动隐藏延时（毫秒）：给用户留出"看到并点中控件"的时间 */
 const kControlsAutoHideMs: number = 5000;
+
+/** 双击快进/快退的步长（毫秒）—— 与屏幕上 ±10s 按钮一致，符合主流播放器习惯 */
+const kSkipStepMs: number = 10000;
+
+/**
+ * 单击/双击判定窗口（毫秒）。
+ *
+ * 为什么必须区分：主流播放器里"单击唤出控制条"与"双击两侧快进/快退"是同一块区域上的两个手势，
+ * 若不区分，用户双击时控制条会闪一下（观感很差），或者单击时白送一次 10 秒跳转。
+ * 300ms 与系统双击间隔阈值一致；单击动作延后 `kSingleTapDelayMs` 执行，
+ * 在这段时间内若来了第二次抬手就判定为双击。
+ */
+const kDoubleTapMs: number = 300;
+const kSingleTapDelayMs: number = 260;
+
+/** 手指移动多少 vp 之后就不再算"点击"（判定为滑动，交给 seek/亮度/音量） */
+const kTapSlopVp: number = 12;
+
+/** 双击反馈浮层的停留时间（毫秒） */
+const kRippleMs: number = 620;
+
+/** 音量/亮度手势的灵敏度：约 500vp 的竖直位移对应满量程 */
+const kLevelGestureRange: number = 500;
 
 /** 播放器轨道类型（对应 media.MediaType：0=音频 1=视频 2=字幕 3=附件…） */
 const kMediaTypeAudio: number = 0;
@@ -98,6 +124,19 @@ struct PlayerPage {
   @State private status: string = UiState.INITIAL;
   /** FFmpeg 软解回放状态：逐帧拉取并用 PixelMap 渲染（硬解不支持的编码走这条路） */
   @State private softPlaying: boolean = false;
+  /**
+   * 软解暂停：软解会话没有 pause API，暂停即"停掉拉帧定时器"，
+   * 恢复时重新启动定时器继续从当前 pts 拉帧（画面停在最后一帧，符合暂停语义）。
+   */
+  @State private softPaused: boolean = false;
+  /** 已到 initialized 但视频面尚未就绪：等 XComponent onLoad 拿到 surfaceId 后再 prepare */
+  private preparePendingSurface: boolean = false;
+  /**
+   * 软解跳转的"乐观位置"与保持窗口：seek 是排队的（见 seekTo），
+   * 在画面追上目标之前不要让旧位置的帧把进度条拽回去。
+   */
+  private softSeekTargetMs: number = -1;
+  private softSeekHoldUntil: number = 0;
   /** 是否已因硬解失败自动回退过软解（只回退一次） */
   private softFallbackTried: boolean = false;
   @State private softStatus: string = '';
@@ -116,11 +155,47 @@ struct PlayerPage {
   @State private playbackSpeed: number = 1.0;
   @State private controlsLocked: boolean = false;
   @State private volume: number = 1.0;
-  @State private showVolumeBar: boolean = false;
   @State private gestureFeedback: string = '';
   @State private gestureIcon: string = '';
   @State private gestureRatio: number = -1;
   @State private showFeedback: boolean = false;
+  /**
+   * 画面比例模式：适应 / 填充 / 拉伸 / 原始（见 `common/PlayerAspect.ets`）。
+   *
+   * 为什么要有它：系统 AVPlayer 的 `videoScaleType` 默认值是"拉伸铺满"，
+   * 16:9 的片子铺到 20:9 的手机上会被拉长；而不同用户对"黑边 / 裁剪"的偏好也不同，
+   * 主流播放器（Infuse 的「缩放」菜单）都会把选择权交给用户。
+   */
+  @State private aspectMode: PlayerAspectMode = 'contain';
+  /** 视频原始像素尺寸（硬解来自 AVPlayer.width/height，软解来自 softPlayOpen 返回值） */
+  @State private videoWidthPx: number = 0;
+  @State private videoHeightPx: number = 0;
+  /** 播放区实测尺寸（vp，来自根 Stack 的 onAreaChange），用于按比例算视频面尺寸 */
+  private areaWidthVp: number = 0;
+  private areaHeightVp: number = 0;
+  /** 单击/双击判定状态 */
+  private lastTapUpAt: number = 0;
+  private lastTapX: number = 0;
+  private singleTapTimerId: number = -1;
+  /** 双击反馈：'forward' | 'backward' | '' */
+  @State private rippleSide: string = '';
+  @State private rippleOpacity: number = 0;
+  @State private rippleScale: number = 1;
+  private rippleTimerId: number = -1;
+  /**
+   * 亮度（0–1，窗口级）。手势调节直接作用于窗口亮度，和主流播放器一致。
+   *
+   * 名字不能叫 `brightness`：`CustomComponent` 已有同名通用属性方法（`.brightness()`），
+   * 组件成员同名会被编译器判为"类型不兼容的重写"（10505001）。
+   */
+  @State private windowBrightness: number = 0.5;
+  /** `setWindowBrightness` 是否可用；不可用时退化为"画面上盖一层黑"的模拟调暗 */
+  private windowBrightnessOk: boolean = false;
+  /** 右侧时间显示：false 显示总时长，true 显示剩余时长（点击可切换） */
+  @State private showRemaining: boolean = false;
+  private windowRef: window.Window | null = null;
+  /** 播放期间保持常亮；退出播放页时恢复系统默认 */
+  private keepScreenOnApplied: boolean = false;
   private brightnessBase: number = 0.5;
   private brightnessLastY: number = 0;
   private volumeBase: number = 1.0;
@@ -247,6 +322,11 @@ struct PlayerPage {
       this.subtitleStreamIndex = -1;
     }
     this.typeLabel = this.computeTypeLabel();
+    // 画面尺寸**先从服务端元数据取**（MediaStreams 的 Width/Height）：
+    // 这样视频面在 surface 创建之前就是正确比例，播放中不需要再改 surface 尺寸。
+    // 为什么重要：AVPlayer 绑定 surface 之后再改 XComponent 尺寸会触发 surface 重建，
+    // 实测会把硬解播放打成错误 → 自动回退软解（等于"本该硬解的片子只能软解"）。
+    this.applyVideoSizeFromStreams();
     this.openPlayer();
     this.timerId = setInterval(() => {
       if (this.isPlaying) {
@@ -256,11 +336,31 @@ struct PlayerPage {
     this.scheduleHideControls();
     // 启动视频区触摸事件轮询：从原生侧 DispatchTouchEvent 捕获的触摸事件中读取并处理手势
     this.startTouchPollTimer();
+    // 窗口实例（亮度手势 / 播放常亮都依赖它）：提前取一次，避免首次手势时才开始异步获取
+    this.ensureWindow();
   }
 
   onPageHide(): void {
     this.stopTouchPollTimer();
+    // 页面切到后台：恢复系统亮度与常亮设置，避免把"播放页的窗口亮度"带到其它界面
+    this.releaseWindowOverrides();
     this.flushStop();
+  }
+
+  /**
+   * 恢复窗口级副作用（亮度、常亮）。
+   *
+   * 为什么不留在 `aboutToDisappear` 里做：投影/后台播放时页面只是 onPageHide，
+   * 但用户已经在看别的界面（甚至别的应用），此时窗口亮度必须立刻还给系统，
+   * 否则"整个屏幕偏暗"会被当成应用 bug。
+   */
+  private releaseWindowOverrides(): void {
+    this.applyKeepScreenOn(false);
+    if (this.windowRef !== null && this.windowBrightnessOk) {
+      // 0 表示"跟随系统亮度"（窗口亮度 API 的约定），即把手动设置的亮度还回去。
+      // 手势调节时下限被夹到 0.01，所以 0 只可能来自这里。
+      this.windowRef.setWindowBrightness(0).catch((_err: Error) => {});
+    }
   }
 
   aboutToDisappear(): void {
@@ -278,7 +378,16 @@ struct PlayerPage {
       clearTimeout(this.feedbackTimerId);
       this.feedbackTimerId = -1;
     }
+    if (this.singleTapTimerId >= 0) {
+      clearTimeout(this.singleTapTimerId);
+      this.singleTapTimerId = -1;
+    }
+    if (this.rippleTimerId >= 0) {
+      clearTimeout(this.rippleTimerId);
+      this.rippleTimerId = -1;
+    }
     this.stopTouchPollTimer();
+    this.releaseWindowOverrides();
     this.flushStop();
   }
 
@@ -311,6 +420,302 @@ struct PlayerPage {
   private revealControls(): void {
     this.showControls = true;
     this.scheduleHideControls();
+  }
+
+  // ─────────────────────────── 画面比例 ───────────────────────────
+
+  /** 屏幕像素密度（px / vp），「原始」比例的 1:1 换算需要它 */
+  private density(): number {
+    try {
+      const d: number = display.getDefaultDisplaySync().densityPixels;
+      return d > 0 ? d : 1;
+    } catch (_e) {
+      return 1;
+    }
+  }
+
+  /** 播放区可用尺寸（vp）：优先用根容器实测值，没有时退回屏幕尺寸 */
+  private areaWidth(): number {
+    return this.areaWidthVp > 0 ? this.areaWidthVp : this.getScreenWidth();
+  }
+
+  private areaHeight(): number {
+    if (this.areaHeightVp > 0) {
+      return this.areaHeightVp;
+    }
+    try {
+      const info: display.Display = display.getDefaultDisplaySync();
+      const density: number = info.densityPixels > 0 ? info.densityPixels : 1;
+      return Math.floor(info.height / density);
+    } catch (_e) {
+      return 640;
+    }
+  }
+
+  /** 当前比例模式下的画面盒子（宽高 vp + 视频面缩放类型） */
+  private aspectBox(): AspectBox {
+    return PlayerAspect.box(this.aspectMode, this.videoWidthPx, this.videoHeightPx,
+                            this.areaWidth(), this.areaHeight(), this.density());
+  }
+
+  /**
+   * 用服务端元数据里的视频尺寸（`MediaStreams[].Width/Height`）预置画面比例。
+   *
+   * 为什么不用"等 AVPlayer prepared 后再取 `avPlayer.width/height`"：
+   * 那时 surface 已经被 AVPlayer 绑定，此时再改 XComponent 尺寸会触发 surface 重建，
+   * 实测导致硬解播放报错并回退软解。**先知道尺寸 → 一次就把视频面摆对**才是正解；
+   * prepared 后读到的尺寸只在"和元数据不一致"时用于纠正（见 createAvPlayer）。
+   */
+  private applyVideoSizeFromStreams(): void {
+    for (let i: number = 0; i < this.mediaStreams.length; i++) {
+      const stream: ESObject = this.mediaStreams[i] as ESObject;
+      const type: string = JsonUtil.getString(stream, 'Type', '').toLowerCase();
+      if (type !== 'video') {
+        continue;
+      }
+      const w: number = JsonUtil.getNumber(stream, 'Width', 0);
+      const h: number = JsonUtil.getNumber(stream, 'Height', 0);
+      if (w > 0 && h > 0) {
+        this.videoWidthPx = w;
+        this.videoHeightPx = h;
+        this.appendProbeFile('player_state.txt', `aspectFromStreams ${w}x${h}\n`);
+        return;
+      }
+    }
+  }
+
+  /** 视频面的宽度（vp）：按比例算出来，而不是永远铺满整屏 */
+  private videoAreaWidth(): number {
+    return this.aspectBox().width;
+  }
+
+  private videoAreaHeight(): number {
+    return this.aspectBox().height;
+  }
+
+  /** 比例模式对应的软解渲染模式数字（与原生 ScaleMode 顺序一致） */
+  private aspectModeIndex(): number {
+    if (this.aspectMode === 'cover') {
+      return 1;
+    }
+    if (this.aspectMode === 'stretch') {
+      return 2;
+    }
+    if (this.aspectMode === 'original') {
+      return 3;
+    }
+    return 0;
+  }
+
+  /**
+   * 把比例应用到硬解播放器：`videoScaleType`（默认值是"拉伸铺满"，必须显式指定）。
+   *
+   * 注意："适应/原始"靠**视频面本身的宽高比**实现（见 aspectBox），
+   * 这里只是让 AVPlayer 不要在视频面内部再做拉伸/裁剪。
+   */
+  private applyAspectToAvPlayer(): void {
+    if (this.avPlayer === null) {
+      return;
+    }
+    try {
+      this.avPlayer.videoScaleType = this.aspectBox().scaleType === kScaleTypeFitCrop
+        ? media.VideoScaleType.VIDEO_SCALE_TYPE_FIT_CROP
+        : media.VideoScaleType.VIDEO_SCALE_TYPE_FIT;
+    } catch (_e) {
+      // 播放器状态不允许设置时忽略：比例会在下次 prepared 时重新应用
+    }
+  }
+
+  /** 把比例应用到软解渲染器（EGL 侧按模式换算顶点缩放） */
+  private applyAspectToSoftRenderer(): void {
+    if (!this.softPlaying) {
+      return;
+    }
+    JellyfinNative.softPlaySetScale(this.aspectModeIndex());
+  }
+
+  /**
+   * 循环切换比例模式，并把结果反馈给用户。
+   *
+   * 反馈里带"源画面尺寸 · 画幅比"（如 `1920×1080 · 16:9`）：
+   * 用户点「比例」时最需要知道的就是片子本身是什么比例，主流播放器都会标注。
+   */
+  private cycleAspect(): void {
+    this.aspectMode = PlayerAspect.next(this.aspectMode);
+    this.applyAspectToAvPlayer();
+    this.applyAspectToSoftRenderer();
+    const source: string = PlayerAspect.describe(this.videoWidthPx, this.videoHeightPx);
+    this.gestureIcon = 'aspect';
+    this.gestureFeedback = `${PlayerAspect.label(this.aspectMode)}`
+      + (source.length > 0 ? ` · 源 ${source}` : '');
+    this.gestureRatio = -1;
+    this.showFeedback = true;
+    this.dismissFeedback();
+    this.revealControls();
+  }
+
+  // ─────────────────────── 窗口：亮度 / 常亮 ───────────────────────
+
+  /**
+   * 取当前窗口实例（亮度与"保持常亮"都要用它）。
+   * 失败不抛异常：亮度手势会退化成画面调暗，"常亮"则只是不生效。
+   */
+  private async ensureWindow(): Promise<void> {
+    if (this.windowRef !== null) {
+      return;
+    }
+    try {
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      this.windowRef = await window.getLastWindow(ctx);
+    } catch (_e) {
+      this.windowRef = null;
+    }
+  }
+
+  /**
+   * 设置窗口亮度（0–1）。
+   *
+   * 为什么用窗口亮度而不是"盖一层黑"：这是系统级真实亮度调节，调节效果与主流播放器一致
+   * （退出播放页会恢复系统亮度）。若某个平台不支持，则 `windowBrightnessOk` 保持 false，
+   * 画面调暗由 `brightnessSimOpacity()` 的遮罩兜底 —— 用户的手势不会"看起来没反应"。
+   */
+  private applyBrightness(value: number): void {
+    const v: number = Math.max(0.01, Math.min(1, value));
+    this.windowBrightness = v;
+    if (this.windowRef === null) {
+      this.ensureWindow().then(() => {
+        this.applyBrightness(v);
+      });
+      return;
+    }
+    this.windowRef.setWindowBrightness(v).then(() => {
+      // 首次成功即认为本平台支持窗口亮度（后续不再叠加模拟遮罩）
+      this.windowBrightnessOk = true;
+    }).catch((_err: Error) => {
+      this.windowBrightnessOk = false;
+    });
+  }
+
+  /** 不支持窗口亮度时的兜底遮罩透明度：亮度越低，黑遮罩越重（最高 0.7） */
+  private brightnessSimOpacity(): number {
+    if (this.windowBrightnessOk || this.windowBrightness >= 0.999) {
+      return 0;
+    }
+    return Math.max(0, Math.min(0.7, (1 - this.windowBrightness) * 0.85));
+  }
+
+  /** 播放期间保持屏幕常亮（主流播放器的标配行为）；离开播放页恢复系统默认 */
+  private applyKeepScreenOn(on: boolean): void {
+    if (on === this.keepScreenOnApplied) {
+      return;
+    }
+    if (this.windowRef === null) {
+      this.ensureWindow().then(() => {
+        this.applyKeepScreenOn(on);
+      });
+      return;
+    }
+    this.windowRef.setWindowKeepScreenOn(on).then(() => {
+      this.keepScreenOnApplied = on;
+    }).catch((_err: Error) => {
+      // 常亮失败不影响播放，只是不生效
+    });
+  }
+
+  // ─────────────────────── 点击 / 双击 / 快进 ───────────────────────
+
+  /**
+   * 一次"抬手"到达：判定单击（显隐控制条）还是双击（两侧快进/快退）。
+   *
+   * 主流播放器（Infuse/iina/B站）都是这套手势：单击唤出控件、双击左右两侧 ±10s。
+   * 单击必须**延后**执行，否则双击时控制条会闪一下；双击会取消待执行的单击。
+   */
+  private handleTapUp(x: number): void {
+    const now: number = Date.now();
+    const isDoubleTap: boolean = (now - this.lastTapUpAt) < kDoubleTapMs
+      && Math.abs(x - this.lastTapX) < this.getScreenWidth() / 3;
+    if (isDoubleTap) {
+      if (this.singleTapTimerId >= 0) {
+        clearTimeout(this.singleTapTimerId);
+        this.singleTapTimerId = -1;
+      }
+      const forward: boolean = x >= this.getScreenWidth() / 2;
+      // 探针：把"被判成双击"这件事写下来 —— 单击/双击是同一块区域上的两个手势，
+      // 只看位置变化无法区分"没识别成双击"与"识别了但跳转失败"。
+      this.appendProbeFile('player_gesture.txt',
+        `doubleTap forward=${forward ? 1 : 0} x=${Math.round(x)}\n`);
+      this.showSeekRipple(forward);
+      this.skipBy(forward ? kSkipStepMs : -kSkipStepMs);
+      // 双击后不再把第二次抬手当成新一轮单击的起点
+      this.lastTapUpAt = 0;
+      return;
+    }
+    this.lastTapUpAt = now;
+    this.lastTapX = x;
+    if (this.singleTapTimerId >= 0) {
+      clearTimeout(this.singleTapTimerId);
+    }
+    this.singleTapTimerId = setTimeout(() => {
+      this.singleTapTimerId = -1;
+      this.onSingleTap();
+    }, kSingleTapDelayMs);
+  }
+
+  /** 单击：锁定态下解锁；否则显隐控制条 */
+  private onSingleTap(): void {
+    if (this.controlsLocked) {
+      this.unlockByUser();
+      return;
+    }
+    if (this.showControls) {
+      this.showControls = false;
+    } else {
+      this.revealControls();
+    }
+  }
+
+  /**
+   * 双击两侧的反馈浮层：半透明圆 + `±10 秒` 提示，620ms 内渐隐。
+   *
+   * 为什么要有动画：双击快进如果只有时间在跳，用户会怀疑"是不是点到了"；
+   * 主流播放器都会给出一个短促的圆形反馈（Infuse 的左右圆形涟漪）。
+   */
+  private showSeekRipple(forward: boolean): void {
+    this.rippleSide = forward ? 'forward' : 'backward';
+    this.rippleOpacity = 1;
+    this.rippleScale = 0.7;
+    animateTo({ duration: kRippleMs, curve: Curve.EaseOut }, () => {
+      this.rippleOpacity = 0;
+      this.rippleScale = 1.15;
+    });
+    if (this.rippleTimerId >= 0) {
+      clearTimeout(this.rippleTimerId);
+    }
+    this.rippleTimerId = setTimeout(() => {
+      this.rippleSide = '';
+      this.rippleTimerId = -1;
+    }, kRippleMs);
+  }
+
+  /**
+   * 相对跳转（±步长），硬解与软解两条路径都支持。
+   *
+   * 修复：此前所有 seek 都只操作 `avPlayer`，于是**软解播放时按 ±10s 没有任何反应**。
+   */
+  private skipBy(deltaMs: number): void {
+    // 时长未知时（尚未 prepared）只保证不小于 0，不做上限裁剪
+    let target: number = Math.max(0, this.positionMs + deltaMs);
+    if (this.durationMs > 0) {
+      target = Math.min(target, this.durationMs);
+    }
+    this.seekTo(target);
+    this.gestureIcon = 'seek';
+    this.lastSeekForward = deltaMs >= 0;
+    this.gestureFeedback = `${deltaMs >= 0 ? '+' : '-'}${Math.round(Math.abs(deltaMs) / 1000)} 秒`;
+    this.gestureRatio = this.durationMs > 0 ? target / this.durationMs : -1;
+    this.showFeedback = true;
+    this.dismissFeedback();
+    this.revealControls();
   }
 
   private dismissFeedback(): void {
@@ -379,30 +784,48 @@ struct PlayerPage {
       return;
     }
     this.softPlaying = true;
+    this.softPaused = false;
     this.softLastFrameIndex = 0;
     this.softPullStartedAt = 0;
     const renderReady: boolean = JsonUtil.getBoolean(data, 'renderReady', false);
     const renderError: string = JsonUtil.getString(data, 'renderError', '');
+    // 画面尺寸/时长取自软解会话（"视频比例"与进度条在软解路径上同样要正确工作）
+    const softW: number = JsonUtil.getNumber(data, 'width', 0);
+    const softH: number = JsonUtil.getNumber(data, 'height', 0);
+    const softDurationSec: number = JsonUtil.getNumber(data, 'durationSec', 0);
+    if (softW > 0 && softH > 0) {
+      this.videoWidthPx = softW;
+      this.videoHeightPx = softH;
+    }
+    if (softDurationSec > 0) {
+      this.durationMs = Math.round(softDurationSec * 1000);
+    }
     this.softStatus = `软解中：${JsonUtil.getString(data, 'videoCodec', '?')} `
-      + `${JsonUtil.getNumber(data, 'width', 0)}x${JsonUtil.getNumber(data, 'height', 0)}`
+      + `${softW}x${softH}`
       + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
       + (renderError.length > 0 ? `（${renderError}）` : '');
-    // 续播支持：如果传入了起始位置，seek 到该位置
+    // 画面比例：软解由 EglRenderer 按模式换算顶点缩放（硬解走 videoScaleType）
+    this.applyAspectToSoftRenderer();
+    // 续播支持：如果传入了起始位置，seek 到该位置（原生侧排队，首帧时生效）
     if (this.startPositionMs > 1000) {
       const seekSec: number = this.startPositionMs / 1000;
       const seekRaw: string = JellyfinNative.softPlaySeek(seekSec);
       const seekResult: NativeResult = JellyfinNative.parseResult(seekRaw);
       if (seekResult.ok && seekResult.data !== null) {
-        const seekOk: boolean = JsonUtil.getBoolean(seekResult.data as ESObject, 'ok', false);
-        if (seekOk) {
+        const seekQueued: boolean = JsonUtil.getBoolean(seekResult.data as ESObject, 'ok', false);
+        if (seekQueued) {
           this.softPositionMs = this.startPositionMs;
-          this.softDiag = `已续播到 ${this.formatTime(this.startPositionMs)}`;
+          this.softSeekTargetMs = this.startPositionMs;
+          this.softSeekHoldUntil = Date.now() + 4000;
+          this.softDiag = `续播到 ${this.formatTime(this.startPositionMs)}（首帧生效）`;
         } else {
           this.softDiag = `续播 seek 失败：${JsonUtil.getString(seekResult.data as ESObject, 'error', '')}`;
         }
       }
     }
     this.startSoftTimer();
+    // 软解播放期间同样保持屏幕常亮（与硬解路径一致）
+    this.applyKeepScreenOn(true);
     // 启动即自检（清屏为红并回读）：把"渲染目标是否可用"的判定一次性落到 softDiag，
     // 不依赖再点一次按钮（避免自动化/人工都容易错过的时序）
     const selfRaw: string = JellyfinNative.softPlaySelfTest();
@@ -533,7 +956,30 @@ struct PlayerPage {
         ? JsonUtil.getString(renderResult.data as ESObject, 'renderError', '') : '';
       // 软解播放的进度上报（节流）：此前软解只出画面、不向服务端报告进度，
       // 导致"继续观看"位置、多端同步都不生效。按 5 秒节流，与硬解路径一致。
-      this.softPositionMs = Math.floor(pts * 1000);
+      //
+      // ── 排队的 seek 结果 ────────────────────────────────────────────────
+      // seek 在原生侧排队、由本帧的拉取顺带执行（避免 UI 线程做同步 HTTP），
+      // 结果就挂在这一帧上：跳转是否真的生效，此前从界面完全看不出来。
+      if (JsonUtil.getBoolean(frame, 'seekApplied', false)) {
+        const seekedTo: number = JsonUtil.getNumber(frame, 'seekedToSec', 0);
+        this.appendProbeFile('player_soft.txt', `seekApplied to=${seekedTo.toFixed(1)}\n`);
+        this.softDiag = `已跳转到 ${this.formatTime(seekedTo * 1000)}`;
+      }
+      const seekError: string = JsonUtil.getString(frame, 'seekError', '');
+      if (seekError.length > 0) {
+        this.appendProbeFile('player_soft.txt', `seekFailed ${seekError}\n`);
+        this.softStatus = `跳转失败：${seekError}`;
+      }
+      // 跳转保持窗口：seek 刚发出后的若干帧仍来自旧位置，若照单回写，进度条会先弹回原处
+      // 再跳到目标（观感像"没跳成功"）。保持期内只显示目标位置，直到画面追上目标。
+      const ptsMs: number = Math.floor(pts * 1000);
+      const holding: boolean = this.softSeekTargetMs >= 0
+        && Date.now() < this.softSeekHoldUntil
+        && Math.abs(ptsMs - this.softSeekTargetMs) > 2000;
+      if (!holding) {
+        this.softPositionMs = ptsMs;
+        this.softSeekTargetMs = -1;
+      }
       this.softLastFrameIndex = idx;
       this.reportSoftProgressThrottled(pts);
       this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
@@ -1455,35 +1901,68 @@ struct PlayerPage {
     if (this.controlsLocked) {
       return;
     }
-    this.seekBaseMs = this.positionMs;
-    this.seekDragMs = 0;
-    this.seekLastX = x;
-    this.brightnessBase = 0.5;
-    this.brightnessLastY = y;
-    this.volumeBase = this.volume;
-    this.volumeLastY = y;
-    this.touchDownX = x;
-    this.touchDownY = y;
-    this.gestureAxis = '';
-    this.startLongPressBoost();
     // 探针：记录原生触摸事件到达，便于设备验证
     this.appendProbeFile('player_gesture.txt', `nativeDown x=${x.toFixed(1)} y=${y.toFixed(1)}\n`);
+    this.onGestureDown(x, y);
   }
 
   private handleNativeTouchMove(x: number, y: number): void {
     if (this.controlsLocked) {
       return;
     }
+    this.onGestureMove(x, y);
+  }
+
+  private handleNativeTouchUp(x: number, y: number): void {
+    if (this.controlsLocked) {
+      return;
+    }
+    this.appendProbeFile('player_gesture.txt',
+      `nativeGesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
+      + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
+    this.onGestureUp(x, y);
+  }
+
+  // ─────────────── 手势状态机（两条输入通道共用） ───────────────
+  //
+  // 为什么合并：页面里同时存在两条触摸来源 —— ArkUI 手势层（透明覆盖层的 onTouch）
+  // 与原生 XComponent 回调的兜底轮询（见 startTouchPollTimer）。两条通道各自实现一套手势，
+  // 任何手势改动都得改两处，且两边行为很容易不一致（"单击/双击"这类新判定
+  // 就只能挂在其中一条上）。现在两边都调用同一套 `onGesture*`，行为必然一致。
+
+  /** 按下：记录基准位置，开始长按加速计时 */
+  private onGestureDown(x: number, y: number): void {
+    this.seekBaseMs = this.positionMs;
+    this.seekDragMs = 0;
+    this.seekLastX = x;
+    this.brightnessBase = this.windowBrightness;
+    this.brightnessLastY = y;
+    this.volumeBase = this.volume;
+    this.volumeLastY = y;
+    // 手势方向判定用"相对按下点的累计位移"，不用单次 Move 的位移。
+    //
+    // 为什么必须这样（设备实测的缺陷）：注入/慢速滑动时每个 Move 事件的位移常常只有 1–5px，
+    // 原来"单次位移 > 5px"的阈值会把整段慢速滑动全部过滤掉 —— 实测 500ms 滑完 500px
+    // 时 seekDeltaMs 恒为 0（完全不响应），100ms 滑同样距离才识别。
+    this.touchDownX = x;
+    this.touchDownY = y;
+    this.gestureAxis = '';
+    // 长按 2× 快进：按住 600ms 未松开即临时加速，松手恢复原速
+    this.startLongPressBoost();
+  }
+
+  /** 移动：先定方向（水平=seek，垂直=亮度/音量），再按累计位移换算幅度 */
+  private onGestureMove(x: number, y: number): void {
     const totalX: number = x - this.touchDownX;
     const totalY: number = y - this.touchDownY;
     if (this.gestureAxis.length === 0) {
-      if (Math.abs(totalX) > 12 || Math.abs(totalY) > 12) {
+      if (Math.abs(totalX) > kTapSlopVp || Math.abs(totalY) > kTapSlopVp) {
         this.gestureAxis = Math.abs(totalX) >= Math.abs(totalY) ? 'seek' : 'level';
       }
     }
-    const screenWidth: number = this.getScreenWidth();
-    const isLeftSide: boolean = x < screenWidth / 2;
+    const isLeftSide: boolean = x < this.getScreenWidth() / 2;
     if (this.gestureAxis === 'seek') {
+      // 水平滑动 → seek：幅度按"按下点起的累计位移"算，与事件密度无关
       this.seekLastX = x;
       this.seekDragMs = totalX * 2;
       const total: number = this.durationMs > 0 ? this.durationMs : 1;
@@ -1496,16 +1975,21 @@ struct PlayerPage {
       this.gestureIcon = 'seek';
       this.gestureRatio = total > 0 ? clamped / total : 0;
       this.showFeedback = true;
-    } else if (this.gestureAxis === 'level' && Math.abs(totalY) > 12) {
+    } else if (this.gestureAxis === 'level' && Math.abs(totalY) > kTapSlopVp) {
       if (isLeftSide) {
-        const newBrightness: number = Math.max(0, Math.min(1, this.brightnessBase - totalY / 500));
+        // 亮度：向上增加（窗口级真实亮度，见 applyBrightness）
+        const newBrightness: number =
+          Math.max(0.01, Math.min(1, this.brightnessBase - totalY / kLevelGestureRange));
+        this.applyBrightness(newBrightness);
         this.gestureFeedback = `${Math.round(newBrightness * 100)}%`;
         this.gestureIcon = 'brightness';
         this.gestureRatio = newBrightness;
         this.showFeedback = true;
         this.brightnessLastY = y;
       } else {
-        const newVolume: number = Math.max(0, Math.min(1, this.volumeBase - totalY / 500));
+        // 音量：向上增加
+        const newVolume: number =
+          Math.max(0, Math.min(1, this.volumeBase - totalY / kLevelGestureRange));
         this.volume = newVolume;
         if (this.avPlayer !== null) {
           this.avPlayer.setVolume(newVolume);
@@ -1519,20 +2003,68 @@ struct PlayerPage {
     }
   }
 
-  private handleNativeTouchUp(x: number, y: number): void {
-    if (this.controlsLocked) {
-      return;
+  /** 抬手：滑动落地（seek）+ 点击判定（单击显隐 / 双击 ±10s） */
+  private onGestureUp(x: number, y: number): void {
+    const moved: number = Math.max(Math.abs(x - this.touchDownX), Math.abs(y - this.touchDownY));
+    const isTap: boolean = this.gestureAxis.length === 0 && moved < kTapSlopVp;
+    if (this.gestureAxis === 'seek' && Math.abs(this.seekDragMs) > 100) {
+      // 拖动进度：抬手才真正落地（拖动过程中只更新界面，避免每一帧都发 seek 请求）
+      this.seekTo(this.positionMs);
+      this.appendProbeFile('player_gesture.txt',
+        `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
+        + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
     }
-    if (Math.abs(this.seekDragMs) > 100 && this.avPlayer !== null) {
-      this.avPlayer.seek(this.positionMs);
-    }
+    // 松手结束长按加速（无论是否已进入加速态）
     this.stopLongPressBoost();
-    this.appendProbeFile('player_gesture.txt',
-      `nativeGesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
-      + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
     this.seekDragMs = 0;
-    this.dismissFeedback();
+    this.gestureAxis = '';
+    if (this.showFeedback) {
+      this.dismissFeedback();
+    }
+    if (isTap) {
+      this.handleTapUp(x);
+    }
   }
+
+  /**
+   * 统一的定位入口（硬解 + 软解）。
+   *
+   * 为什么必须统一：此前所有 seek 都只调 `avPlayer.seek()`，而软解播放时 `avPlayer` 已经停掉，
+   * 于是软解下"拖动进度条 / 点 ±10s"完全没有反应（画面不动、进度也不上报）。
+   * 软解会话本身支持 `av_seek_frame`（见 softPlaySeek），这里接上即可。
+   */
+  private seekTo(ms: number): void {
+    let target: number = Math.max(0, Math.round(ms));
+    if (this.durationMs > 0) {
+      target = Math.min(target, this.durationMs);
+    }
+    if (this.softPlaying) {
+      // 软解的 seek 是**排队**的：原生侧只记录目标，真正的 av_seek_frame 由下一次拉帧
+      // 在解码线程执行（UI 线程不做同步 HTTP；也避免与解码线程抢 AVFormatContext）。
+      const raw: string = JellyfinNative.softPlaySeek(target / 1000);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      const queued: boolean = result.ok && result.data !== null
+        && JsonUtil.getBoolean(result.data as ESObject, 'ok', false);
+      if (queued) {
+        this.softPositionMs = target;
+        this.softSeekTargetMs = target;
+        // 保持窗口：等画面追上目标（最多 4 秒），期间不做进度回写
+        this.softSeekHoldUntil = Date.now() + 4000;
+        // 暂停状态下拉帧定时器已停：补拉一帧，让排队的 seek 立刻执行并显示出目标画面
+        if (this.softPaused) {
+          this.pullSoftFrame();
+        }
+      }
+      this.appendProbeFile('player_gesture.txt',
+        `seekTo target=${Math.round(target)} soft=1 queued=${queued ? 1 : 0}\n`);
+    } else if (this.avPlayer !== null) {
+      this.avPlayer.seek(target);
+      this.appendProbeFile('player_gesture.txt',
+        `seekTo target=${Math.round(target)} soft=0 queued=0\n`);
+    }
+    this.positionMs = target;
+  }
+
 
   private stopLongPressBoost(): void {
     this.cancelLongPressTimer();
@@ -1568,6 +2100,7 @@ struct PlayerPage {
     this.stopSoftTimer();
     JellyfinNative.softPlayClose();
     this.softPlaying = false;
+    this.softPaused = false;
     // 清掉看门狗状态：否则上一次卡死的起始时刻会留到下一次播放，导致新的拉帧被立刻误判为卡死
     this.softPulling = false;
     this.softPullStartedAt = 0;
@@ -1614,6 +2147,7 @@ struct PlayerPage {
     // 观看记录与"继续观看"随之被污染。
     this.softStopAvPlayer();
     this.stopSoftPlay();
+    this.preparePendingSurface = false;
     try {
       this.avPlayer = await media.createAVPlayer();
       this.avPlayer.on('stateChange', (state: string) => {
@@ -1622,9 +2156,32 @@ struct PlayerPage {
           // ⚠️ 关键修复：AVPlayer 状态机为 idle →(设置 url)→ initialized →prepare()→ preparing → prepared。
           // 原实现只设置 url 就等待 'prepared'，从不调用 prepare()，播放器会永远停在 initialized，
           // 界面一直显示"加载播放器..."（设备实测：H.264/MP4 也一样起不来）。
-          this.avPlayer?.prepare();
+          //
+          // 另一个关键点：`surfaceId` 只能在 initialized 及之后设置。这里先绑视频面再 prepare；
+          // 若此刻 surface 还没就绪（onLoad 未到），把 prepare 交给 onLoad 触发。
+          this.bindSurfaceIfReady();
+          if (this.surfaceId.length > 0) {
+            this.avPlayer?.prepare();
+          } else {
+            this.preparePendingSurface = true;
+            this.appendProbeFile('player_state.txt', 'prepareWaitSurface\n');
+          }
         } else if (state === 'prepared') {
           this.durationMs = (this.avPlayer?.duration ?? 0);
+          // 视频真实尺寸：只在**与元数据不一致**时才改视频面尺寸（避免播放中重建 surface）。
+          const vw: number = this.avPlayer?.width ?? 0;
+          const vh: number = this.avPlayer?.height ?? 0;
+          if (vw > 0 && vh > 0 && (vw !== this.videoWidthPx || vh !== this.videoHeightPx)) {
+            this.appendProbeFile('player_state.txt',
+              `aspectFromPlayer ${vw}x${vh} (meta ${this.videoWidthPx}x${this.videoHeightPx})\n`);
+            this.videoWidthPx = vw;
+            this.videoHeightPx = vh;
+          }
+          this.applyAspectToAvPlayer();
+          this.appendProbeFile('player_state.txt',
+            `avPrepared ${vw}x${vh} mode=${this.aspectMode}\n`);
+          // 播放期间保持屏幕常亮（看完一集不该因为息屏中断）
+          this.applyKeepScreenOn(true);
           this.status = UiState.SUCCESS;
           this.avPlayer?.play();
           this.isPlaying = true;
@@ -1653,8 +2210,10 @@ struct PlayerPage {
           this.handlePlaybackFailure('播放出错');
         }
       });
-      this.avPlayer.on('error', (_err: Error) => {
-        this.handlePlaybackFailure('播放器错误');
+      this.avPlayer.on('error', (err: BusinessError) => {
+        // 带错误码：只有文案时无法区分"编码不被支持"(801) 与"状态/参数不合法"(5400xxx)，
+        // 也就无法判断是平台能力问题还是我们自己的调用问题。
+        this.handlePlaybackFailure(`播放器错误(code=${err.code} ${err.message})`);
       });
       // 外挂字幕：播放器解析字幕文件后把"当前该显示哪句"推给应用，由应用渲染
       // （`SubtitleInfo { startTime, duration, text }`；文本型字幕才有内容）
@@ -1662,14 +2221,38 @@ struct PlayerPage {
         const text: string = info.text !== undefined ? info.text : '';
         this.subtitleText = text;
       });
-      // 如果 surfaceId 已经从 XComponent.onLoad 获取到，立即绑定
-      if (this.surfaceId.length > 0) {
-        this.avPlayer.surfaceId = this.surfaceId;
-      }
-      // 设置 URL 触发 AVPlayer 加载视频流
+      // 视频面**不在 idle 设置**：AVPlayer 的状态机规定 `surfaceId` 只能在 `initialized`
+      // 及之后设置，在 `idle` 里设置会直接报
+      // `5400102 Operate Not Permit: the attribute(SurfaceID) can only be set in the initialized state`
+      // → 播放器进入错误态 → 被"自动回退软解"接住（设备实测：H.264 High 8-bit 1080p MKV
+      // 这种本该硬解的片子也只能走软解，帧率被压到 ~10fps）。
+      // 现在的顺序是：先设 url（idle → initialized）→ 在 stateChange 里绑定 surface → prepare()。
       this.avPlayer.url = url;
     } catch (_err) {
       this.handlePlaybackFailure('初始化播放器失败');
+    }
+  }
+
+  /**
+   * 绑定视频面（只在合法的播放器状态下执行）。
+   *
+   * 为什么要这个守卫：`surfaceId` 的合法赋值时机是 `initialized` / `prepared` / `playing` /
+   * `paused`；在 `idle` 赋值会抛 5400102 并把播放器打成错误态（见 createAvPlayer 的说明）。
+   * XComponent 的 onLoad 与 AVPlayer 的 stateChange 谁先到并不确定，所以两边都调用它，
+   * 由状态决定这一刻能不能绑。
+   */
+  private bindSurfaceIfReady(): void {
+    if (this.avPlayer === null || this.surfaceId.length === 0) {
+      return;
+    }
+    const st: string = this.avPlayer.state;
+    if (st === 'initialized' || st === 'prepared' || st === 'playing' || st === 'paused'
+      || st === 'completed') {
+      try {
+        this.avPlayer.surfaceId = this.surfaceId;
+      } catch (_e) {
+        // 状态恰好又变了：忽略，下一次事件会再试
+      }
     }
   }
 
@@ -1683,6 +2266,10 @@ struct PlayerPage {
   private handlePlaybackFailure(message: string): void {
     this.status = UiState.ERROR;
     this.errorMsg = message;
+    // 探针：把硬解失败的事实与文案记下来。此前只能从"自动回退软解"这一现象倒推，
+    // 无法区分"硬解不支持该编码"与"我们自己的某一步把它弄挂了"。
+    this.appendProbeFile('player_soft.txt',
+      `hardFail ${message} state=${this.stateText} url=${this.playUrl.length > 0 ? 'yes' : 'no'}\n`);
     // 允许"重试"重新应用续播位置：重试会重建播放器（走一次 prepared），
     // 若不再应用一次，重试成功后就变成从头播放（设备实测踩到：首次拉流失败 → 重试 → 回到 0:00）。
     this.resumeApplied = false;
@@ -1717,6 +2304,12 @@ struct PlayerPage {
   }
 
   private refreshState(): void {
+    if (this.softPlaying) {
+      // 软解路径的进度来自解码帧的时间戳（见 pullSoftFrame），
+      // 此前这里只读 avPlayer（软解时它已停掉），于是**软解播放时进度条一直不走**。
+      this.positionMs = this.softPositionMs;
+      return;
+    }
     if (this.avPlayer !== null) {
       this.positionMs = this.avPlayer.currentTime;
       this.durationMs = this.avPlayer.duration;
@@ -1724,7 +2317,33 @@ struct PlayerPage {
     }
   }
 
+  /**
+   * 播放/暂停。
+   *
+   * 覆盖三条路径：软解播放（暂停=停止拉帧）、播放结束（重播要先回到起点）、硬解播放。
+   * 暂停/恢复都补报一次播放进度，保证服务端的"继续观看"与多端同步不掉队。
+   */
   private onPlayPause(): void {
+    if (this.softPlaying) {
+      if (this.softPaused) {
+        this.softPaused = false;
+        this.isPlaying = true;
+        this.startSoftTimer();
+        if (this.itemId.length > 0) {
+          JellyfinNative.reportPlaybackProgress(this.itemId, this.softPositionMs * 10000, false);
+        }
+        this.scheduleHideControls();
+      } else {
+        this.softPaused = true;
+        this.isPlaying = false;
+        this.stopSoftTimer();
+        if (this.itemId.length > 0) {
+          JellyfinNative.reportPlaybackProgress(this.itemId, this.softPositionMs * 10000, true);
+        }
+        this.showControls = true;
+      }
+      return;
+    }
     if (this.avPlayer === null) {
       return;
     }
@@ -1736,6 +2355,10 @@ struct PlayerPage {
       }
       this.showControls = true;
     } else {
+      // 播放结束后再点播放键：先回到起点，否则会立刻又"结束"一次
+      if (this.isCompleted()) {
+        this.seekTo(0);
+      }
       this.avPlayer.play();
       this.isPlaying = true;
       if (this.itemId.length > 0) {
@@ -1744,17 +2367,6 @@ struct PlayerPage {
       this.scheduleHideControls();
     }
     this.refreshState();
-  }
-
-  private onSeek(deltaMs: number): void {
-    if (this.avPlayer === null) {
-      return;
-    }
-    const next: number = Math.max(0, this.positionMs + deltaMs);
-    this.avPlayer.seek(next);
-    this.positionMs = next;
-    this.refreshState();
-    this.revealControls();
   }
 
   private cycleSpeed(): void {
@@ -1848,7 +2460,7 @@ struct PlayerPage {
             router.back();
           }
         })
-        Column({ space: 2 }) {
+        Column({ space: 3 }) {
           Text(this.title)
             .fontSize(ThemeConstants.TITLE_MEDIUM)
             .fontWeight(FontWeight.Medium)
@@ -1859,9 +2471,12 @@ struct PlayerPage {
             Text(this.typeLabel)
               .fontSize(ThemeConstants.LABEL_SMALL)
               .fontColor(this.colors().onOverlayMuted)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
         .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
         .margin({ left: 8 })
         AppIconButton({
           icon: $r('sys.symbol.lock'),
@@ -1889,40 +2504,16 @@ struct PlayerPage {
         })
       }
       .width('100%')
+      .alignItems(VerticalAlign.Center)
       .padding({ left: 12, right: 12, top: 12, bottom: 4 })
-      if (this.showVolumeBar) {
-        Row() {
-          SymbolGlyph($r('sys.symbol.speaker_wave_2'))
-            .fontSize(ThemeConstants.TITLE_MEDIUM)
-            .fontColor([this.colors().onOverlay])
-          Slider({
-            value: this.volume,
-            min: 0,
-            max: 1,
-            step: 0.01,
-            style: SliderStyle.OutSet
-          })
-            .width(160)
-            .selectedColor(this.colors().brandPrimary)
-            .trackColor(this.colors().overlayControl)
-            .trackThickness(4)
-            .blockSize({ width: 12, height: 12 })
-            .onChange((value: number) => {
-              this.volume = value;
-            })
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Center)
-        .padding({ bottom: 8 })
-      }
     }
     .width('100%')
     // 顶部渐变遮罩：视频画面明暗不定，纯文字/图标容易在浅色画面上"消失"；
     // 与底部控制条同款 scrim 保证标题与按钮始终可读（主流播放器的通用做法）。
-    .padding({ top: 8, bottom: 12 })
+    .padding({ top: 8, bottom: 16 })
     .linearGradient({
       angle: 180,
-      colors: [['#00000000', 0.0], [this.colors().scrimHeavy, 1.0]]
+      colors: [[this.colors().scrimHeavy, 0.0], ['#00000000', 1.0]]
     })
   }
 
@@ -1937,14 +2528,14 @@ struct PlayerPage {
           .textAlign(TextAlign.Center)
       }
 
-      // 进度条 + 时间：同一行呈现（已播时间在左、总时长在右），比"进度条独占一行 + 时间另起一行"
-      // 更紧凑，也让时间与进度在视觉上直接对应；倍速不再重复显示文字（下方已有倍速 chip）。
-      Row({ space: 12 }) {
+      // 进度条 + 时间：已播时间在左、右侧可在"总时长 / 剩余时长"之间切换（点一下切换）。
+      // 主流播放器（Infuse/iina）都是这个形态：时间紧贴进度条两端，视觉上一一对应。
+      Row({ space: 10 }) {
         Text(this.formatTime(this.positionMs))
           .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlay)
           .fontWeight(FontWeight.Medium)
-          .width(72)
+          .width(58)
           .textAlign(TextAlign.Start)
         Slider({
           value: this.positionMs,
@@ -1955,126 +2546,231 @@ struct PlayerPage {
         })
           .layoutWeight(1)
           .selectedColor(this.colors().brandPrimary)
+          // 轨道用半透明白：视频画面明暗不定，纯灰轨道在亮画面上会"看不见"
           .trackColor(this.colors().overlayControl)
-          .trackThickness(4)
-          .blockSize({ width: 14, height: 14 })
+          .trackThickness(5)
+          .blockSize({ width: 16, height: 16 })
           .blockColor(this.colors().onOverlay)
           .onChange((value: number) => {
-            const v: number = Math.floor(value);
-            if (this.avPlayer !== null) {
-              this.avPlayer.seek(v);
-            }
-            this.positionMs = v;
+            // 统一走 seekTo：硬解与软解（软解此前拖动进度条完全没有反应）都能定位
+            this.seekTo(Math.floor(value));
             this.revealControls();
           })
-        Text(this.durationMs > 0 ? this.formatTime(this.durationMs) : '--:--')
+        Text(this.rightTimeLabel())
           .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
-          .width(72)
+          .width(64)
           .textAlign(TextAlign.End)
+          .onClick(() => {
+            this.showRemaining = !this.showRemaining;
+            this.revealControls();
+          })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
 
-      // 控制按钮行
-      Row({ space: 12 }) {
-        Button('-10s')
-          .layoutWeight(1)
-          .backgroundColor(this.colors().overlayControl)
-          .fontColor(this.colors().onOverlay)
-          // 触达高度 40 → 48vp：常用操作应满足"一指可点"的最小触达区
-          // （鸿蒙触控最佳实践建议 ≥48vp），行间距 8 → 12 同时避免误触相邻按钮
-          .height(48)
-          .onClick(() => {
-            this.onSeek(-10000);
-          })
-        Button({ type: ButtonType.Circle, stateEffect: false }) {
-          SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause') : $r('sys.symbol.play'))
-            .fontSize(ThemeConstants.TITLE_XLARGE)
-            .fontColor([this.colors().onBrand])
-        }
-          .layoutWeight(1)
-          .backgroundColor(this.colors().brandPrimary)
-          .height(ThemeConstants.BUTTON_HEIGHT)
-          .borderRadius(ThemeConstants.BUTTON_HEIGHT / 2)
-          .stateStyles({
-            pressed: {
-              .backgroundColor(this.colors().brandPrimaryPressed)
-            }
-          })
-          .onClick(() => {
-            this.onPlayPause();
-          })
-        Button('+10s')
-          .layoutWeight(1)
-          .backgroundColor(this.colors().overlayControl)
-          .fontColor(this.colors().onOverlay)
-          // 与 -10s 保持一致（设备实测两者曾为 162px vs 135px，左右高度不齐）
-          .height(48)
-          .onClick(() => {
-            this.onSeek(10000);
-          })
-      }
-      .width('100%')
-
-      // 次级操作行：把"倍速 / 软解 / 存帧"这类非播放主操作从主控制行移出。
-      // 主行只保留 -10s / 播放暂停 / +10s，播放意图更聚焦；这也是主流播放器的分组方式
-      // （主操作居中、次级操作单独一排，避免一排挤满 chip 导致主次不分）。
-      // 次级操作行：与主控制行统一为 12vp 间距（本轮前为 8vp，两行间距不一致）
-      Row({ space: 12 }) {
-        ChipButton({
-          label: `${this.playbackSpeed}x`,
-          selected: this.playbackSpeed !== 1,
-          // 播放页单手操作、误触代价高，触达高度按 48vp 标准放大（全局 token 仍为 34vp）
-          heightOverride: 48,
-          onTap: () => {
-            this.cycleSpeed();
-          }
-        })
-        // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
-        ChipButton({
-          label: '软解',
-          selected: this.softPlaying,
-          heightOverride: 48,
-          onTap: () => {
-            if (this.softPlaying) {
-              this.stopSoftPlay();
-              this.softStatus = '已停止软解';
-            } else {
-              this.startSoftPlay();
-            }
-          }
-        })
-        // 诊断：回读 EGL 渲染缓冲并写成 PNG（验证"确实渲染出来了"，不依赖系统截图是否含 surface）
-        if (this.softPlaying) {
-          ChipButton({
-            label: '存帧',
-            selected: false,
-            heightOverride: 48,
+      // 工具行：图标 + 文字（Infuse 底部工具行的形态）。
+      // 主操作（播放/暂停、±10s）已经搬到画面正中的中央控制簇，这里只放"非播放性质"的开关，
+      // 主次分明；横向可滚动，窄屏/多按钮时不会挤成一条。
+      Scroll() {
+        Row({ space: 10 }) {
+          // 画面比例：适应 / 填充 / 拉伸 / 原始（见 common/PlayerAspect.ets）
+          PlayerToolButton({
+            icon: $r('sys.symbol.aspectratio'),
+            label: PlayerAspect.label(this.aspectMode),
+            selected: this.aspectMode !== 'contain',
             onTap: () => {
-              this.dumpSoftFrame();
+              this.cycleAspect();
             }
           })
-        }
-        // 播放中切换音频/字幕：播放页自己的覆盖层面板（不依赖详情页的 bindSheet）
-        ChipButton({
-          label: '音频/字幕',
-          selected: this.showTrackSheet,
-          heightOverride: 48,
-          onTap: () => {
-            this.openTrackSheet();
+          // 播放中切换音频/字幕：播放页自己的覆盖层面板（不依赖详情页的 bindSheet）
+          PlayerToolButton({
+            icon: $r('sys.symbol.speaker_wave_2'),
+            label: '音频/字幕',
+            selected: this.showTrackSheet,
+            onTap: () => {
+              this.openTrackSheet();
+            }
+          })
+          PlayerToolButton({
+            icon: $r('sys.symbol.video_speed'),
+            label: `${this.playbackSpeed}x`,
+            selected: this.playbackSpeed !== 1,
+            onTap: () => {
+              this.cycleSpeed();
+            }
+          })
+          // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
+          PlayerToolButton({
+            showIcon: false,
+            label: '软解',
+            selected: this.softPlaying,
+            onTap: () => {
+              if (this.softPlaying) {
+                this.stopSoftPlay();
+                this.softStatus = '已停止软解';
+              } else {
+                this.startSoftPlay();
+              }
+            }
+          })
+          // 诊断：回读 EGL 渲染缓冲并写成 PNG（验证"确实渲染出来了"，不依赖系统截图是否含 surface）
+          if (this.softPlaying) {
+            PlayerToolButton({
+              showIcon: false,
+              label: '存帧',
+              selected: false,
+              onTap: () => {
+                this.dumpSoftFrame();
+              }
+            })
           }
-        })
+        }
+        .padding({ left: 2, right: 2 })
       }
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
       .width('100%')
-      .justifyContent(FlexAlign.Center)
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 16, bottom: 24 })
+    // 底部渐变遮罩：角度 180 表示"自上而下"，colors[0] 落在**顶部**，
+    // 因此这里要把透明色放在 0、重色放在 1 —— 画面一侧透明、屏幕底边最重。
+    // （此前 angle 是 0（自下而上）却把透明放在 0，等于把遮罩画反了：底部反而最亮。）
     .linearGradient({
-      angle: 0,
+      angle: 180,
       colors: [['#00000000', 0.0], [this.colors().scrimHeavy, 1.0]]
     })
+  }
+
+  /**
+   * 右侧时间文案：总时长 / 剩余时长（点一下切换）。
+   *
+   * 为什么值得做：看电视剧时用户真正关心的是"还剩多久"，而总时长对进度条本身没有增量信息；
+   * 主流播放器（含 Infuse）都提供这个切换。
+   */
+  private rightTimeLabel(): string {
+    if (this.durationMs <= 0) {
+      return '--:--';
+    }
+    if (this.showRemaining) {
+      return `-${this.formatTime(Math.max(0, this.durationMs - this.positionMs))}`;
+    }
+    return this.formatTime(this.durationMs);
+  }
+
+  /**
+   * 中央控制簇：快退 10 秒 / 播放暂停 / 快进 10 秒，居中悬浮在画面上。
+   *
+   * 为什么把播放主操作放画面正中（Infuse/iina/YouTube 全屏的形态）：
+   * 1. 单手竖屏握持时，屏幕中部是最容易够到、最不容易误触的位置，
+   *    而底部还要放进度条与工具行，主操作挤在底部既拥挤又容易点错；
+   * 2. 主操作（播放/暂停）与次级开关（比例/字幕/倍速）在位置与体量上分开后，
+   *    一眼就能分清"哪个是播放"。
+   */
+  @Builder
+  CenterControls() {
+    Row({ space: 30 }) {
+      AppIconButton({
+        icon: $r('sys.symbol.gobackward_10'),
+        iconSize: 30,
+        buttonSize: 60,
+        backgroundOverride: this.colors().overlayControl,
+        iconColorOverride: this.colors().onOverlay,
+        onTap: () => {
+          this.skipBy(-kSkipStepMs);
+        }
+      })
+      Button({ type: ButtonType.Circle, stateEffect: false }) {
+        SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
+          .fontSize(34)
+          .fontColor([this.colors().onBrand])
+      }
+      .width(76)
+      .height(76)
+      .backgroundColor(this.colors().brandPrimary)
+      .shadow({
+        radius: 16,
+        color: this.colors().buttonShadow,
+        offsetX: 0,
+        offsetY: 6
+      })
+      .stateStyles({
+        pressed: {
+          .backgroundColor(this.colors().brandPrimaryPressed)
+        }
+      })
+      .onClick(() => {
+        this.onPlayPause();
+      })
+      AppIconButton({
+        icon: $r('sys.symbol.goforward_10'),
+        iconSize: 30,
+        buttonSize: 60,
+        backgroundOverride: this.colors().overlayControl,
+        iconColorOverride: this.colors().onOverlay,
+        onTap: () => {
+          this.skipBy(kSkipStepMs);
+        }
+      })
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /**
+   * 双击两侧的快进/快退反馈：半透明圆形涟漪 + `±10 秒`，600ms 渐隐。
+   *
+   * 为什么要有：双击是"盲操作"，如果没有即时反馈，用户无法确认这一下有没有生效
+   * （尤其是快退时画面变化不明显）。
+   */
+  @Builder
+  DoubleTapRipple() {
+    // 左右各占一半：双击左侧的涟漪出现在左半屏中央，右侧同理
+    Row() {
+      Column() {
+        if (this.rippleSide === 'backward') {
+          this.RippleCircle(true)
+        }
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+
+      Column() {
+        if (this.rippleSide === 'forward') {
+          this.RippleCircle(false)
+        }
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+    }
+    .width('100%')
+    .height('100%')
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
+  RippleCircle(backward: boolean) {
+    Column({ space: 6 }) {
+      SymbolGlyph(backward ? $r('sys.symbol.gobackward_10') : $r('sys.symbol.goforward_10'))
+        .fontSize(30)
+        .fontColor([this.colors().onOverlay])
+      Text(backward ? '-10 秒' : '+10 秒')
+        .fontSize(ThemeConstants.META_MEDIUM)
+        .fontColor(this.colors().onOverlay)
+    }
+    .width(96)
+    .height(96)
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor(this.colors().overlayControlStrong)
+    .border({ width: 1, color: this.colors().overlayControl, radius: 48 })
+    .opacity(this.rippleOpacity)
+    .scale({ x: this.rippleScale, y: this.rippleScale })
   }
 
   @Builder
@@ -2190,13 +2886,16 @@ struct PlayerPage {
     this.softDiag = `[${action}] 锁定=${this.controlsLocked ? '是' : '否'} 控件=${this.showControls ? '显示' : '隐藏'}`;
   }
 
-  /** 手势反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
+  /** 手势/比例反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
   private gestureSymbol(): Resource {
     if (this.gestureIcon === 'seek') {
       return this.lastSeekForward ? $r('sys.symbol.chevron_right') : $r('sys.symbol.chevron_left');
     }
     if (this.gestureIcon === 'brightness') {
-      return $r('sys.symbol.bolt');
+      return $r('sys.symbol.sun_max');
+    }
+    if (this.gestureIcon === 'aspect') {
+      return $r('sys.symbol.aspectratio');
     }
     return $r('sys.symbol.speaker_wave_2');
   }
@@ -2232,16 +2931,20 @@ struct PlayerPage {
   }
 
   build() {
-    Stack() {
+    Stack({ alignContent: Alignment.Center }) {
       // XComponent 始终存在：软解时 EGL 直接渲染到它的 surface（不再走 PixelMap 逐帧刷新）
       // 官方 XComponent 原生渲染用法：type=SURFACE + libraryname 指向原生模块，
       // ArkUI 会在 surface 就绪时回调 OH_NativeXComponent_Callback.OnSurfaceCreated(component, window)，
       // 原生侧据此直接拿到 framework 的 window 做 EGL/GLES 渲染（见 native/feature/player/xcomponent_bridge.h）。
+      //
+      // 尺寸由「视频比例」决定（见 common/PlayerAspect.ets）而不是永远铺满：
+      // 系统 AVPlayer 默认的 FIT 是**拉伸铺满**，把 16:9 的片子铺到 20:9 的手机上画面会被拉长；
+      // 把视频面的宽高比算成与画面一致后，视频面之外自然留出黑边，Centered 在 Stack 正中。
       XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE,
         libraryname: 'jellyfin_native', controller: this.surfaceController })
         .id('softVideoArea')
-        .width('100%')
-        .height('100%')
+        .width(this.videoAreaWidth())
+        .height(this.videoAreaHeight())
         .backgroundColor(this.colors().videoBackground)
         .onAreaChange((_oldArea: Area, newArea: Area) => {
           const density: number = display.getDefaultDisplaySync().densityPixels;
@@ -2251,8 +2954,14 @@ struct PlayerPage {
         .onLoad(() => {
           // 关键：surfaceId 必须由 controller 取回；否则 AVPlayer 与软解 EGL 都拿不到视频面
           this.surfaceId = this.surfaceController.getXComponentSurfaceId();
-          if (this.avPlayer !== null && this.surfaceId.length > 0) {
-            this.avPlayer.surfaceId = this.surfaceId;
+          // 绑定必须走状态守卫：AVPlayer 在 idle 状态不接受 surfaceId（5400102）
+          this.bindSurfaceIfReady();
+          // surface 比 url 晚到：此刻播放器已到 initialized，补一次 prepare
+          if (this.preparePendingSurface && this.avPlayer !== null
+            && this.avPlayer.state === 'initialized') {
+            this.preparePendingSurface = false;
+            this.avPlayer.prepare();
+            this.appendProbeFile('player_state.txt', 'prepareAfterSurface\n');
           }
           // surface 一就绪就判定"该设备能否把它当 GL 渲染目标"（清屏为红 + 回读），
           // 结果进常驻 softDiag：打开播放页即可看到结论，无需任何播放/控制条交互
@@ -2263,6 +2972,9 @@ struct PlayerPage {
       // ArkUI 会把该组件的输入交给原生侧（见 OH_NativeXComponent_Callback.DispatchTouchEvent），
       // 挂在 XComponent 自身上的 onTouch/onClick 不再触发。因此把原有手势逻辑原样挂到这一层，
       // 位置在视频面之上、控件之下，既不影响原生渲染，也保留全部交互。
+      //
+      // 注意：这里不再挂 onClick —— 单击/双击都统一在手势状态机里判定（见 onGestureUp），
+      // 否则 onClick 与 onTouch 会各触发一次，"双击快进"必然顺手把控制条也切一次。
       Column()
         .width('100%')
         .height('100%')
@@ -2272,108 +2984,50 @@ struct PlayerPage {
             return;
           }
           const touches: TouchObject[] = event.touches;
-          if (touches.length === 1) {
-            const touch: TouchObject = touches[0];
-            const screenWidth: number = this.getScreenWidth();
-            const isLeftSide: boolean = touch.x < screenWidth / 2;
-
-            if (event.type === TouchType.Down) {
-              this.seekBaseMs = this.positionMs;
-              this.seekDragMs = 0;
-              this.seekLastX = touch.x;
-              this.brightnessBase = 0.5;
-              this.brightnessLastY = touch.y;
-              this.volumeBase = this.volume;
-              this.volumeLastY = touch.y;
-              // 手势方向判定用"相对按下点的累计位移"，不用单次 Move 的位移。
-              //
-              // 为什么必须这样（设备实测的缺陷）：注入/慢速滑动时每个 Move 事件的位移常常只有 1–5px，
-              // 原来"单次位移 > 5px"的阈值会把整段慢速滑动全部过滤掉 —— 实测 500ms 滑完 500px
-              // 时 seekDeltaMs 恒为 0（完全不响应），100ms 滑同样距离才识别。
-              this.touchDownX = touch.x;
-              this.touchDownY = touch.y;
-              this.gestureAxis = '';
-              // 长按 2× 快进：按住 600ms 未松开即临时加速，松手恢复原速
-              this.startLongPressBoost();
-            } else if (event.type === TouchType.Move) {
-              const totalX: number = touch.x - this.touchDownX;
-              const totalY: number = touch.y - this.touchDownY;
-              // 先定方向：累计位移超过 12px 才判定，避免抖动误判
-              if (this.gestureAxis.length === 0) {
-                if (Math.abs(totalX) > 12 || Math.abs(totalY) > 12) {
-                  this.gestureAxis = Math.abs(totalX) >= Math.abs(totalY) ? 'seek' : 'level';
-                }
-              }
-              if (this.gestureAxis === 'seek') {
-                // 水平滑动 → seek：幅度按"按下点起的累计位移"算，与事件密度无关
-                this.seekLastX = touch.x;
-                this.seekDragMs = totalX * 2;
-                const total: number = this.durationMs > 0 ? this.durationMs : 1;
-                const clamped: number = Math.max(0, Math.min(total, this.seekBaseMs + this.seekDragMs));
-                this.positionMs = clamped;
-                this.lastSeekForward = totalX >= 0;
-                this.gestureFeedback = this.lastSeekForward ? `+${this.formatTime(Math.abs(this.seekDragMs))}` : `-${this.formatTime(Math.abs(this.seekDragMs))}`;
-                this.gestureIcon = 'seek';
-                this.gestureRatio = total > 0 ? clamped / total : 0;
-                this.showFeedback = true;
-              } else if (this.gestureAxis === 'level' && Math.abs(totalY) > 12) {
-                // 垂直滑动 → 亮度(左侧) 或 音量(右侧)；同样按累计位移计算
-                if (isLeftSide) {
-                  // 亮度：向上增加（鸿蒙暂不支持程序化调节系统亮度，只给反馈）
-                  const newBrightness: number =
-                    Math.max(0, Math.min(1, this.brightnessBase - totalY / 500));
-                  this.gestureFeedback = `${Math.round(newBrightness * 100)}%`;
-                  this.gestureIcon = 'brightness';
-                  this.gestureRatio = newBrightness;
-                  this.showFeedback = true;
-                  this.brightnessLastY = touch.y;
-                } else {
-                  // 音量：向上增加
-                  const newVolume: number =
-                    Math.max(0, Math.min(1, this.volumeBase - totalY / 500));
-                  this.volume = newVolume;
-                  if (this.avPlayer !== null) {
-                    this.avPlayer.setVolume(newVolume);
-                  }
-                  this.gestureFeedback = `${Math.round(newVolume * 100)}%`;
-                  this.gestureIcon = 'volume';
-                  this.gestureRatio = newVolume;
-                  this.showFeedback = true;
-                  this.volumeLastY = touch.y;
-                }
-              }
-            } else if (event.type === TouchType.Up) {
-              if (Math.abs(this.seekDragMs) > 100 && this.avPlayer !== null) {
-                this.avPlayer.seek(this.positionMs);
-              }
-              // 松手结束长按加速（无论是否已进入加速态）
-              this.stopLongPressBoost();
-              // 文件探针：手势结束时记录一次结果，便于设备验证直接确认"手势确实被识别"
-              // （进度条/浮层这类瞬时 UI 无法用读屏稳定观察）
-              this.appendProbeFile('player_gesture.txt',
-                `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
-                + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
-              this.seekDragMs = 0;
-              this.dismissFeedback();
-            }
-          }
-        })
-        .onClick(() => {
-          if (this.controlsLocked) {
-            this.controlsLocked = false;
-            this.revealControls();
+          if (touches.length !== 1) {
             return;
           }
-          if (this.showControls) {
-            this.showControls = false;
-          } else {
-            this.revealControls();
+          const touch: TouchObject = touches[0];
+          // 两条输入通道（ArkUI 手势层 / 原生兜底轮询）共用同一套手势状态机
+          if (event.type === TouchType.Down) {
+            this.onGestureDown(touch.x, touch.y);
+          } else if (event.type === TouchType.Move) {
+            this.onGestureMove(touch.x, touch.y);
+          } else if (event.type === TouchType.Up) {
+            // 文件探针：手势结束时记录一次结果，便于设备验证直接确认"手势确实被识别"
+            // （进度条/浮层这类瞬时 UI 无法用读屏稳定观察）
+            this.appendProbeFile('player_gesture.txt',
+              `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
+              + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
+            this.onGestureUp(touch.x, touch.y);
+          } else if (event.type === TouchType.Cancel) {
+            // 手势被打断（来电、系统手势抢占）：同样要结束本次滑动，
+            // 否则状态会卡在"拖拽中"，下一次按下被当成同一次滑动的延续。
+            this.stopLongPressBoost();
+            this.seekDragMs = 0;
+            this.gestureAxis = '';
           }
         })
+
+      // 亮度模拟遮罩：仅在平台不支持窗口亮度（setWindowBrightness 失败）时生效，
+      // 保证左侧上下滑动"一定看得见效果"，而不是用户以为手势坏了。
+      if (this.brightnessSimOpacity() > 0) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#000000')
+          .opacity(this.brightnessSimOpacity())
+          .hitTestBehavior(HitTestMode.None)
+      }
 
       // 手势反馈浮层
       if (this.showFeedback && this.gestureFeedback.length > 0) {
         this.GestureFeedback()
+      }
+
+      // 双击两侧的快进/快退反馈
+      if (this.rippleSide.length > 0) {
+        this.DoubleTapRipple()
       }
 
       // 字幕：外挂字幕由播放器推文本、应用绘制（原生 SURFACE 上画不了文本）
@@ -2410,14 +3064,13 @@ struct PlayerPage {
       // 控制面板
       if (this.showControls && !this.controlsLocked) {
         Column() {
-          Column() {
-            this.TopBar()
-          }
-          .width('100%')
-          .linearGradient({
-            angle: 180,
-            colors: [[this.colors().scrimHeavy, 0.0], ['#00000000', 1.0]]
-          })
+          this.TopBar()
+
+          Blank()
+
+          // 主操作居中（Infuse/iina 全屏的布局）：播放/暂停与 ±10s 在画面正中，
+          // 顶部只放标题/返回，底部只放进度与工具开关，三者互不挤压
+          this.CenterControls()
 
           Blank()
 
@@ -2571,5 +3224,11 @@ struct PlayerPage {
     .width('100%')
     .height('100%')
     .backgroundColor(this.colors().videoBackground)
+    // 播放区实测尺寸：按比例算视频面尺寸时用实测值而不是屏幕尺寸
+    //（分屏/悬浮窗/系统栏占位时两者并不相等，用屏幕尺寸会把画面算大导致被裁）
+    .onAreaChange((_oldArea: Area, newArea: Area) => {
+      this.areaWidthVp = Number(newArea.width);
+      this.areaHeightVp = Number(newArea.height);
+    })
   }
 }

@@ -33,6 +33,12 @@ public:
         double ptsSec = 0.0;
         /** 已输出帧序号（从 1 开始） */
         int64_t frameIndex = 0;
+        /** 本次调用是否顺带执行了一次排队的 seek */
+        bool seekApplied = false;
+        /** 若执行了 seek，这里是从此帧开始的解码位置（秒） */
+        double seekedToSec = 0.0;
+        /** seek 失败原因（seekApplied=false 且非空时表示失败） */
+        std::string seekError;
     };
 
     SoftDecodeSession();
@@ -57,14 +63,23 @@ public:
     bool nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, FrameInfo &info);
 
     /**
-     * 跳转到指定时间点（秒）。
-     * 用于续播（"继续观看"）：打开会话后 seek 到上次观看位置。
-     * 实现：av_seek_frame(AVSEEK_FLAG_BACKWARD) + avcodec_flush_buffers。
-     * @param seconds 目标时间点（秒）
-     * @param error 输出错误信息
-     * @return true 表示 seek 成功
+     * 跳转到指定时间点（秒）—— **立即执行**，仅适用于没有解码在飞的时候（如刚 open 完）。
+     * 播放中请用 `requestSeek()`：本方法会经自定义 AVIO 回调做同步 HTTP 取流。
      */
     bool seek(double seconds, std::string &error);
+
+    /**
+     * 请求跳转（线程安全、非阻塞）：只记录目标位置，真正的 `av_seek_frame` 由下一次
+     * `nextFrameRgba()` 在**解码线程**上执行。
+     *
+     * 为什么必须排队而不是直接 seek：
+     *  1. `seek()` 里的 `av_seek_frame` 会经 AVIO 回调走同步 HTTP Range 取流，
+     *     在 ArkTS 侧（UI 线程）调用就是"UI 线程做网络 I/O"——本工程已实测会触发 appfreeze；
+     *  2. 播放中解码线程可能正在 `av_read_frame`，与 UI 线程的 `av_seek_frame` 并发操作
+     *     同一个 AVFormatContext 属于数据竞争（表现为 seek 不生效或读到错乱数据）。
+     * 排队后：seek 与解码在同一条线程上串行，UI 侧调用立即返回。
+     */
+    void requestSeek(double seconds);
 
     void close();
 

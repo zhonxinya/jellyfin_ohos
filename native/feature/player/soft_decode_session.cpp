@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 
 #if defined(JELLYFIN_HAS_FFMPEG)
@@ -98,6 +99,12 @@ struct SoftDecodeSession::Impl {
     bool failed = false;
     std::string error;
 #endif
+    /**
+     * 排队的 seek 目标（秒，<0 表示无请求）。
+     * 跨线程访问（UI 线程 requestSeek / 解码线程取用），必须用互斥量保护。
+     */
+    std::mutex seekMutex;
+    double pendingSeekSec = -1.0;
     std::string url;
     std::string codec;
     std::string container;
@@ -227,6 +234,28 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
     info.error = "本构建未链接 FFmpeg";
     return false;
 #else
+    // 排队的 seek 先执行：与解码同线程串行，才不会与 av_read_frame 抢 AVFormatContext；
+    // 放在状态判断之前是为了让"已经播到结尾"的会话也能被拉回中间继续播
+    // （seek 成功会清掉 eof 标志）。
+    {
+        double target = -1.0;
+        {
+            std::lock_guard<std::mutex> lock(impl_->seekMutex);
+            if (impl_->pendingSeekSec >= 0.0) {
+                target = impl_->pendingSeekSec;
+                impl_->pendingSeekSec = -1.0;
+            }
+        }
+        if (target >= 0.0) {
+            std::string seekError;
+            if (seek(target, seekError)) {
+                info.seekApplied = true;
+                info.seekedToSec = target;
+            } else {
+                info.seekError = seekError;
+            }
+        }
+    }
     if (!impl_->open || impl_->failed || impl_->eof) {
         info.error = impl_->error.empty() ? "会话未打开" : impl_->error;
         return false;
@@ -363,6 +392,15 @@ bool SoftDecodeSession::seek(double seconds, std::string &error)
     impl_->eof = false;
     return true;
 #endif
+}
+
+void SoftDecodeSession::requestSeek(double seconds)
+{
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    std::lock_guard<std::mutex> lock(impl_->seekMutex);
+    impl_->pendingSeekSec = seconds;
 }
 
 void SoftDecodeSession::close()

@@ -71,6 +71,12 @@ declare module 'libjellyfin_native.so' {
     softPlayClose(): string;
     /** 软解会话 seek：跳转到指定时间点（秒），用于续播 */
     softPlaySeek(positionSec: number): string;
+    /**
+     * 设置软解画面缩放模式（「视频比例」）：
+     * 0 适应 / 1 填充 / 2 拉伸 / 3 原始（与 ArkTS 的 PlayerAspectMode 顺序一致）。
+     * 与硬解的 `videoScaleType` 不同，这个值由 EglRenderer 自己换算顶点缩放，播放中可随时切换。
+     */
+    softPlaySetScale(mode: number): string;
     /** 读取 XComponent 视频区域的最新触摸事件（由 DispatchTouchEvent 捕获） */
     getXComponentTouchEvent(): string;
     softPlayDumpFrame(path: string): string;
