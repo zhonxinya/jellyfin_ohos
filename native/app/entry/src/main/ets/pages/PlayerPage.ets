@@ -555,11 +555,6 @@ struct PlayerPage {
     return out;
   }
 
-  /** 面板是否值得给出"可切换"入口：播放器轨道或 Jellyfin 流列表任一可用 */
-  private hasSwitchableTracks(): boolean {
-    return this.mediaStreams.length > 0 || this.avAudioTracks.length > 0;
-  }
-
   /** 展开轨道面板：顺带刷新一次播放器轨道（重新打开播放后轨道会变） */
   private openTrackSheet(): void {
     this.trackNote = '';
