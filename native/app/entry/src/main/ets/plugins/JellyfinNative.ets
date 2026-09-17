@@ -529,11 +529,24 @@ export class JellyfinNative {
   }
 
   /** 取下一帧（同步）：返回 {ok,width,height,ptsSec,frameIndex,pixels} */
-  static softPlayNextFrame(maxWidth: number): ESObject | null {
+  /**
+   * 取下一帧（异步）。返回 JSON（用 `parseResult` 解）：
+   * `data = { ok, width, height, ptsSec, frameIndex, bytesFetched, rendered, error?, renderError? }`
+   */
+  static async softPlayNextFrame(maxWidth: number): Promise<string> {
     try {
-      return jellyfinNative.softPlayNextFrame(maxWidth) as ESObject;
+      return await jellyfinNative.softPlayNextFrame(maxWidth);
     } catch (error) {
-      return null;
+      return JellyfinNative.fail('softPlayNextFrame', error);
+    }
+  }
+
+  /** 把最近一帧渲染上屏（须在 UI 线程调用；返回 JSON，用 parseResult 解） */
+  static softPlayRenderLast(): string {
+    try {
+      return jellyfinNative.softPlayRenderLast();
+    } catch (error) {
+      return JellyfinNative.fail('softPlayRenderLast', error);
     }
   }
 

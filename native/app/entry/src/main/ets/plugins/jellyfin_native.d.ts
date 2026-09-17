@@ -53,7 +53,20 @@ declare module 'libjellyfin_native.so' {
     playerOpen(itemId: string, optionsJson: string): string;
     playerSoftDecodeProbe(itemId: string, cacheDir: string, optionsJson: string): string;
     softPlayOpen(itemId: string, surfaceId: string, surfaceWidth: number, surfaceHeight: number, renderMode: string, optionsJson: string): string;
-    softPlayNextFrame(maxWidth: number): SoftFrameResult;
+    /**
+     * 取下一帧（解码 + EGL 渲染）。
+     *
+     * **异步**：该路径未命中缓存时会做同步 HTTP，必须放在工作线程执行，
+     * 否则会阻塞 UI 线程触发 appfreeze（设备实测）。返回 JSON：
+     * `{ ok, data: { ok, width, height, ptsSec, frameIndex, bytesFetched, rendered, error?, renderError? } }`
+     */
+    softPlayNextFrame(maxWidth: number): Promise<string>;
+    /**
+     * 把最近一帧渲染上屏（EGL）。**必须由 UI 线程调用**：EGL 窗口 surface 的 swap 有线程约束，
+     * 在工作线程里 swap 会失败（设备实测 0x12301，帧解出来但上不了屏）。
+     * 返回 JSON：`{ ok, data: { rendered, renderError } }`
+     */
+    softPlayRenderLast(): string;
     softPlayStatus(): string;
     softPlayClose(): string;
     softPlayDumpFrame(path: string): string;

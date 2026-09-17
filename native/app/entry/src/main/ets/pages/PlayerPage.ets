@@ -377,10 +377,15 @@ struct PlayerPage {
     try {
       // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）。
       // 帧宽限制 640：模拟器 GL 为软件光栅化，上传 1920x1080 大纹理会明显拖慢甚至失败。
-      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(640);
-      if (frame === null) {
+      //
+      // 这一步**必须 await**：原生侧走工作线程执行（未命中缓存时是同步 HTTP），
+      // 若在 UI 线程同步等待，会因一次网络往返阻塞主线程数秒 → 系统判 appfreeze。
+      const raw: string = await JellyfinNative.softPlayNextFrame(640);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
         return;
       }
+      const frame: ESObject = result.data as ESObject;
       const ok: boolean = JsonUtil.getBoolean(frame, 'ok', false);
       if (!ok) {
         const reason: string = JsonUtil.getString(frame, 'error', '');
@@ -396,8 +401,13 @@ struct PlayerPage {
       const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
       const idx: number = JsonUtil.getNumber(frame, 'frameIndex', 0);
       const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
-      const rendered: boolean = JsonUtil.getBoolean(frame, 'rendered', false);
-      const renderError: string = JsonUtil.getString(frame, 'renderError', '');
+      // 渲染在 UI 线程做（原生侧只解码）：EGL 窗口 surface 不能在线程池线程上 swap
+      const renderRaw: string = JellyfinNative.softPlayRenderLast();
+      const renderResult: NativeResult = JellyfinNative.parseResult(renderRaw);
+      const rendered: boolean = renderResult.ok && renderResult.data !== null
+        ? JsonUtil.getBoolean(renderResult.data as ESObject, 'rendered', false) : false;
+      const renderError: string = renderResult.ok && renderResult.data !== null
+        ? JsonUtil.getString(renderResult.data as ESObject, 'renderError', '') : '';
       // 软解播放的进度上报（节流）：此前软解只出画面、不向服务端报告进度，
       // 导致"继续观看"位置、多端同步都不生效。按 5 秒节流，与硬解路径一致。
       this.softPositionMs = Math.floor(pts * 1000);
@@ -1370,7 +1380,17 @@ struct PlayerPage {
     if (!this.softPlaying) {
       // 软解也起不来时回到错误态，让用户看到原因并手动重试
       this.status = UiState.ERROR;
+      return;
     }
+    // 软解已经跑起来了：必须离开错误态。
+    //
+    // 为什么：此前只在软解失败时改状态，成功回退时 status 仍是 ERROR，
+    // 于是**整屏错误覆盖层盖在正在播放的软解画面上**（设备实测：页面显示"播放器错误 + 重试"，
+    // 而底下软解帧号一直在涨）。用户看到的是错误页，等于自动回退这个功能白做。
+    this.status = UiState.SUCCESS;
+    this.errorMsg = '';
+    this.isPlaying = true;
+    this.softStatus = '已自动切换软解播放';
   }
 
   private refreshState(): void {

@@ -1376,7 +1376,18 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
     });
 }
 
-/** 取下一帧：解码 → 存最近帧 → （有渲染器时）EGL 渲染上屏 */
+/**
+ * 取下一帧：解码 → 存最近帧 → （有渲染器时）EGL 渲染上屏。
+ *
+ * **必须异步执行**（`RunAsync`）：这一路会走 `RangeCache::read`，未命中缓存时是**同步 HTTP**。
+ * 设备实测（faultlog 主线程栈 `RangeCache::read → fillCache → FetchRange → THREAD_BLOCK_6S`）：
+ * 同步执行时逐帧拉取会在 UI 线程上做网络请求，一次往返就把主线程阻塞 6 秒以上，
+ * 系统判 appfreeze、界面直接消失。放到工作线程后，UI 线程只等 Promise，不阻塞。
+ *
+ * EGL 渲染放在工作线程是安全的：`EglRenderer` 每次绘制前都会 `eglMakeCurrent`
+ * （见 egl_renderer.cpp 的绘制辅助函数），上下文与线程的绑定由它自己保证；
+ * 宿主侧（PlayerPage）有 `softPulling` 标志保证同一时刻只有一次拉取在飞。
+ */
 napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
 {
     if (SoftSession() == nullptr) {
@@ -1384,60 +1395,77 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
     }
     int64_t maxWidth = 0;
     ReadIntArg(env, info, 0, maxWidth);
+    const int64_t cappedWidth = maxWidth > 0 ? maxWidth : 0;
+    return RunAsync(env, [cappedWidth]() {
+        std::vector<uint8_t> rgba;
+        jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
+        const bool ok = SoftSession()->nextFrameRgba(
+            cappedWidth > 0 ? static_cast<int>(cappedWidth) : 0, rgba, frameInfo);
 
-    napi_value result = nullptr;
-    napi_create_object(env, &result);
+        nlohmann::json out = {
+            {"ok", ok},
+            {"width", frameInfo.width},
+            {"height", frameInfo.height},
+            {"ptsSec", frameInfo.ptsSec},
+            {"frameIndex", frameInfo.frameIndex},
+            {"bytesFetched", SoftSession()->bytesFetched()},
+        };
+        if (!frameInfo.error.empty()) {
+            out["error"] = frameInfo.error;
+        }
+        bool rendered = false;
+        std::string renderError;
+        if (ok && !rgba.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+                SoftLastFrame() = rgba;
+                SoftLastFrameWidth() = frameInfo.width;
+                SoftLastFrameHeight() = frameInfo.height;
+            }
+            // 这里**不做渲染**：EGL 的窗口 surface 不能跨到线程池线程上 swap
+            // （设备实测：从工作线程渲染时 `eglSwapBuffers` 返回 0x12301，帧解出来但上不了屏）。
+            // 渲染交给宿主在 UI 线程调用 `softPlayRenderLast()`。
+        }
+        out["rendered"] = rendered;
+        if (!renderError.empty()) {
+            out["renderError"] = renderError;
+        }
+        return MakeResult(true, 200, "ok", out).dump();
+    });
+}
 
+/**
+ * 把最近一帧解码结果渲染上屏（EGL）。
+ *
+ * 为什么单独一个**同步**方法、且必须由 UI 线程调用：EGL 窗口 surface 的 swap 有线程约束
+ * —— 设备实测在工作线程池里 swap 返回 `0x12301`（帧解出来了但屏幕不变），
+ * 而 UI 线程调用与改动前完全一致、可正常上屏。渲染本身不做网络/解码，不会长时间占用 UI 线程。
+ */
+napi_value SoftPlayRenderLast(napi_env env, napi_callback_info /*info*/)
+{
     std::vector<uint8_t> rgba;
-    jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
-    const bool ok = SoftSession()->nextFrameRgba(maxWidth > 0 ? maxWidth : 0, rgba, frameInfo);
-
-    napi_value status = nullptr;
-    napi_get_boolean(env, ok, &status);
-    napi_set_named_property(env, result, "ok", status);
-    napi_value w = nullptr;
-    napi_create_int32(env, frameInfo.width, &w);
-    napi_set_named_property(env, result, "width", w);
-    napi_value h = nullptr;
-    napi_create_int32(env, frameInfo.height, &h);
-    napi_set_named_property(env, result, "height", h);
-    napi_value pts = nullptr;
-    napi_create_double(env, frameInfo.ptsSec, &pts);
-    napi_set_named_property(env, result, "ptsSec", pts);
-    napi_value frames = nullptr;
-    napi_create_int64(env, frameInfo.frameIndex, &frames);
-    napi_set_named_property(env, result, "frameIndex", frames);
-    if (!frameInfo.error.empty()) {
-        napi_value err = nullptr;
-        napi_create_string_utf8(env, frameInfo.error.c_str(), NAPI_AUTO_LENGTH, &err);
-        napi_set_named_property(env, result, "error", err);
+    int width = 0;
+    int height = 0;
+    {
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        rgba = SoftLastFrame();
+        width = SoftLastFrameWidth();
+        height = SoftLastFrameHeight();
     }
-    napi_value bytes = nullptr;
-    napi_create_int64(env, SoftSession()->bytesFetched(), &bytes);
-    napi_set_named_property(env, result, "bytesFetched", bytes);
-
     bool rendered = false;
     std::string renderError;
-    if (ok && !rgba.empty()) {
-        {
-            std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
-            SoftLastFrame() = rgba;
-            SoftLastFrameWidth() = frameInfo.width;
-            SoftLastFrameHeight() = frameInfo.height;
-        }
-        if (SoftRenderer().isReady()) {
-            rendered = SoftRenderer().renderRgba(rgba.data(), frameInfo.width, frameInfo.height, renderError);
-            if (!rendered) {
-                napi_value err = nullptr;
-                napi_create_string_utf8(env, renderError.c_str(), NAPI_AUTO_LENGTH, &err);
-                napi_set_named_property(env, result, "renderError", err);
-            }
-        }
+    if (!rgba.empty() && width > 0 && height > 0 && SoftRenderer().isReady()) {
+        rendered = SoftRenderer().renderRgba(rgba.data(), width, height, renderError);
+    } else if (rgba.empty()) {
+        renderError = "还没有可渲染的帧";
+    } else if (!SoftRenderer().isReady()) {
+        renderError = "渲染器未就绪";
     }
-    napi_value renderedValue = nullptr;
-    napi_get_boolean(env, rendered, &renderedValue);
-    napi_set_named_property(env, result, "rendered", renderedValue);
-    return result;
+    nlohmann::json data = {
+        {"rendered", rendered},
+        {"renderError", renderError},
+    };
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
 }
 
 /**
@@ -2216,6 +2244,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          napi_default, nullptr},
         {"softPlayOpen", nullptr, SoftPlayOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"softPlayNextFrame", nullptr, SoftPlayNextFrame, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"softPlayRenderLast", nullptr, SoftPlayRenderLast, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlayStatus", nullptr, SoftPlayStatus, nullptr, nullptr, nullptr, napi_default,
          nullptr},
