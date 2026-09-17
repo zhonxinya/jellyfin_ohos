@@ -12,6 +12,7 @@
     "pages/SearchPage",
     "pages/ContinueWatchingPage",
     "pages/PlaylistsPage",
+    "pages/PlaylistPage",
     "pages/DetailPage",
     "pages/PlayerPage",
     "pages/PersonPage",

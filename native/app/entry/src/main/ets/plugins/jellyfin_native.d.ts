@@ -38,8 +38,16 @@ declare module 'libjellyfin_native.so' {
     updateUserConfiguration(configurationJson: string): string;
     searchHints(query: string, limit: number): string;
     getPlaylists(): string;
-    createPlaylist(name: string, itemId: string): string;
+    createPlaylist(name: string, itemId: string, mediaType: string): string;
     addToPlaylist(playlistId: string, itemId: string): string;
+    /** 读取播放列表内容（第 2/3 参数为分页）；返回的条目带 PlaylistItemId（列表条目 id） */
+    getPlaylistItems(playlistId: string, startIndex: number, limit: number): string;
+    /** 从播放列表移除条目；entryIds 是逗号分隔的 PlaylistItemId（不是媒体 id） */
+    removeFromPlaylist(playlistId: string, entryIds: string): string;
+    /** 移动列表条目到新下标（0 基） */
+    movePlaylistItem(playlistId: string, entryId: string, newIndex: number): string;
+    /** 删除播放列表本体 */
+    deletePlaylist(playlistId: string): string;
     reportPlaybackProgress(itemId: string, positionTicks: number, isPaused: boolean): string;
     reportPlaybackStopped(itemId: string, positionTicks: number): string;
     playerOpen(itemId: string, optionsJson: string): string;

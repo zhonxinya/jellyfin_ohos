@@ -23,6 +23,16 @@ struct PlaylistsPage {
     this.reload();
   }
 
+  /**
+   * 每次回到本页都刷新。
+   *
+   * 为什么需要：删除播放列表后返回本页时，页面还挂着删除前的那份列表
+   * （只在 aboutToAppear 加载），用户会看到"删掉的列表又回来了"。
+   */
+  onPageShow(): void {
+    this.reload();
+  }
+
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
   }
@@ -41,9 +51,16 @@ struct PlaylistsPage {
   }
 
   private openItem(item: MediaItem): void {
-    if (item.id.length > 0) {
-      router.pushUrl({ url: 'pages/DetailPage', params: { itemId: item.id } });
+    if (item.id.length === 0) {
+      return;
     }
+    // 播放列表要进"列表内容页"，不能进详情页：
+    // 详情页不认识 Playlist，会拿 playlistId 去请求 PlaybackInfo（失败），
+    // 用户也就看不到曲目、播不了、删不掉。
+    router.pushUrl({
+      url: 'pages/PlaylistPage',
+      params: { playlistId: item.id, title: item.name }
+    });
   }
 
   build() {

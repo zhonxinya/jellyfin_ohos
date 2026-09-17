@@ -267,9 +267,10 @@ export class JellyfinNative {
     }
   }
 
-  static async createPlaylist(name: string, itemId: string): Promise<string> {
+  static async createPlaylist(name: string, itemId: string,
+                             mediaType: string = 'Video'): Promise<string> {
     try {
-      return await jellyfinNative.createPlaylist(name, itemId);
+      return await jellyfinNative.createPlaylist(name, itemId, mediaType);
     } catch (error) {
       return JellyfinNative.fail('createPlaylist', error);
     }
@@ -280,6 +281,41 @@ export class JellyfinNative {
       return await jellyfinNative.addToPlaylist(playlistId, itemId);
     } catch (error) {
       return JellyfinNative.fail('addToPlaylist', error);
+    }
+  }
+
+  /** 播放列表内容（条目里带 PlaylistItemId，移除/排序要用它） */
+  static async getPlaylistItems(playlistId: string, startIndex: number = 0,
+                               limit: number = 200): Promise<string> {
+    try {
+      return await jellyfinNative.getPlaylistItems(playlistId, startIndex, limit);
+    } catch (error) {
+      return JellyfinNative.fail('getPlaylistItems', error);
+    }
+  }
+
+  static async removeFromPlaylist(playlistId: string, entryIds: string): Promise<string> {
+    try {
+      return await jellyfinNative.removeFromPlaylist(playlistId, entryIds);
+    } catch (error) {
+      return JellyfinNative.fail('removeFromPlaylist', error);
+    }
+  }
+
+  static async movePlaylistItem(playlistId: string, entryId: string,
+                                newIndex: number): Promise<string> {
+    try {
+      return await jellyfinNative.movePlaylistItem(playlistId, entryId, newIndex);
+    } catch (error) {
+      return JellyfinNative.fail('movePlaylistItem', error);
+    }
+  }
+
+  static async deletePlaylist(playlistId: string): Promise<string> {
+    try {
+      return await jellyfinNative.deletePlaylist(playlistId);
+    } catch (error) {
+      return JellyfinNative.fail('deletePlaylist', error);
     }
   }
 
