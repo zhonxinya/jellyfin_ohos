@@ -327,26 +327,69 @@ struct DetailPage {
    * 因此这里先解析出"第一季第一集"再交给播放器，与各 Jellyfin 客户端的行为一致。
    */
   private async startPlayback(): Promise<void> {
-    if (this.item.type !== 'Series') {
-      this.playItem(this.item.id);
+    if (this.item.type === 'Series') {
+      if (this.seasons.length === 0) {
+        this.errorMsg = '该剧集暂无可播放的分集';
+        return;
+      }
+      const raw: string = await JellyfinNative.getSeasonEpisodes(this.item.id, this.seasons[0].id);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok) {
+        this.errorMsg = result.message.length > 0 ? result.message : '加载分集失败';
+        return;
+      }
+      const episodes: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      if (episodes.length === 0) {
+        this.errorMsg = '该剧集暂无可播放的分集';
+        return;
+      }
+      this.playItem(episodes[0].id);
       return;
     }
-    if (this.seasons.length === 0) {
-      this.errorMsg = '该剧集暂无可播放的分集';
+    // 容器类条目（合集/播放列表/季/文件夹）**本身不是可播放媒体**：
+    // 直接拿它的 id 去请求播放信息必然失败（与剧集同因）。
+    // 这里解析出"第一个可播放子项"再交给播放器，与各 Jellyfin 客户端行为一致。
+    if (this.item.type === 'BoxSet' || this.item.type === 'Playlist' ||
+        this.item.type === 'Season' || this.item.type === 'Folder' || this.item.isFolder) {
+      const firstId: string = await this.resolveFirstPlayableChild();
+      if (firstId.length === 0) {
+        this.errorMsg = '该条目暂无可播放的内容';
+        return;
+      }
+      this.playItem(firstId);
       return;
     }
-    const raw: string = await JellyfinNative.getSeasonEpisodes(this.item.id, this.seasons[0].id);
+    this.playItem(this.item.id);
+  }
+
+  /** 取容器条目的第一个可播放子项 id；取不到返回空串 */
+  private async resolveFirstPlayableChild(): Promise<string> {
+    if (this.item.type === 'Playlist') {
+      const raw: string = await JellyfinNative.getPlaylistItems(this.item.id, 0, 1);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok) {
+        return '';
+      }
+      const items: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      return items.length > 0 ? items[0].id : '';
+    }
+    // 季 → 分集；合集/文件夹 → 任意可播放子项（按名称排序取第一个）
+    const query: Record<string, Object> = {
+      'parentId': this.item.id,
+      'startIndex': 0,
+      'limit': 1,
+      'recursive': true,
+      'sortBy': 'SortName',
+      'sortOrder': 'Ascending',
+      'includeItemTypes': this.item.type === 'Season' ? 'Episode' : ''
+    };
+    const raw: string = await JellyfinNative.queryItems(JSON.stringify(query));
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok) {
-      this.errorMsg = result.message.length > 0 ? result.message : '加载分集失败';
-      return;
+      return '';
     }
-    const episodes: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
-    if (episodes.length === 0) {
-      this.errorMsg = '该剧集暂无可播放的分集';
-      return;
-    }
-    this.playItem(episodes[0].id);
+    const items: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    return items.length > 0 ? items[0].id : '';
   }
 
   private mediaInfoLabels(): string[] {
