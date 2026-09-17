@@ -82,6 +82,21 @@ export struct HomePage {
     });
   }
 
+  /** 从「继续观看」货架直接接着上次的位置播放 */
+  private continuePlay(item: MediaItem): void {
+    if (item.id.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/PlayerPage',
+      params: {
+        itemId: item.id,
+        title: item.displayTitle(),
+        startPositionMs: Math.floor(item.playbackPositionTicks / 10000)
+      }
+    });
+  }
+
   private loadAllSections(): void {
     this.resumeSection = SectionState.loading();
     this.librariesSection = SectionState.loading();
@@ -235,6 +250,9 @@ export struct HomePage {
               showMore: true,
               onItemTap: (item: MediaItem) => { this.openItem(item); },
               onItemLongPress: (item: MediaItem) => { this.onShelfItemLongPress(item); },
+              // 「继续观看」货架：封面上给一个直接接着播的按钮（否则要先进详情页再点播放）
+              quickPlay: true,
+              onQuickPlay: (item: MediaItem) => { this.continuePlay(item); },
               onMore: () => { this.openBrowse('resume', '继续观看'); }
             })
           } else {

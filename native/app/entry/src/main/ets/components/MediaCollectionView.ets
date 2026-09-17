@@ -43,6 +43,12 @@ export struct MediaCollectionView {
   onItemTap: (item: MediaItem) => void = (_item: MediaItem) => {};
   /** 长按条目（弹出操作菜单）；默认空实现，未接线的页面行为不变 */
   onItemLongPress: (item: MediaItem) => void = (_item: MediaItem) => {};
+  /**
+   * 是否在封面中央显示"继续播放"快捷按钮（继续观看/接下来这类带进度的列表用）。
+   * 打开后必须处理 `onQuickPlay`，否则按钮点了没反应。
+   */
+  @Prop quickPlay: boolean = false;
+  onQuickPlay: (item: MediaItem) => void = (_item: MediaItem) => {};
   onReachEnd: () => void = () => {};
 
   private colors(): ThemeColors {
@@ -154,6 +160,10 @@ export struct MediaCollectionView {
                   },
                   onLongPress: () => {
                     this.onItemLongPress(item);
+                  },
+                  quickPlay: this.quickPlay,
+                  onQuickPlay: () => {
+                    this.onQuickPlay(item);
                   }
                 })
               }.height(this.gridItemHeight())

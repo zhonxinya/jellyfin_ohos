@@ -31,6 +31,14 @@ export struct MediaCard {
    * 这是与主流 Jellyfin 客户端最大的交互差距。默认空实现，老调用点不受影响。
    */
   onLongPress: () => void = () => {};
+  /**
+   * 是否显示"继续播放"快捷按钮（叠在封面中央）。
+   *
+   * 只有"继续观看 / 接下来"这类带进度的列表才需要：用户的目标是**接着看**，
+   * 而不是先进详情页再点一次播放。默认关闭，其它列表的观感不受影响。
+   */
+  @Prop quickPlay: boolean = false;
+  onQuickPlay: () => void = () => {};
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
@@ -93,6 +101,28 @@ export struct MediaCard {
             .backgroundColor('#B3000000')
             .borderRadius(5)
             .margin({ top: 5, right: 5 })
+        }
+
+        // 快捷继续播放：叠在封面中央的圆形按钮（点它直接起播，点卡片其它区域仍进详情页）。
+        // 外层 Stack 用 Center 对齐覆盖整张封面 —— 外层 Stack 的 alignContent 是 TopEnd（给徽标用），
+        // 直接放按钮会被摆到右上角。
+        if (this.quickPlay) {
+          Stack({ alignContent: Alignment.Center }) {
+            Button({ type: ButtonType.Circle, stateEffect: true }) {
+              SymbolGlyph($r('sys.symbol.play_fill'))
+                .fontSize(26)
+                .fontColor([this.colors().onBrand])
+            }
+            .width(56)
+            .height(56)
+            .backgroundColor(this.colors().brandPrimary)
+            .shadow({ radius: 10, color: '#66000000', offsetX: 0, offsetY: 3 })
+            .onClick(() => {
+              this.onQuickPlay();
+            })
+          }
+          .width('100%')
+          .height('100%')
         }
       }
       .width(this.cardWidth)

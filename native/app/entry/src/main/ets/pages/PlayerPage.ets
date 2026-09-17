@@ -117,6 +117,16 @@ struct PlayerPage {
   @State private trackNote: string = '';
   /** 当前 MediaSourceId（Jellyfin 字幕端点需要它） */
   private mediaSourceId: string = '';
+  /**
+   * 续播起点（毫秒）：由宿主页面按条目的观看进度传入。
+   *
+   * 为什么要有它：媒体库「继续观看」的语义就是"接着上次看"，而此前播放器
+   * 一律从 0:00 起播 —— 点继续观看卡片 → 详情页 → 播放，等于**从头再来**，
+   * 进度条与"继续观看"也就名不副实。这里在 `prepared` 之后 seek 到该位置。
+   */
+  private startPositionMs: number = 0;
+  /** 续播只做一次（重开播放/切轨道后不重复 seek 回起点） */
+  private resumeApplied: boolean = false;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   /** 本次手势判定出的方向：'' 未定 / 'seek' 水平 / 'level' 垂直（亮度或音量） */
@@ -145,8 +155,12 @@ struct PlayerPage {
       const titleVal: Object | undefined = params['title'];
       const urlVal: Object | undefined = params['playUrl'];
       const optsVal: Object | undefined = params['playbackOptions'];
+      const startVal: Object | undefined = params['startPositionMs'];
       if (typeof idVal === 'string') {
         this.itemId = idVal;
+      }
+      if (typeof startVal === 'number' && startVal > 1000) {
+        this.startPositionMs = startVal;
       }
       if (typeof titleVal === 'string' && titleVal.length > 0) {
         this.title = titleVal;
@@ -1117,6 +1131,11 @@ struct PlayerPage {
     if (this.itemId.length === 0) {
       return;
     }
+    // 位置 0 不上报：上报会把服务端的观看进度写成 0，等于**抹掉用户的续播点**
+    // （软解会话刚打开时会先报一次 pts=0.0，实测就在这个时机把进度清了）。
+    if (ptsSec <= 0.5) {
+      return;
+    }
     const now: number = Date.now();
     if (this.lastProgressReportAt > 0 && now - this.lastProgressReportAt < 5000) {
       return;
@@ -1281,6 +1300,14 @@ struct PlayerPage {
           this.avPlayer?.play();
           this.isPlaying = true;
           this.revealControls();
+          // 续播：seek 到宿主传入的观看进度（只做一次；切轨道/重开播放不再回到这里）
+          if (this.startPositionMs > 1000 && !this.resumeApplied) {
+            this.resumeApplied = true;
+            this.avPlayer?.seek(this.startPositionMs);
+            this.positionMs = this.startPositionMs;
+            this.appendProbeFile('player_tracks.txt',
+              `resume seek to ${this.startPositionMs}ms\n`);
+          }
           // 硬解已就绪：清掉软解留下的诊断文案（否则会一直挂着"EGL 已渲染/第 N 帧"这类
           // 上一段软解会话的信息，看起来像两路同时在播）
           this.softDiag = '';
@@ -1327,6 +1354,9 @@ struct PlayerPage {
   private handlePlaybackFailure(message: string): void {
     this.status = UiState.ERROR;
     this.errorMsg = message;
+    // 允许"重试"重新应用续播位置：重试会重建播放器（走一次 prepared），
+    // 若不再应用一次，重试成功后就变成从头播放（设备实测踩到：首次拉流失败 → 重试 → 回到 0:00）。
+    this.resumeApplied = false;
     this.maybeFallbackToSoftDecode(message);
   }
 
@@ -1400,7 +1430,14 @@ struct PlayerPage {
       return;
     }
     this.stopped = true;
-    if (this.itemId.length > 0) {
+    // 只有"真的播过"才上报停止位置。
+    //
+    // 为什么：上报停止会把服务端的观看进度写成这个位置；如果播放器根本没起来
+    // （拉流失败、或用户刚进来就退出），位置是 0，于是**用户原有的观看进度被清成 0**，
+    // 「继续观看」条目随之消失 —— 设备实测踩到过：一次失败的打开把 9 分多钟的进度抹平了。
+    // 位置为 0 时直接不上报，让服务端保留原进度。
+    const hasProgress: boolean = this.positionMs > 1000 || this.isPlaying || this.isCompleted();
+    if (this.itemId.length > 0 && hasProgress) {
       JellyfinNative.reportPlaybackStopped(this.itemId, this.positionMs * 10000);
     }
     if (this.avPlayer !== null) {

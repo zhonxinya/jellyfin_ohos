@@ -6,6 +6,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { formatTicks } from '../common/format';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -263,19 +264,59 @@ struct DetailPage {
     return JSON.stringify(opts);
   }
 
-  private playItem(id: string): void {
+  /**
+   * 交给播放页播放某个条目。
+   *
+   * `startPositionMs`：该条目的观看进度（`PlaybackPositionTicks` 是 100ns 单位）。
+   * 传下去后播放器会在 `prepared` 之后 seek 到该位置 —— 否则「继续播放」等于从头再来，
+   * 而"继续观看/进度条"也就名不副实。
+   */
+  private playItem(id: string, startPositionMs: number = 0): void {
+    const resumeMs: number = startPositionMs > 1000 ? startPositionMs
+                                                    : this.resumeMsForItem(id);
     router.pushUrl({
       url: 'pages/PlayerPage',
       params: {
         itemId: id,
         title: this.item.name,
         playbackOptions: this.buildPlaybackOptions(),
+        startPositionMs: resumeMs,
         // 把可切换的流列表带给播放页，使其能在**播放中**切换音频/字幕
         // （Jellyfin 的轨道选择是 PlaybackInfo 参数，切换后按原位置重新拉起播放即可，
         //   对硬解与软解两条路径都成立）
         mediaStreams: JSON.stringify(this.mediaStreams)
       }
     });
+  }
+
+  /** 该条目（或它的第一集）的续播位置（毫秒）；没有进度时返回 0 */
+  /**
+   * 主播放按钮文案。
+   *
+   * 有观看进度时显示「继续播放 · mm:ss」：既说明会从上次位置接着播，
+   * 也把"上次看到哪儿"直接告诉用户（此前只有进度条，按钮永远写"播放"，点了却从头开始）。
+   */
+  private playButtonLabel(): string {
+    const resumeMs: number = Math.floor(this.item.playbackPositionTicks / 10000);
+    const compact: boolean = this.item.type === 'Series' || this.item.type === 'Episode';
+    if (resumeMs > 1000) {
+      // 剧集类按钮是固定宽度（150vp），带上时间会被裁掉，因此只在整行按钮上显示时间
+      return compact ? '继续播放'
+                     : `继续播放 · ${formatTicks(this.item.playbackPositionTicks)}`;
+    }
+    return compact ? '播放本集' : '播放';
+  }
+
+  private resumeMsForItem(id: string): number {
+    if (id === this.item.id) {
+      return Math.floor(this.item.playbackPositionTicks / 10000);
+    }
+    for (let i = 0; i < this.episodes.length; i++) {
+      if (this.episodes[i].id === id) {
+        return Math.floor(this.episodes[i].playbackPositionTicks / 10000);
+      }
+    }
+    return 0;
   }
 
   /**
@@ -836,7 +877,7 @@ struct DetailPage {
                 // 播放按钮行 —— 主操作按参考项目规格（48vp / 12vp 圆角 / 品牌实底 + 微光投影），
                 // 其余操作用 40vp 圆形图标按钮 + 系统符号（原来用的是 ▼ ★ ⏱ ⋮ 文本字符）
                 Flex({ wrap: FlexWrap.Wrap }) {
-                  Button(this.item.type === 'Episode' ? '\u64ad\u653e\u672c\u96c6' : '\u64ad\u653e',
+                  Button(this.playButtonLabel(),
                     { type: ButtonType.Normal, stateEffect: false })
                     .height(ThemeConstants.BUTTON_HEIGHT)
                     .width(this.item.type === 'Series' || this.item.type === 'Episode' ? 150 : '100%')
