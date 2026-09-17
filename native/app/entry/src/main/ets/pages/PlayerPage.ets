@@ -1390,7 +1390,11 @@ struct PlayerPage {
     this.status = UiState.SUCCESS;
     this.errorMsg = '';
     this.isPlaying = true;
-    this.softStatus = '已自动切换软解播放';
+    // 软解会话目前没有"从指定位置起播"的能力（进度条会从头开始），
+    // 这种情况下不能继续显示「继续播放」的暗示，否则用户以为会接着上次看。
+    this.softStatus = this.startPositionMs > 1000
+      ? '已自动切换软解（软解暂不支持从上次位置续播，将从头播放）'
+      : '已自动切换软解播放';
   }
 
   private refreshState(): void {
