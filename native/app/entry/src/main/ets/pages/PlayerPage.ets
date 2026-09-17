@@ -119,6 +119,11 @@ struct PlayerPage {
   private mediaSourceId: string = '';
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
+  /** 本次手势判定出的方向：'' 未定 / 'seek' 水平 / 'level' 垂直（亮度或音量） */
+  private gestureAxis: string = '';
+  /** 按下点坐标：方向与幅度都按"相对按下点的累计位移"计算（见 onTouch 里的说明） */
+  private touchDownX: number = 0;
+  private touchDownY: number = 0;
   private seekDragMs: number = 0;
   private seekLastX: number = 0;
   private lastSeekForward: boolean = true;
@@ -1905,31 +1910,43 @@ struct PlayerPage {
               this.brightnessLastY = touch.y;
               this.volumeBase = this.volume;
               this.volumeLastY = touch.y;
+              // 手势方向判定用"相对按下点的累计位移"，不用单次 Move 的位移。
+              //
+              // 为什么必须这样（设备实测的缺陷）：注入/慢速滑动时每个 Move 事件的位移常常只有 1–5px，
+              // 原来"单次位移 > 5px"的阈值会把整段慢速滑动全部过滤掉 —— 实测 500ms 滑完 500px
+              // 时 seekDeltaMs 恒为 0（完全不响应），100ms 滑同样距离才识别。
+              this.touchDownX = touch.x;
+              this.touchDownY = touch.y;
+              this.gestureAxis = '';
               // 长按 2× 快进：按住 600ms 未松开即临时加速，松手恢复原速
               this.startLongPressBoost();
             } else if (event.type === TouchType.Move) {
-              const deltaX: number = touch.x - this.seekLastX;
-              const deltaY: number = touch.y - (isLeftSide ? this.brightnessLastY : this.volumeLastY);
-
-              if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 5) {
-                // 水平滑动 → seek
+              const totalX: number = touch.x - this.touchDownX;
+              const totalY: number = touch.y - this.touchDownY;
+              // 先定方向：累计位移超过 12px 才判定，避免抖动误判
+              if (this.gestureAxis.length === 0) {
+                if (Math.abs(totalX) > 12 || Math.abs(totalY) > 12) {
+                  this.gestureAxis = Math.abs(totalX) >= Math.abs(totalY) ? 'seek' : 'level';
+                }
+              }
+              if (this.gestureAxis === 'seek') {
+                // 水平滑动 → seek：幅度按"按下点起的累计位移"算，与事件密度无关
                 this.seekLastX = touch.x;
-                this.seekDragMs += deltaX * 2;
+                this.seekDragMs = totalX * 2;
                 const total: number = this.durationMs > 0 ? this.durationMs : 1;
                 const clamped: number = Math.max(0, Math.min(total, this.seekBaseMs + this.seekDragMs));
                 this.positionMs = clamped;
-                this.lastSeekForward = deltaX >= 0;
+                this.lastSeekForward = totalX >= 0;
                 this.gestureFeedback = this.lastSeekForward ? `+${this.formatTime(Math.abs(this.seekDragMs))}` : `-${this.formatTime(Math.abs(this.seekDragMs))}`;
                 this.gestureIcon = 'seek';
                 this.gestureRatio = total > 0 ? clamped / total : 0;
                 this.showFeedback = true;
-              } else if (Math.abs(deltaY) > 3) {
-                // 垂直滑动 → 亮度(左侧) 或 音量(右侧)
+              } else if (this.gestureAxis === 'level' && Math.abs(totalY) > 12) {
+                // 垂直滑动 → 亮度(左侧) 或 音量(右侧)；同样按累计位移计算
                 if (isLeftSide) {
-                  // 亮度：向上增加
-                  const delta: number = -deltaY / 500;
-                  const newBrightness: number = Math.max(0, Math.min(1, this.brightnessBase + delta));
-                  // 鸿蒙暂不支持程序化调节系统亮度，显示反馈
+                  // 亮度：向上增加（鸿蒙暂不支持程序化调节系统亮度，只给反馈）
+                  const newBrightness: number =
+                    Math.max(0, Math.min(1, this.brightnessBase - totalY / 500));
                   this.gestureFeedback = `${Math.round(newBrightness * 100)}%`;
                   this.gestureIcon = 'brightness';
                   this.gestureRatio = newBrightness;
@@ -1937,8 +1954,8 @@ struct PlayerPage {
                   this.brightnessLastY = touch.y;
                 } else {
                   // 音量：向上增加
-                  const delta: number = -deltaY / 500;
-                  const newVolume: number = Math.max(0, Math.min(1, this.volumeBase + delta));
+                  const newVolume: number =
+                    Math.max(0, Math.min(1, this.volumeBase - totalY / 500));
                   this.volume = newVolume;
                   if (this.avPlayer !== null) {
                     this.avPlayer.setVolume(newVolume);
