@@ -15,6 +15,7 @@
 #include "image_url.h"
 #include "playback_policy.h"
 #include "session.h"
+#include "subtitle_url.h"
 #include "url_util.h"
 #include "version.h"
 
@@ -29,13 +30,17 @@
 #include "../feature/player/soft_decode_session.h"
 // EGL/GLES 渲染（把软解帧直接画进 XComponent surface）
 #include "../feature/player/egl_renderer.h"
+// 官方 XComponent 原生渲染桥（OH_NativeXComponent 回调提供 window）
+#include "../feature/player/xcomponent_bridge.h"
 
 #include <cctype>
 #include <functional>
 #include <mutex>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
+#include <hilog/log.h>
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -1201,11 +1206,28 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
             } catch (...) {
                 surfaceId = 0;
             }
-            if (surfaceId != 0) {
+            if (surfaceId != 0 || renderMode == "xcomponent") {
                 if (SoftRenderer().isReady()) {
                     // 已就绪（例如刚被 renderTargetProbe 初始化过）时复用，避免二次初始化同一 surface
                     renderReady = true;
                     out["renderReused"] = true;
+                } else if (renderMode == "xcomponent") {
+                    // 官方路径：window 由 ArkUI 经 OH_NativeXComponent 回调给出（见 xcomponent_bridge）
+                    int surfaceW = 0;
+                    int surfaceH = 0;
+                    void *surfaceWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
+                    if (!jellyfin::player::XComponentBridge::SurfaceSize(surfaceW, surfaceH)) {
+                        // 尺寸取自 ArkTS 侧的组件实测值兜底
+                        surfaceW = static_cast<int>(surfaceWidth);
+                        surfaceH = static_cast<int>(surfaceHeight);
+                    }
+                    if (surfaceWindow == nullptr) {
+                        renderError = "XComponent surface 尚未创建（等待 OnSurfaceCreated）";
+                    } else {
+                        renderReady = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH,
+                                                                    renderError);
+                        out["xcomponentSize"] = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
+                    }
                 } else if (renderMode == "texture") {
                     // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
                     renderReady = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId),
@@ -1434,7 +1456,24 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
 
     std::string initError;
     bool ready = false;
-    if (out["mode"] == "texture") {
+    if (out["mode"] == "xcomponent") {
+        // 官方路径：window 来自 OH_NativeXComponent 回调（xcomponent_bridge）
+        void *surfaceWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
+        int surfaceW = 0;
+        int surfaceH = 0;
+        if (!jellyfin::player::XComponentBridge::SurfaceSize(surfaceW, surfaceH)) {
+            surfaceW = static_cast<int>(width);
+            surfaceH = static_cast<int>(height);
+        }
+        if (surfaceWindow == nullptr) {
+            initError = jellyfin::player::XComponentBridge::IsRegistered()
+                            ? "XComponent 已注册但 surface 尚未创建（等待 OnSurfaceCreated）"
+                            : "未收到 OH_NativeXComponent：请确认 XComponent 指定了 libraryname";
+        } else {
+            out["xcomponentSize"] = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
+            ready = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH, initError);
+        }
+    } else if (out["mode"] == "texture") {
         ready = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId), initError,
                                                static_cast<int>(width), static_cast<int>(height));
     } else {
@@ -1452,9 +1491,10 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
     out["ok"] = renderable;
     out["renderable"] = renderable;
     out["report"] = report;
-    // 探测是一次性的：测完立刻销毁 EGL/NativeImage，避免它与随后软解播放的初始化叠加。
-    // （实测：对同一个 textureId 重复 OH_NativeImage_Create 会让后续 eglSwapBuffers 报 0x12301）
-    SoftRenderer().destroy();
+    // 探测**不销毁**渲染器：保留它已建立好的 EGL surface。
+    // 实测教训：探测跑完 destroy 之后，软解会在同一个 XComponent window 上重建 EGL surface，
+    // 而第二次创建的表面 swap 报 0x12301（首个表面正常）。`softPlayOpen` 已有
+    // "渲染器已就绪则复用" 的分支，因此保留即可安全共用，也避免同一 window 上的二次初始化。
     return ToNapiJson(env, MakeResult(true, 200, "ok", out));
 }
 
@@ -1933,6 +1973,45 @@ napi_value GetImageUrl(napi_env env, napi_callback_info info)
     return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"url", url}}));
 }
 
+/**
+ * 构造外挂字幕地址（播放中切换字幕用）。
+ *
+ * 参数：itemId, mediaSourceId, streamIndex（Jellyfin MediaStreams[].Index）, codec
+ * 返回：{ ok, data: { url, format, imageSubtitle } }
+ *
+ * 为什么由原生构造：服务器地址、访问令牌与 URL 形态属于 Jellyfin 集成细节，
+ * ArkTS 侧不应自行拼接（见 AGENTS.md 的分层约定）。
+ */
+napi_value SubtitleUrl(napi_env env, napi_callback_info info)
+{
+    std::string itemId;
+    std::string mediaSourceId;
+    std::string codec;
+    int64_t streamIndex = -1;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, mediaSourceId);
+    ReadIntArg(env, info, 2, streamIndex);
+    ReadStringArg(env, info, 3, codec);
+    if (itemId.empty() || streamIndex < 0) {
+        return ToNapiJson(env, MakeResult(false, 0, "itemId and streamIndex required"));
+    }
+    auto &session = jellyfin::SessionManager::instance();
+    const std::string format = jellyfin::SubtitleFormatForCodec(codec);
+    const std::string url = jellyfin::BuildSubtitleUrl(
+        session.baseUrl(), itemId, mediaSourceId, static_cast<int>(streamIndex), format,
+        session.accessToken());
+    if (url.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "Unable to build subtitle url"));
+    }
+    nlohmann::json data = {
+        {"url", url},
+        {"format", format},
+        {"codec", codec},
+        {"imageSubtitle", jellyfin::IsImageSubtitleCodec(codec)},
+    };
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
+}
+
 napi_value SetImageCacheDir(napi_env env, napi_callback_info info)
 {
     std::string dir;
@@ -2000,6 +2079,24 @@ napi_value ClearImageCache(napi_env env, napi_callback_info /*info*/)
 
 napi_value jellyfin_napi_init(napi_env env, napi_value exports)
 {
+    // 提升进程 fd 软上限到硬上限（设备实测硬上限为 32768）。
+    //
+    // 为什么需要：musl FORTIFY 的 `__fd_chk` 会用**进程启动时的 fd 上限**校验，
+    // 而应用实际 fd 数在大图库/多图并发加载时会轻易超过较小的初始上限（实测 fd 涨到 1053
+    // 后立刻 SIGABRT：`__fd_chk` → `__fortify_error` → abort）。把软上限提到硬上限后，
+    // 合法 fd 不再被误判为非法；同时我们仍应限制并发请求数（见 ImageCache 的并发控制计划）。
+    struct rlimit fdLimit {};
+    if (getrlimit(RLIMIT_NOFILE, &fdLimit) == 0 && fdLimit.rlim_cur < fdLimit.rlim_max) {
+        struct rlimit raised {};
+        raised.rlim_cur = fdLimit.rlim_max;
+        raised.rlim_max = fdLimit.rlim_max;
+        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "jellyfin",
+                         "raised fd limit %{public}llu -> %{public}llu",
+                         static_cast<unsigned long long>(fdLimit.rlim_cur),
+                         static_cast<unsigned long long>(raised.rlim_cur));
+        }
+    }
     napi_property_descriptor desc[] = {
         {"getVersion", nullptr, GetVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
@@ -2083,6 +2180,7 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getPreferences", nullptr, GetPreferences, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"getImageUrl", nullptr, GetImageUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"subtitleUrl", nullptr, SubtitleUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setImageCacheDir", nullptr, SetImageCacheDir, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"setCaBundlePath", nullptr, SetCaBundlePath, nullptr, nullptr, nullptr, napi_default,
@@ -2093,5 +2191,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+    // 官方 XComponent 原生渲染入口：ArkUI 会把 XComponent 的 OH_NativeXComponent 注入到本模块 exports
+    // （前提：ArkTS 侧 XComponent 指定 libraryname 指向本模块）
+    jellyfin::player::XComponentBridge::Register(env, exports);
     return exports;
 }

@@ -448,6 +448,19 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * 外挂字幕地址（播放中切换字幕）：服务端按格式转换后直接取回，交给播放器叠加。
+   * 返回 JSON：{ ok, data: { url, format, codec, imageSubtitle } }
+   */
+  static subtitleUrl(itemId: string, mediaSourceId: string, streamIndex: number,
+                     codec: string): string {
+    try {
+      return jellyfinNative.subtitleUrl(itemId, mediaSourceId, streamIndex, codec);
+    } catch (error) {
+      return JellyfinNative.fail('subtitleUrl', error);
+    }
+  }
+
   static setImageCacheDir(dir: string): string {
     try {
       return jellyfinNative.setImageCacheDir(dir);

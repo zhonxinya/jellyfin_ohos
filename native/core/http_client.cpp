@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <hilog/log.h>
 #include <ctime>
 #include <sstream>
 #include <string>
@@ -142,15 +144,36 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
     std::vector<int> pending;
     int lastErrno = 0;
     int sock = -1;
+    // 只关一次：关闭后立即置 -1。
+    // 为什么必须这样：musl 的 FORTIFY 会在 fd 无效时经 __fd_chk **直接 abort**，
+    // 而"同一 fd 被关两次"在竞速连接 + select 多分支里很容易发生（设备实测崩溃栈：
+    // HttpClient::get → request → ConnectTcp(__fd_chk)）。用统一的关闭器把这类错误变成不可能。
+    auto closeOnce = [](int &fd) {
+        // 取证：musl FORTIFY 的 __fd_chk 只在 fd < 0 或超出 fd 上限时 abort
+        // （单纯重复关闭只会得到 EBADF），因此这里把关闭前的值打出来，
+        // 崩溃前最后几行即可指出非法 fd 的来源。
+        if (fd >= 0) {
+            // 用 hilog 取证：本项目实测 fprintf(stderr) 不会进入 hilog，OH_LOG_Print 才会
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "close fd=%{public}d", fd);
+            close(fd);
+            fd = -1;
+        } else {
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "skip close fd=%{public}d", fd);
+        }
+    };
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "start host=%{public}s", host.c_str());
     for (addrinfo *p = res; p != nullptr && sock < 0; p = p->ai_next) {
-        const int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
+        int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
         if (fd < 0) {
             lastErrno = errno;
             continue;
         }
+        // 取证：每个请求创建 socket 时打印 fd。若 fd 随请求单调增长（而非回落到小值），
+        // 即说明有 fd 泄漏；这是区分"泄漏"与"瞬时并发尖峰"的唯一可靠手段。
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "socket fd=%{public}d", fd);
         if (!SetNonBlocking(fd, true)) {
             lastErrno = errno;
-            close(fd);
+            closeOnce(fd);
             continue;
         }
         if (connect(fd, p->ai_addr, static_cast<socklen_t>(p->ai_addrlen)) == 0) {
@@ -158,11 +181,13 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         if (errno == EINPROGRESS && pending.size() < kMaxPendingConnects) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "pending+= fd=%{public}d family=%{public}d",
+                         fd, p->ai_family);
             pending.push_back(fd);
             continue;
         }
         lastErrno = errno;
-        close(fd);
+        closeOnce(fd);
     }
     freeaddrinfo(res);
 
@@ -202,7 +227,7 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         std::vector<int> next;
-        for (const int fd : pending) {
+        for (int fd : pending) {
             if (sock >= 0) {
                 next.push_back(fd);
                 continue;
@@ -221,12 +246,16 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             } else {
                 lastErrno = soError;
             }
-            close(fd);
+            closeOnce(fd);
         }
         pending.swap(next);
     }
-    for (const int fd : pending) {
-        close(fd);
+    // 清理未被选中的候选 fd：`closeOnce` 保证"已关过就跳过"，
+    // 从根本上消除"重复关闭 → __fd_chk abort"（设备实测崩溃点就在这里）。
+    for (int &fd : pending) {
+        if (fd != sock) {
+            closeOnce(fd);
+        }
     }
 
     if (sock < 0) {

@@ -250,7 +250,11 @@ struct DetailPage {
       params: {
         itemId: id,
         title: this.item.name,
-        playbackOptions: this.buildPlaybackOptions()
+        playbackOptions: this.buildPlaybackOptions(),
+        // 把可切换的流列表带给播放页，使其能在**播放中**切换音频/字幕
+        // （Jellyfin 的轨道选择是 PlaybackInfo 参数，切换后按原位置重新拉起播放即可，
+        //   对硬解与软解两条路径都成立）
+        mediaStreams: JSON.stringify(this.mediaStreams)
       }
     });
   }

@@ -60,8 +60,6 @@ bool EglRenderer::init(uint64_t surfaceId, std::string &error, int requestedWidt
 {
     destroy();
     surfaceId_ = surfaceId;
-    requestedWidth_ = requestedWidth;
-    requestedHeight_ = requestedHeight;
 
     OHNativeWindow *window = nullptr;
     const int32_t rc = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &window);
@@ -70,102 +68,8 @@ bool EglRenderer::init(uint64_t surfaceId, std::string &error, int requestedWidt
         return false;
     }
     nativeWindow_ = window;
-
-    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) {
-        error = "eglGetDisplay 失败";
-        return false;
-    }
-    EGLint major = 0;
-    EGLint minor = 0;
-    if (eglInitialize(display, &major, &minor) != EGL_TRUE) {
-        error = "eglInitialize 失败";
-        return false;
-    }
-    display_ = display;
-
-    const EGLint configAttribs[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_NONE
-    };
-    EGLConfig config = nullptr;
-    EGLint numConfigs = 0;
-    if (eglChooseConfig(display, configAttribs, &config, 1, &numConfigs) != EGL_TRUE || numConfigs < 1) {
-        error = "eglChooseConfig 未找到匹配的 RGBA8888 配置";
-        return false;
-    }
-
-    // 关键：先落实缓冲几何再用它创建 EGL surface。
-    // 几何为 0 时 OHOS 的 eglSwapBuffers 会失败（实测 0x12301，非标准 EGL 错误码）。
-    int32_t bufW = 0;
-    int32_t bufH = 0;
-    OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY, &bufW, &bufH);
-    // 实测该值可能宽高转置（2619x1260 vs 实际 1260x2619），导致 eglSwapBuffers 失败；
-    // 因此只要调用方给了组件真实像素尺寸，就以它为准强制重设几何。
-    if (requestedWidth_ > 0 && requestedHeight_ > 0) {
-        OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, requestedWidth_,
-                                             requestedHeight_);
-        bufW = requestedWidth_;
-        bufH = requestedHeight_;
-    }
-    geometryAtInit_ = std::to_string(bufW) + "x" + std::to_string(bufH);
-
-    EGLSurface surface = eglCreateWindowSurface(display, config,
-                                                reinterpret_cast<EGLNativeWindowType>(window), nullptr);
-    if (surface == EGL_NO_SURFACE) {
-        error = "eglCreateWindowSurface 失败（0x" + std::to_string(eglGetError()) + "）";
-        return false;
-    }
-    surface_ = surface;
-
-    const EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttribs);
-    if (context == EGL_NO_CONTEXT) {
-        error = "eglCreateContext 失败";
-        return false;
-    }
-    context_ = context;
-
-    if (eglMakeCurrent(display, surface, surface, context) != EGL_TRUE) {
-        error = "eglMakeCurrent 失败";
-        return false;
-    }
-    eglQuerySurface(display, surface, EGL_WIDTH, &surfaceWidth_);
-    eglQuerySurface(display, surface, EGL_HEIGHT, &surfaceHeight_);
-    if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
-        surfaceWidth_ = bufW;
-        surfaceHeight_ = bufH;
-    }
-
-    if (!buildProgram(error)) {
-        return false;
-    }
-
-    glGenTextures(1, &texture_);
-    glBindTexture(GL_TEXTURE_2D, texture_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    static const float kQuad[] = {
-        // 位置(x,y)     纹理坐标(u,v)：v 已翻转（解码输出是自上而下）
-        -1.0f, -1.0f,  0.0f, 1.0f,
-         1.0f, -1.0f,  1.0f, 1.0f,
-        -1.0f,  1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 0.0f
-    };
-    glGenBuffers(1, &vbo_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(kQuad), kQuad, GL_STATIC_DRAW);
-
-    ready_ = true;
-    return true;
+    // 与官方 XComponent 路径共用同一套初始化，避免两条序列各自演化（本会话踩过这类坑）
+    return initWithWindow(window, requestedWidth, requestedHeight, error);
 }
 
 bool EglRenderer::buildProgram(std::string &error)
@@ -369,6 +273,31 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
     }
     nativeWindow_ = window;
 
+    return initWithWindow(window, requestedWidth, requestedHeight, error);
+}
+
+/**
+ * 官方路径入口：window 由 ArkUI 经 `OH_NativeXComponent` 回调给出（见 xcomponent_bridge.h），
+ * 尺寸取 `OH_NativeXComponent_GetXComponentSize()`。与 surfaceId 路径共用同一套初始化。
+ */
+bool EglRenderer::initFromWindow(void *nativeWindow, int width, int height, std::string &error)
+{
+    destroy();
+    if (nativeWindow == nullptr) {
+        error = "XComponent window 为空（surface 尚未创建）";
+        return false;
+    }
+    requestedWidth_ = width;
+    requestedHeight_ = height;
+    nativeWindow_ = nativeWindow;
+    return initWithWindow(nativeWindow, width, height, error);
+}
+
+/** 两条路径共用的初始化：EGL display/config/context、程序、纹理与顶点缓冲 */
+bool EglRenderer::initWithWindow(void *windowPtr, int requestedWidth, int requestedHeight,
+                                 std::string &error)
+{
+    OHNativeWindow *window = static_cast<OHNativeWindow *>(windowPtr);
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     EGLint major = 0;
     EGLint minor = 0;
@@ -390,17 +319,12 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
         destroy();
         return false;
     }
-    int32_t bufW = 0;
-    int32_t bufH = 0;
-    OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY, &bufW, &bufH);
-    (void)bufW;
-    (void)bufH;
     // 渲染缓冲**不跟随组件全尺寸**：模拟器的 GL 是软件光栅化（日志可见 DGLES
     // `d_eglSwapBuffers_special ... speed 531k/s`），让它每帧交换 1260x2619（330 万像素）
     // 会直接失败（实测 eglSwapBuffers 0x12301）。这里按视频尺寸量级限制缓冲（默认 ≤640 宽，
     // 保持宽高比），由 ArkUI 把该内容放大到 XComponent 尺寸。
-    int32_t w = requestedWidth_;
-    int32_t h = requestedHeight_;
+    int32_t w = requestedWidth;
+    int32_t h = requestedHeight;
     if (w > kMaxRenderWidth) {
         h = static_cast<int32_t>(static_cast<int64_t>(h) * kMaxRenderWidth / w);
         w = kMaxRenderWidth;
@@ -410,40 +334,20 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
         h = 360;
     }
     OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, w, h);
-    bufW = w;
-    bufH = h;
-    geometryAtInit_ = std::to_string(bufW) + "x" + std::to_string(bufH);
+    geometryAtInit_ = std::to_string(w) + "x" + std::to_string(h);
 
-    // TEXTURE 路径采用 OH_NativeImage 的标准用法：window surface（取自 NativeImage 的窗口）
-    // → 绘制 → eglSwapBuffers → OH_NativeImage_UpdateSurfaceImage 发布。
-    // 注意：swap 与 UpdateSurfaceImage 必须成对（见 selfTest 注释中的踩坑记录）。
-    // 曾试过"pbuffer + 直接把帧写进 XComponent 纹理"的简化方案，实测 UpdateSurfaceImage
-    // 返回 NATIVE_ERROR_NO_BUFFER(40601000)（没有可发布的 buffer），故回到 window surface 模式。
-    xcomponentTextureId_ = textureId;
-    const EGLint winConfigAttribs[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE
-    };
-    EGLConfig winConfig = nullptr;
-    EGLint winCount = 0;
-    if (eglChooseConfig(display, winConfigAttribs, &winConfig, 1, &winCount) != EGL_TRUE ||
-        winCount < 1) {
-        error = "eglChooseConfig(window, 纹理路径) 失败";
-        destroy();
-        return false;
-    }
-    EGLSurface surface = eglCreateWindowSurface(display, winConfig,
+    EGLSurface surface = eglCreateWindowSurface(display, config,
                                                 reinterpret_cast<EGLNativeWindowType>(window), nullptr);
     if (surface == EGL_NO_SURFACE) {
-        error = "eglCreateWindowSurface(纹理路径) 失败";
+        error = "eglCreateWindowSurface 失败（EGL 0x" + std::to_string(eglGetError()) + "）";
         destroy();
         return false;
     }
     surface_ = surface;
     const EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    EGLContext context = eglCreateContext(display, winConfig, EGL_NO_CONTEXT, contextAttribs);
+    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttribs);
     if (context == EGL_NO_CONTEXT || eglMakeCurrent(display, surface, surface, context) != EGL_TRUE) {
-        error = "EGL 上下文创建/切换失败（纹理路径）";
+        error = "EGL 上下文创建/切换失败";
         destroy();
         return false;
     }
@@ -451,8 +355,8 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
     eglQuerySurface(display, surface, EGL_WIDTH, &surfaceWidth_);
     eglQuerySurface(display, surface, EGL_HEIGHT, &surfaceHeight_);
     if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
-        surfaceWidth_ = bufW > 0 ? bufW : requestedWidth_;
-        surfaceHeight_ = bufH > 0 ? bufH : requestedHeight_;
+        surfaceWidth_ = w;
+        surfaceHeight_ = h;
     }
     if (!buildProgram(error)) {
         destroy();

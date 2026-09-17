@@ -67,6 +67,8 @@ declare module 'libjellyfin_native.so' {
     setPreference(key: string, value: string): string;
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;
+    /** 构造外挂字幕地址（播放中切换字幕）：返回 JSON { ok, data: { url, format, codec, imageSubtitle } } */
+    subtitleUrl(itemId: string, mediaSourceId: string, streamIndex: number, codec: string): string;
     setImageCacheDir(dir: string): string;
     setCaBundlePath(path: string): string;
     hasCaBundle(): string;

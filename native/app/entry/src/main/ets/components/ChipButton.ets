@@ -13,6 +13,14 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 export struct ChipButton {
   @Prop label: string = '';
   @Prop selected: boolean = false;
+  /**
+   * 可选的触达高度覆盖（vp）。0 表示沿用 `ThemeConstants.CHIP_HEIGHT`。
+   *
+   * 为什么是"可选覆盖"而不是直接改全局 token：34vp 低于 48vp 的触达建议，
+   * 但该 token 被多个页面共用，全局改动会牵动所有筛选/标签页布局（无法逐一目视验证）。
+   * 播放页这类"单手操作、误触代价高"的场合按需传更大值，风险可控。
+   */
+  @Prop heightOverride: number = 0;
   onTap: () => void = () => {};
 
   private colors(): ThemeColors {
@@ -27,7 +35,7 @@ export struct ChipButton {
         .fontColor(this.selected ? this.colors().onBrand : this.colors().textPrimary)
         .maxLines(1)
     }
-    .height(ThemeConstants.CHIP_HEIGHT)
+    .height(this.heightOverride > 0 ? this.heightOverride : ThemeConstants.CHIP_HEIGHT)
     .padding({ left: 14, right: 14 })
     .backgroundColor(this.selected ? this.colors().brandPrimary : this.colors().cardBackground)
     .border({
