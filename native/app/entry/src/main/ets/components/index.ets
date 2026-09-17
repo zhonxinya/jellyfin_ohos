@@ -14,6 +14,7 @@ export { DangerButton } from './DangerButton';
 export { TextButton } from './TextButton';
 export type { TextButtonTone } from './TextButton';
 export { ChipButton } from './ChipButton';
+export { PlayerToolButton } from './PlayerToolButton';
 export { FilterChips } from './FilterChips';
 export type { FilterChipItem } from './FilterChips';
 export { EmptyState } from './EmptyState';

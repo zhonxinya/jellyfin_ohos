@@ -1409,7 +1409,14 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
             {"ptsSec", frameInfo.ptsSec},
             {"frameIndex", frameInfo.frameIndex},
             {"bytesFetched", SoftSession()->bytesFetched()},
+            // 排队的 seek 结果：宿主据此知道"跳转到底生效了没有"（此前只能看到位置没变，
+            // 无法区分"还没执行"与"执行失败"）。
+            {"seekApplied", frameInfo.seekApplied},
+            {"seekedToSec", frameInfo.seekedToSec},
         };
+        if (!frameInfo.seekError.empty()) {
+            out["seekError"] = frameInfo.seekError;
+        }
         if (!frameInfo.error.empty()) {
             out["error"] = frameInfo.error;
         }
@@ -1663,8 +1670,14 @@ napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
 }
 
 /**
- * 软解会话 seek：跳转到指定时间点（秒）。
- * 用于续播（"继续观看"）：打开会话后 seek 到上次观看位置。
+ * 软解会话 seek：**只排队**，真正的 `av_seek_frame` 由下一次 `softPlayNextFrame`
+ * （工作线程）执行，并把结果放进那一帧的 JSON（`seekApplied` / `seekedTo` / `seekError`）。
+ *
+ * 为什么不在这里直接 seek（本次改动的原因）：`av_seek_frame` 会经自定义 AVIO 回调做
+ * **同步 HTTP Range 取流**，在 ArkTS（UI 线程）调用就是"UI 线程做网络 I/O"，
+ * 而且会与解码线程并发操作同一个 AVFormatContext。表现是设备实测"软解播放中按 ±10s /
+ * 拖动进度条没有反应"。排队后 UI 侧立即返回，seek 与解码在同一条线程上串行。
+ *
  * 参数：positionSec（目标时间点，秒）。
  */
 napi_value SoftPlaySeek(napi_env env, napi_callback_info info)
@@ -1681,16 +1694,35 @@ napi_value SoftPlaySeek(napi_env env, napi_callback_info info)
             napi_get_value_double(env, args[0], &positionSec);
         }
     }
-    std::string error;
-    const bool ok = SoftSession()->seek(positionSec, error);
+    SoftSession()->requestSeek(positionSec);
     nlohmann::json data = {
-        {"ok", ok},
+        {"ok", true},
+        {"queued", true},
         {"positionSec", positionSec},
     };
-    if (!ok) {
-        data["error"] = error;
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
+}
+
+/**
+ * 设置软解画面的缩放模式（「视频比例」在软解路径上的落点）。
+ *
+ * 参数：mode —— 0 适应 / 1 填充 / 2 拉伸 / 3 原始（对应 ScaleMode，
+ * 与 ArkTS 的 PlayerAspectMode 顺序一致）。渲染器未就绪时也允许设置，
+ * 值会被记住并在渲染器就绪后生效（用户可能在软解打开前就切了比例）。
+ */
+napi_value SoftPlaySetScale(napi_env env, napi_callback_info info)
+{
+    int64_t mode = 0;
+    ReadIntArg(env, info, 0, mode);
+    if (mode < 0 || mode > 3) {
+        return ToNapiJson(env, MakeResult(false, 0, "缩放模式非法（应为 0-3）"));
     }
-    return ToNapiJson(env, MakeResult(ok, ok ? 200 : 500, ok ? "ok" : error, data));
+    SoftRenderer().setScaleMode(static_cast<jellyfin::player::ScaleMode>(mode));
+    nlohmann::json data = {
+        {"mode", mode},
+        {"rendererReady", SoftRenderer().isReady()},
+    };
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
 }
 
 /**
@@ -2304,6 +2336,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          nullptr},
         {"softPlayClose", nullptr, SoftPlayClose, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"softPlaySeek", nullptr, SoftPlaySeek, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"softPlaySetScale", nullptr, SoftPlaySetScale, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
         {"softPlayDumpFrame", nullptr, SoftPlayDumpFrame, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlaySelfTest", nullptr, SoftPlaySelfTest, nullptr, nullptr, nullptr, napi_default,

@@ -603,6 +603,18 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * 设置软解画面缩放模式：「视频比例」在软解路径上的落点。
+   * 0 适应 / 1 填充 / 2 拉伸 / 3 原始（与 `PlayerAspectMode` 顺序一致）。
+   */
+  static softPlaySetScale(mode: number): string {
+    try {
+      return jellyfinNative.softPlaySetScale(mode);
+    } catch (error) {
+      return JellyfinNative.fail('softPlaySetScale', error);
+    }
+  }
+
   /** 读取 XComponent 视频区域的最新触摸事件（由 DispatchTouchEvent 捕获） */
   static getXComponentTouchEvent(): string {
     try {

@@ -1,5 +1,6 @@
 #include "egl_renderer.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include <EGL/egl.h>
@@ -15,10 +16,11 @@ namespace {
 const char *kVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aUv;
+uniform vec2 uScale;
 out vec2 vUv;
 void main() {
     vUv = aUv;
-    gl_Position = vec4(aPos, 0.0, 1.0);
+    gl_Position = vec4(aPos * uScale, 0.0, 1.0);
 }
 )";
 
@@ -104,6 +106,7 @@ bool EglRenderer::buildProgram(std::string &error)
     attribPos_ = glGetAttribLocation(program, "aPos");
     attribUv_ = glGetAttribLocation(program, "aUv");
     uniformTex_ = glGetUniformLocation(program, "uTex");
+    uniformScale_ = glGetUniformLocation(program, "uScale");
     if (attribPos_ < 0 || attribUv_ < 0) {
         error = "着色器 attribute 未找到（aPos=" + std::to_string(attribPos_) + ", aUv="
                 + std::to_string(attribUv_) + "）";
@@ -174,11 +177,23 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
                    static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
 
-    if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
+    // 每帧都重新查询 surface 几何。
+    //
+    // 为什么不能只在初始化时查一次：宿主会按「视频比例」调整 XComponent 的尺寸
+    // （见 ArkTS 的 PlayerAspect），surface 的缓冲尺寸随之改变；沿用旧尺寸会让
+    // glViewport 与顶点缩放都按旧几何计算 —— 表现为切比例后画面被拉伸/位置偏移。
+    // eglQuerySurface 只读属性，代价可忽略。
+    {
+        EGLint qw = 0;
+        EGLint qh = 0;
         eglQuerySurface(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
-                        EGL_WIDTH, &surfaceWidth_);
+                        EGL_WIDTH, &qw);
         eglQuerySurface(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
-                        EGL_HEIGHT, &surfaceHeight_);
+                        EGL_HEIGHT, &qh);
+        if (qw > 0 && qh > 0) {
+            surfaceWidth_ = qw;
+            surfaceHeight_ = qh;
+        }
     }
     // 上下文可能在 surface 重建后失效：每次渲染前确保 current
     eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
@@ -206,6 +221,27 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
         return false;
     }
     glUniform1i(uniformTex_, 0);
+    // 画面比例：顶点缩放 = (帧尺寸 × 比例系数) / surface 尺寸，>1 的部分被视口裁掉。
+    if (uniformScale_ >= 0) {
+        const float sx = static_cast<float>(surfaceWidth_ > 0 ? surfaceWidth_ : 1);
+        const float sy = static_cast<float>(surfaceHeight_ > 0 ? surfaceHeight_ : 1);
+        const float fx = static_cast<float>(width);
+        const float fy = static_cast<float>(height);
+        if (scaleMode_ == ScaleMode::Stretch) {
+            // 非等比铺满：直接用满屏顶点，不缩放
+            glUniform2f(uniformScale_, 1.0f, 1.0f);
+        } else {
+            float k = 1.0f;
+            if (scaleMode_ == ScaleMode::Contain) {
+                k = std::min(sx / fx, sy / fy);   // 完整可见：取小系数，多余区域留黑边
+            } else if (scaleMode_ == ScaleMode::Cover) {
+                k = std::max(sx / fx, sy / fy);   // 铺满并裁剪：取大系数，超出部分由视口裁掉
+            } else {
+                k = std::min(1.0f, std::min(sx / fx, sy / fy));  // 原始：1:1；装不下时退回适应
+            }
+            glUniform2f(uniformScale_, (fx * k) / sx, (fy * k) / sy);
+        }
+    }
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glEnableVertexAttribArray(static_cast<GLuint>(attribPos_));

@@ -9,6 +9,29 @@ namespace jellyfin {
 namespace player {
 
 /**
+ * 画面缩放模式。
+ *
+ * 为什么渲染器要自己管比例，而不是全靠宿主把 XComponent 调成画面同比例：
+ *  - 宿主侧的"视频面尺寸 = 画面比例"做法能覆盖留黑边的「适应」，
+ *    但「填充（等比放大 + 裁剪）」「拉伸」必须让画面溢出/铺满同一个视频面；
+ *  - 软解路径的画面来自本渲染器上传的纹理，只有它自己知道帧的真实像素尺寸，
+ *    由它按模式换算顶点缩放最直接，也不需要宿主重复计算。
+ *
+ * 数值与 ArkTS 侧 `PlayerAspectMode`（contain/cover/stretch/original => 0/1/2/3）一一对应，
+ * 跨 NAPI 传递时直接传这个整数，避免字符串在两处各写一遍。
+ */
+enum class ScaleMode : int {
+    /** 适应：等比缩放，整幅画面可见，多余区域留黑边（默认，主流播放器的默认行为） */
+    Contain = 0,
+    /** 填充：等比放大铺满，超出部分被裁剪（不变形） */
+    Cover = 1,
+    /** 拉伸：非等比铺满（会变形，但消除黑边） */
+    Stretch = 2,
+    /** 原始：1 个视频像素对应 1 个屏幕像素；超出屏幕时退回「适应」 */
+    Original = 3,
+};
+
+/**
  * 把 RGBA 帧渲染到 XComponent 的 surface（EGL + GLES）。
  *
  * 为什么需要：软解在 CPU 上出帧后必须上屏；用 `Image(PixelMap)` 逐帧刷新既重又易踩生命周期坑，
@@ -31,8 +54,16 @@ public:
      */
     bool init(uint64_t surfaceId, std::string &error, int requestedWidth = 0, int requestedHeight = 0);
 
-    /** 上传一帧 RGBA 并绘制、交换缓冲（宽高等比铺满，保持画面比例） */
+    /** 上传一帧 RGBA 并绘制、交换缓冲（按 `scaleMode()` 决定留黑边/裁剪/铺满） */
     bool renderRgba(const uint8_t *rgba, int width, int height, std::string &error);
+
+    /**
+     * 设置画面缩放模式（播放中可随时切换，下一帧生效）。
+     * 见 `ScaleMode`：这是「视频比例」在软解路径上的落点。
+     */
+    void setScaleMode(ScaleMode mode) { scaleMode_ = mode; }
+
+    ScaleMode scaleMode() const { return scaleMode_; }
 
     /**
      * 从**当前渲染缓冲**回读像素（glReadPixels）。
@@ -98,6 +129,9 @@ private:
     int attribPos_ = -1;
     int attribUv_ = -1;
     int uniformTex_ = -1;
+    /** 顶点缩放 uniform（画面比例：留黑边/裁剪/铺满都靠它换算，避免每帧重建顶点缓冲） */
+    int uniformScale_ = -1;
+    ScaleMode scaleMode_ = ScaleMode::Contain;
     int surfaceWidth_ = 0;
     int surfaceHeight_ = 0;
     int requestedWidth_ = 0;

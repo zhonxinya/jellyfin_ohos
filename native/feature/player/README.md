@@ -138,12 +138,31 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   线程池线程后，`eglSwapBuffers` 返回 **`0x12301`**、帧解出来了但**上不了屏**
   （诊断行显示"未渲染"）。正确拆法是"工作线程只解码 + UI 线程渲染"：
   `softPlayNextFrame()`（异步，解码并缓存最近帧）+ `softPlayRenderLast()`（同步，UI 线程调用）。
-- **软解会话的 seek 续播**：`SoftDecodeSession::seek(seconds)` 支持跳转到指定时间点（秒），
-  用于"继续观看"续播。实现：`av_seek_frame(AVSEEK_FLAG_BACKWARD)` + `avcodec_flush_buffers()`。
-  宿主侧在 `softPlayOpen` 成功后调用 `softPlaySeek(positionSec)` 即可续播。
+- **软解会话的 seek**：`SoftDecodeSession::seek(seconds)` 跳转到指定时间点（秒），
+  实现为 `av_seek_frame(AVSEEK_FLAG_BACKWARD)` + `avcodec_flush_buffers()`。
   两点容易漏：①`av_seek_frame(fmt, -1, ts, ...)` 的 `stream_index = -1` 要求时间戳是
   `AV_TIME_BASE`（微秒）单位，不是秒；②seek 后必须 `avcodec_flush_buffers()`，
   否则解码器里残留的旧帧会先被吐出来（表现为"seek 了但先闪几帧旧画面"）。
+- **播放中的 seek 必须"排队"，不要在宿主（UI）线程直接调 `seek()`**：`seek()` 里的
+  `av_seek_frame` 会经自定义 AVIO 回调做**同步 HTTP Range 取流**，在 UI 线程调用就是
+  "UI 线程做网络 I/O"（与下面 appfreeze 那条同源约束）；而且它会与解码线程并发操作
+  同一个 `AVFormatContext`（数据竞争）。现在拆成两步：
+  1. `requestSeek(seconds)`：线程安全、非阻塞，只记 `pendingSeekSec_`；
+  2. `nextFrameRgba()` 在**解码线程**上先执行排队的 seek 再解码，结果写进
+     `FrameInfo.seekApplied / seekedToSec / seekError`，宿主据此判断"跳转到底生效了没有"。
+  设备实测（播放页双击两侧快进）：`seekTo ... queued=1` → `seekApplied to=16.3`，
+  服务端进度 `pts=6.3` → `pts=21.1`；**修复前**软解下拖动进度条/±10s 完全没有反应。
+  注意：排队 seek 要在"会话是否 eof"的判断**之前**执行 —— `seek()` 会清 `eof`，
+  这样"播到结尾后往回跳"才能继续播。
+- **画面比例（缩放模式）**：`EglRenderer::setScaleMode(ScaleMode)` 支持
+  `Contain`（等比留黑边，默认）/ `Cover`（等比铺满并裁剪）/ `Stretch`（非等比铺满）/
+  `Original`（1 视频像素 = 1 屏幕像素，装不下时退回 Contain）。
+  实现是顶点着色器里的 `uScale` uniform（不重建顶点缓冲）：按「帧尺寸 → surface 尺寸」
+  算缩放系数，`>1` 的部分由视口自然裁掉。两条要点：
+  ①**不能只靠宿主把视频面调成画面同比例** —— `Cover`/`Stretch` 必须让画面溢出同一个视频面；
+  ②渲染前**每帧重查 `eglQuerySurface`** —— 宿主会按比例改 XComponent 尺寸，
+  沿用旧几何会让切比例后的画面被拉伸/错位。
+  数值与宿主 ArkTS 的 `PlayerAspectMode`（contain/cover/stretch/original => 0/1/2/3）一一对应。
 - **`DispatchTouchEvent` 非 null 是"参与输入派发"的开关，不是"手势判定"的实现** —— 实测结论：
   XComponent 之上的 ArkUI 透明层能收到触摸的前提，是原生回调**不为 `nullptr`**
   （为 `nullptr` 时框架不向该区域派发触摸，视频区手势全失效）；但回调本身**从未被调用**
