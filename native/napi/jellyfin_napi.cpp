@@ -270,6 +270,16 @@ jellyfin::api::ItemsQuery ParseItemsQueryJson(const nlohmann::json &j)
     query.mediaTypes = j.value("mediaTypes", "");
     query.excludeItemTypes = j.value("excludeItemTypes", "");
     query.enableUserData = j.value("enableUserData", true);
+    query.filters = j.value("filters", "");
+    query.years = j.value("years", "");
+    query.officialRatings = j.value("officialRatings", "");
+    query.minOfficialRating = j.value("minOfficialRating", "");
+    query.tags = j.value("tags", "");
+    query.videoTypes = j.value("videoTypes", "");
+    query.isHd = j.value("isHd", false);
+    query.is4k = j.value("is4k", false);
+    query.hasSubtitles = j.value("hasSubtitles", false);
+    query.enableTotalRecordCount = j.value("enableTotalRecordCount", true);
     return query;
 }
 

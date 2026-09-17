@@ -127,6 +127,12 @@ struct DetailPage {
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (result.ok) {
       this.item.isFavorite = next;
+      this.showActionToast(next ? '已加入我的最爱' : '已取消收藏');
+    } else {
+      // 失败必须说出来：此前只在成功时更新图标，服务端 404 时用户看到的是
+      // "点了星标没有任何反应"，既不知道失败也不知道为什么。
+      this.showActionToast(result.message.length > 0 ? `收藏失败：${result.message}`
+                                                     : '收藏失败（服务端未接受该请求）');
     }
     this.favoriting = false;
   }
@@ -137,6 +143,19 @@ struct DetailPage {
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (result.ok) {
       this.item.isPlayed = next;
+      this.showActionToast(next ? '已标记为已播放' : '已标记为未播放');
+    } else {
+      this.showActionToast(result.message.length > 0 ? `标记失败：${result.message}`
+                                                     : '标记失败（服务端未接受该请求）');
+    }
+  }
+
+  /** 操作结果用 toast 反馈（成功与失败都要可见，失败原因直接给用户看） */
+  private showActionToast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 2000 });
+    } catch (err) {
+      // toast 失败不影响状态更新本身
     }
   }
 

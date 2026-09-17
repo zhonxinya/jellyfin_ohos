@@ -44,6 +44,8 @@ jobs:
                 extra="native/core/http_response.cpp" ;;
               test_image_url)
                 extra="native/core/image_url.cpp native/core/url_util.cpp" ;;
+              test_items_query)
+                extra="native/core/api/items_query.cpp native/core/url_util.cpp" ;;
               test_playback_resolve)
                 extra="native/core/api/playback_resolve.cpp native/core/url_util.cpp" ;;
               test_player_engine)

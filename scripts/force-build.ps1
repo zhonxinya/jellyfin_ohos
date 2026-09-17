@@ -74,6 +74,13 @@ Invoke-CompileAndRun -Name "test_image_url" -Sources @(
     (Join-Path $Core "url_util.cpp")
 )
 
+# ItemsQuery：媒体库筛选/排序/分页的 query string 构造（纯函数，不依赖网络客户端）
+Invoke-CompileAndRun -Name "test_items_query" -Sources @(
+    (Join-Path $Core "tests\test_items_query.cpp"),
+    (Join-Path $Core "api\items_query.cpp"),
+    (Join-Path $Core "url_util.cpp")
+)
+
 Invoke-CompileAndRun -Name "test_player_engine" -Sources @(
     (Join-Path $Core "tests\test_player_engine.cpp"),
     (Join-Path $RepoRoot "native\feature\player\engine.cpp"),
