@@ -1,0 +1,7 @@
+# 第三方源码树（vendored）：标记为 vendored，使其不计入仓库的语言统计
+# （内置的 FFmpeg 源码有 8000+ 个 C 文件，若不标注，仓库会被显示成"几乎全是 C"）。
+# 这些目录的内容来自上游原样拷贝，本仓库不对其做修改；升级方式见
+# native/third_party/README.md。
+native/third_party/ffmpeg/source/** linguist-vendored
+native/third_party/mbedtls/**       linguist-vendored
+native/third_party/nlohmann/**      linguist-vendored
