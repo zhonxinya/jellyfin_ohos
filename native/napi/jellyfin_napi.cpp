@@ -693,11 +693,16 @@ napi_value Search(napi_env env, napi_callback_info info)
         return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
     }
     std::string term;
+    std::string parentId;
+    std::string includeItemTypes;
     int64_t startIndex = 0;
     int64_t limit = 50;
     ReadStringArg(env, info, 0, term);
     ReadIntArg(env, info, 1, startIndex);
     ReadIntArg(env, info, 2, limit);
+    // 可选参数：限定某个媒体库（库内搜索）与条目类型（电影/剧集/单集/音乐/合集…）
+    ReadStringArg(env, info, 3, parentId);
+    ReadStringArg(env, info, 4, includeItemTypes);
     if (term.empty()) {
         return ToNapiJson(env, MakeResult(false, 0, "search term required"));
     }
@@ -705,10 +710,16 @@ napi_value Search(napi_env env, napi_callback_info info)
         limit = 50;
     }
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, term, startIndex, limit]() {
-        auto result =
-            jellyfin::api::getItems(Api(), userId, {}, static_cast<int>(startIndex),
-                                    static_cast<int>(limit), term);
+    return RunAsync(env, [userId, term, startIndex, limit, parentId, includeItemTypes]() {
+        // 走 queryItems（而不是 getItems）以便：限定 ParentId、按类型筛选、并请求总数
+        jellyfin::api::ItemsQuery query;
+        query.parentId = parentId;
+        query.startIndex = static_cast<int>(startIndex);
+        query.limit = static_cast<int>(limit);
+        query.searchTerm = term;
+        query.includeItemTypes = includeItemTypes;
+        query.enableTotalRecordCount = true;
+        auto result = jellyfin::api::queryItems(Api(), userId, query);
         return FromApi(result).dump();
     });
 }
@@ -895,9 +906,15 @@ napi_value SearchHints(napi_env env, napi_callback_info info)
     if (limit <= 0 || limit > 50) {
         limit = 12;
     }
+    // 可选：限定媒体库（库内搜索建议）与条目类型
+    std::string parentId;
+    std::string includeItemTypes;
+    ReadStringArg(env, info, 2, parentId);
+    ReadStringArg(env, info, 3, includeItemTypes);
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, query, limit]() {
-        return FromApi(jellyfin::api::getSearchHints(Api(), userId, query, static_cast<int>(limit)))
+    return RunAsync(env, [userId, query, limit, parentId, includeItemTypes]() {
+        return FromApi(jellyfin::api::getSearchHints(Api(), userId, query, static_cast<int>(limit),
+                                                     parentId, includeItemTypes))
             .dump();
     });
 }

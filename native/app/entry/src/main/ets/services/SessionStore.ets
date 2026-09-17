@@ -10,6 +10,7 @@ const KEY_SERVER: string = 'server_url';
 const KEY_LAST_USERNAME: string = 'last_username';
 const KEY_LEGAL_CONSENT: string = 'legal_consent_version';
 const KEY_DEVICE_ID: string = 'device_id';
+const KEY_SEARCH_HISTORY: string = 'search_history';
 
 /**
  * Persist session / server URL via preferences.
@@ -219,6 +220,38 @@ export class SessionStore {
       await SessionStore.pref.flush();
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'saveDeviceId failed: %{public}s', JSON.stringify(error));
+    }
+  }
+
+  /**
+   * 搜索历史（JSON 数组字符串）。
+   *
+   * 为什么不用 `JellyfinNative.setPreference`：那只是 C++ `SessionManager` 里的**内存** map
+   * （`setPreference` 不落盘，只有会话 JSON 被持久化时才会顺带写下去），
+   * 重启应用就没了 —— 而"搜索历史"必须跨重启保留，所以走真正落盘的 preferences。
+   */
+  static async saveSearchHistory(json: string): Promise<void> {
+    if (SessionStore.pref === null) {
+      return;
+    }
+    try {
+      await SessionStore.pref.put(KEY_SEARCH_HISTORY, json);
+      await SessionStore.pref.flush();
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'saveSearchHistory failed: %{public}s', JSON.stringify(error));
+    }
+  }
+
+  static async loadSearchHistory(): Promise<string> {
+    if (SessionStore.pref === null) {
+      return '';
+    }
+    try {
+      const value: preferences.ValueType = await SessionStore.pref.get(KEY_SEARCH_HISTORY, '');
+      return typeof value === 'string' ? value : '';
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'loadSearchHistory failed: %{public}s', JSON.stringify(error));
+      return '';
     }
   }
 

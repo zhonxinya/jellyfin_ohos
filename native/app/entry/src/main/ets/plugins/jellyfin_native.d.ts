@@ -27,7 +27,7 @@ declare module 'libjellyfin_native.so' {
     getStudios(parentId: string, startIndex: number, limit: number): string;
     getSuggestions(parentId: string, limit: number): string;
     getLibraryItems(parentId: string, startIndex: number, limit: number): string;
-    search(query: string, startIndex: number, limit: number): string;
+    search(query: string, startIndex: number, limit: number, parentId: string, includeItemTypes: string): string;
     getItemDetail(itemId: string): string;
     getSeasonEpisodes(seriesId: string, seasonId: string): string;
     getPlaybackInfo(itemId: string, optionsJson: string): string;
@@ -36,7 +36,7 @@ declare module 'libjellyfin_native.so' {
     getUserItemData(itemId: string): string;
     getUserById(userId: string): string;
     updateUserConfiguration(configurationJson: string): string;
-    searchHints(query: string, limit: number): string;
+    searchHints(query: string, limit: number, parentId: string, includeItemTypes: string): string;
     getPlaylists(): string;
     createPlaylist(name: string, itemId: string, mediaType: string): string;
     addToPlaylist(playlistId: string, itemId: string): string;

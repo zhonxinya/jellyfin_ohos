@@ -487,6 +487,16 @@ struct LibraryPage {
             .fontSize(ThemeConstants.LABEL_SMALL)
             .fontColor(this.colors().textSecondary)
             .layoutWeight(1)
+          // 库内搜索：把当前库作为搜索范围带过去（此前只能全库搜，且搜索页没有范围概念）
+          TextButton({
+            label: '搜索',
+            onTap: () => {
+              router.pushUrl({
+                url: 'pages/SearchPage',
+                params: { parentId: this.parentId, scopeTitle: this.title }
+              });
+            }
+          })
           // 筛选入口：带上生效条件个数，用户一眼能看出"列表为什么这么短"
           TextButton({
             label: this.activeFilterCount() > 0 ? `筛选 · ${this.activeFilterCount()}` : '筛选',

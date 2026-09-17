@@ -187,9 +187,16 @@ export class JellyfinNative {
     }
   }
 
-  static async search(query: string, startIndex: number = 0, limit: number = 40): Promise<string> {
+  /**
+   * 搜索条目。
+   *
+   * @param parentId 限定媒体库（"在某个库里搜索"），空串表示全库
+   * @param includeItemTypes 限定类型（`Movie,Series,Episode,Audio,MusicAlbum,BoxSet`），空串表示默认集合
+   */
+  static async search(query: string, startIndex: number = 0, limit: number = 40,
+                      parentId: string = '', includeItemTypes: string = ''): Promise<string> {
     try {
-      return await jellyfinNative.search(query, startIndex, limit);
+      return await jellyfinNative.search(query, startIndex, limit, parentId, includeItemTypes);
     } catch (error) {
       return JellyfinNative.fail('search', error);
     }
@@ -251,9 +258,10 @@ export class JellyfinNative {
     }
   }
 
-  static async searchHints(query: string, limit: number = 12): Promise<string> {
+  static async searchHints(query: string, limit: number = 12, parentId: string = '',
+                           includeItemTypes: string = ''): Promise<string> {
     try {
-      return await jellyfinNative.searchHints(query, limit);
+      return await jellyfinNative.searchHints(query, limit, parentId, includeItemTypes);
     } catch (error) {
       return JellyfinNative.fail('searchHints', error);
     }
