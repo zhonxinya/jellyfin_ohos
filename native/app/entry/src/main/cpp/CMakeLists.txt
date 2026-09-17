@@ -77,26 +77,60 @@ target_link_libraries(jellyfin_native PUBLIC
   native_image
 )
 
-# ── FFmpeg 软解码（可选）────────────────────────────────────────────────────────
-# 由 scripts/build_ffmpeg_ohos.sh 交叉编译产出。查找顺序：
-#   1) 模块内预编译目录  native/app/entry/libs/<abi>/   （hvigor 会打进 HAP）
-#   2) JELLYFIN_FFMPEG_ROOT/<abi>/lib                  （默认 <repo 父目录>/_ffmpeg-build/out）
-# 未找到时**不**定义 JELLYFIN_HAS_FFMPEG：FfmpegDecoder 会如实报告"解码不可用"，
+# ── FFmpeg 软解码（源码内置，构建期自动编译）─────────────────────────────────────
+# FFmpeg 7.1 的**源码随仓库提交**在 native/third_party/ffmpeg/source/。
+# 若还没编译出共享库，这里会自动调用 scripts/build_ffmpeg_ohos.sh 从内置源码交叉编译，
+# 因此"构建应用"这一步本身就会把 FFmpeg 编译出来——不需要事先手工跑脚本，
+# 也不依赖仓库外的源码包。首次约数分钟；之后脚本判定"产物比源码新"会秒过。
+#
+# 查找已编译库的顺序：
+#   1) 模块内目录  native/app/entry/libs/<abi>/   （由脚本生成；hvigor 会打进 HAP）
+#   2) JELLYFIN_FFMPEG_ROOT/<abi>/lib             （默认 <repo 父目录>/_ffmpeg-build/out）
+# 仍找不到时**不**定义 JELLYFIN_HAS_FFMPEG：FfmpegDecoder 会如实报告"解码不可用"，
 # 而不是假装可用（见 native/feature/player/ffmpeg_decoder.cpp）。
 set(JELLYFIN_FFMPEG_ROOT "" CACHE PATH "FFmpeg 预编译根目录（含 <abi>/lib、<abi>/include）")
 if(NOT JELLYFIN_FFMPEG_ROOT)
   set(JELLYFIN_FFMPEG_ROOT "${NATIVEROOT}/../../_ffmpeg-build/out")
 endif()
+option(JELLYFIN_FFMPEG_AUTOBUILD "未找到 FFmpeg 库时从内置源码自动编译" ON)
 
 set(FFMPEG_ABI_DIR "${JELLYFIN_FFMPEG_ROOT}/${OHOS_ARCH}")
 # cpp -> main -> src -> entry（本文件位于 <entry>/src/main/cpp）
 set(FFMPEG_LOCAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/${OHOS_ARCH}")
 
-set(FFMPEG_LINK_DIR "")
-if(EXISTS "${FFMPEG_LOCAL_DIR}/libavcodec.so")
-  set(FFMPEG_LINK_DIR "${FFMPEG_LOCAL_DIR}")
-elseif(EXISTS "${FFMPEG_ABI_DIR}/lib/libavcodec.so")
-  set(FFMPEG_LINK_DIR "${FFMPEG_ABI_DIR}/lib")
+# 按当前磁盘状态解析可用库目录（自动编译前后各调用一次）
+function(jellyfin_resolve_ffmpeg out_var)
+  if(EXISTS "${FFMPEG_LOCAL_DIR}/libavcodec.so")
+    set(${out_var} "${FFMPEG_LOCAL_DIR}" PARENT_SCOPE)
+  elseif(EXISTS "${FFMPEG_ABI_DIR}/lib/libavcodec.so")
+    set(${out_var} "${FFMPEG_ABI_DIR}/lib" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+jellyfin_resolve_ffmpeg(FFMPEG_LINK_DIR)
+
+if(NOT FFMPEG_LINK_DIR AND JELLYFIN_FFMPEG_AUTOBUILD)
+  set(FFMPEG_SOURCE_DIR "${THIRD_PARTY_ROOT}/ffmpeg/source")
+  set(FFMPEG_BUILD_SCRIPT "${NATIVEROOT}/../scripts/build_ffmpeg_ohos.sh")
+  if(EXISTS "${FFMPEG_SOURCE_DIR}/configure" AND EXISTS "${FFMPEG_BUILD_SCRIPT}")
+    message(STATUS "FFmpeg：尚未编译，正从内置源码编译（ABI=${OHOS_ARCH}，首次较慢）...")
+    execute_process(
+      COMMAND bash "${FFMPEG_BUILD_SCRIPT}" "${OHOS_ARCH}"
+      WORKING_DIRECTORY "${NATIVEROOT}/.."
+      RESULT_VARIABLE FFMPEG_AUTOBUILD_RESULT
+      OUTPUT_VARIABLE FFMPEG_AUTOBUILD_LOG
+      ERROR_VARIABLE FFMPEG_AUTOBUILD_LOG
+    )
+    if(NOT FFMPEG_AUTOBUILD_RESULT EQUAL 0)
+      message(WARNING "FFmpeg 自动编译失败（退出码 ${FFMPEG_AUTOBUILD_RESULT}）：\n${FFMPEG_AUTOBUILD_LOG}")
+      message(WARNING "可手工执行：bash scripts/build_ffmpeg_ohos.sh ${OHOS_ARCH}")
+    endif()
+    jellyfin_resolve_ffmpeg(FFMPEG_LINK_DIR)
+  else()
+    message(STATUS "FFmpeg：未找到内置源码（${FFMPEG_SOURCE_DIR}）或构建脚本，跳过自动编译")
+  endif()
 endif()
 
 if(FFMPEG_LINK_DIR)

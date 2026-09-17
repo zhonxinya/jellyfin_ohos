@@ -8,9 +8,20 @@ native/app/local.properties
 local.properties
 native/core/tests/out/
 
-# FFmpeg 预编译共享库（软解码）：二进制不入库，由 scripts/build_ffmpeg_ohos.sh 生成/部署
-# （公开头文件 third_party/ffmpeg/include 随仓库提交，便于按 LGPL 要求重建）
+# FFmpeg（软解码）
+# 源码随仓库提交：native/third_party/ffmpeg/source/（FFmpeg 7.1 原始源码，便于按 LGPL 要求重建）
+# 公开头文件也随仓库提交：native/third_party/ffmpeg/include/
+# 共享库二进制不入库：由 scripts/build_ffmpeg_ohos.sh 从内置源码编译后部署到下面这个目录
 native/app/entry/libs/
+# 防御：万一有人在源码树内直接 configure/make（脚本本身在临时工作目录构建，不产生这些）
+native/third_party/ffmpeg/source/config.h
+native/third_party/ffmpeg/source/config.asm
+native/third_party/ffmpeg/source/ffbuild/config.*
+native/third_party/ffmpeg/source/**/*.o
+native/third_party/ffmpeg/source/**/*.d
+native/third_party/ffmpeg/source/**/*.so
+native/third_party/ffmpeg/source/**/*.so.*
+native/third_party/ffmpeg/source/**/*.a
 
 # 签名材料与本机工程配置：禁止入库
 # native/app/build-profile.json5 由 DevEco 自动签名写入，含本机证书路径与密码；

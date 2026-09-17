@@ -22,21 +22,61 @@ Fetch/update mbedTLS:
 3. Switch `HttpClient` to curl for TLS while keeping the socket client as a fallback for plain HTTP.
 4. Do not commit secrets, CA private keys, or device-specific certs.
 
-## FFmpeg (vendored, shipping)
+## FFmpeg (source vendored, compiled into the app)
 
-FFmpeg **7.1** is vendored and linked; software decode is a working playback backend
-(used as the fallback when the system `AVPlayer` cannot hardware-decode the stream).
+FFmpeg **7.1** is vendored **as source** and compiled into the app; software decode is a working
+playback backend (used as the fallback when the system `AVPlayer` cannot hardware-decode the stream).
 
 Layout:
 
-| Path | Contents |
-|---|---|
-| `native/third_party/ffmpeg/include/` | FFmpeg public headers |
-| `native/app/entry/libs/arm64-v8a/` | Runtime `.so` for **real HarmonyOS phones** |
-| `native/app/entry/libs/x86_64/` | Runtime `.so` for the DevEco emulator |
+| Path | Contents | In git? |
+|---|---|---|
+| `native/third_party/ffmpeg/source/` | Pristine upstream FFmpeg 7.1 source tree (8540 files, ~101 MB) | yes |
+| `native/third_party/ffmpeg/include/` | Public headers consumed by this project | yes |
+| `native/app/entry/libs/arm64-v8a/` | Runtime `.so` for **real HarmonyOS phones** | no (generated) |
+| `native/app/entry/libs/x86_64/` | Runtime `.so` for the DevEco emulator | no (generated) |
 
 `native/app/entry/build-profile.json5` sets `abiFilters: ["arm64-v8a", "x86_64"]`, so both
 ABIs are packaged into the HAP — a phone install always carries its own FFmpeg.
+
+### How the source gets compiled
+
+Building the app compiles FFmpeg. `native/app/entry/src/main/cpp/CMakeLists.txt` looks for the
+compiled libraries and, when they are absent, invokes `scripts/build_ffmpeg_ohos.sh` for the
+target ABI before linking. So a fresh clone needs no manual preparation step and no external
+source tarball:
+
+```bash
+# 通常情况下什么都不用做：构建应用时会自动编译 FFmpeg
+bash scripts/build_ffmpeg_ohos.sh both      # 也可显式预编译，或强制刷新
+```
+
+Notes on the design:
+
+- **The vendored tree is never built in place.** Each build copies `source/` into a scratch
+  directory (`<repo 父目录>/_ffmpeg-build/out/work-<abi>`) and runs `configure`/`make` there, so
+  `native/third_party/ffmpeg/source/` stays byte-for-byte upstream — that keeps diffs and future
+  version bumps reviewable.
+- **Rebuilds are incremental.** The script skips an ABI when the deployed libraries are newer
+  than both the source tree and the script itself, so only the first build (or one after a
+  source/script change) pays the cost. Both ABIs take ~3 minutes on a 32-core host.
+  Force with `FFMPEG_FORCE_REBUILD=1`.
+- **Toolchain discovery is path-independent.** The script probes `OHOS_COMMAND_LINE_TOOLS`, then
+  `command-line-tools/` inside the repo (CI layout), then `_harmony-tools/command-line-tools`
+  up to four levels above the repo, then common DevEco locations — because the auto-build is
+  invoked from CMake, where the working directory is not predictable.
+- **Disable the auto-build** with `-DJELLYFIN_FFMPEG_AUTOBUILD=OFF` when you only want to
+  syntax-check the HAP build (the project then compiles without `JELLYFIN_HAS_FFMPEG`, and
+  `FfmpegDecoder` honestly reports decode-as-unavailable rather than pretending to work).
+- **Shared, not static.** LGPL-2.1-or-later compliance is why these are shared libraries;
+  see `NOTICE` and `native/feature/player/README.md`.
+
+Config rationale (unchanged from the original build): only the decode-side components are kept
+(`libavformat`/`libavcodec`/`libavutil`/`libswscale`/`libswresample`; no encoders, muxers,
+filters, devices, programs or docs), `--disable-network` because stream fetching goes through
+this project's own HTTP client (mbedTLS + Jellyfin auth) via a custom `AVIOContext`, and
+`--disable-asm` because the HarmonyOS cross toolchain has no reliable nasm/yasm.
+
 
 ### Why every library ships under two names
 

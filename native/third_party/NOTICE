@@ -32,25 +32,30 @@ TODO: copy COPYING from the exact libcurl revision used by this project.
 -------------------------------------------------------------------------------
 FFmpeg（软解码）
 -------------------------------------------------------------------------------
-Status: 以**预编译共享库**形式使用（不含源码），由本仓库脚本交叉编译：
+Status: **源码已内置**（native/third_party/ffmpeg/source/，未经修改的上游源码树），
+        由本仓库脚本交叉编译为共享库并打进 HAP：
         scripts/build_ffmpeg_ohos.sh
+        （构建应用时若尚无编译产物，CMake 会自动调用该脚本，无需手工前置步骤；
+          见 native/app/entry/src/main/cpp/CMakeLists.txt 的 FFmpeg 段）
 版本:   FFmpeg 7.1
-       源码包 ffmpeg-7.1.tar.xz
+       对应上游源码包 ffmpeg-7.1.tar.xz
        sha256 = 40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
        下载地址: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
 许可证: LGPL-2.1-or-later
        （构建时已 `--disable-gpl` 语义下的配置：未启用任何 GPL 组件；
          如需确认，可用 `ffmpeg -buildconf` 或检查 configure 日志 --enable-gpl 未出现）
 上游:   https://ffmpeg.org/  /  https://github.com/FFmpeg/FFmpeg
-使用位置: native/player/ffmpeg_decoder.cpp（软解：解容器 → 软件解码 → swscale 转 RGB）
+使用位置: native/feature/player/ffmpeg_decoder.cpp（软解：解容器 → 软件解码 → swscale 转 RGB）
+源码:   native/third_party/ffmpeg/source/（随仓库提交，未经修改的上游源码）
 构建产物: native/app/entry/libs/<abi>/libav{format,codec,util}.so*、libsw{scale,resample}.so*
           ABI: arm64-v8a、x86_64
-公开头文件: native/third_party/ffmpeg/include/（随仓库提交，便于按 LGPL 要求重建）
+公开头文件: native/third_party/ffmpeg/include/（随仓库提交，便于第三方按 LGPL 要求重建）
 
 LGPL 合规说明（**动态链接**）:
   - 应用以**共享库动态链接**方式使用 FFmpeg，未做静态链接，用户可自行替换这些 .so；
   - 库文件未做任何修改（仅通过 configure 选项裁剪组件）；
-  - 完整对应源码与构建脚本见上（可据此重建出二进制等价物）；
+  - **完整对应源码已随仓库提供**（native/third_party/ffmpeg/source/），并附可复现的构建脚本，
+    据此可重建出二进制等价物（满足 LGPL 第 6 条的可获取性要求）；
   - 打包分发时需随包提供本段说明与 LGPL-2.1 全文（见第三段“分发清单”）。
 
 分发清单（每次发布需随包提供）:

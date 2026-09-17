@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 #
-# 为 HarmonyOS/OpenHarmony 交叉编译 FFmpeg（软解码用）。
+# 从**仓库内的 FFmpeg 源码**为 HarmonyOS/OpenHarmony 交叉编译 FFmpeg（软解码用）。
+#
+# 源码位置：native/third_party/ffmpeg/source/ （随仓库提交的 FFmpeg 7.1 原始源码）
+# 产物位置：
+#   native/app/entry/libs/<abi>/*.so            共享库（.gitignore 忽略；由本脚本生成）
+#   native/third_party/ffmpeg/include/          公开头文件（随仓库提交）
 #
 # 设计要点：
 # - **共享库**（LGPL-2.1+ 要求动态链接；同时避免与 GPL 组件冲突）
@@ -10,14 +15,18 @@
 #   取流由本工程 `native/core` 的 HTTP 客户端（含 mbedTLS，支持 https）完成，
 #   再通过自定义 AVIOContext 喂给 libavformat —— 这样 https 与 Jellyfin 鉴权头都能复用既有实现。
 # - 关闭 asm：HarmonyOS 交叉编译环境没有可靠的 nasm/yasm，C 实现足够（软解本来就不追求极致速度）
+# - **不在源码树内构建**：每次构建把 vendored 源码复制到临时工作目录再 configure/make，
+#   保证 third_party/ffmpeg/source 始终是未经改动的原始上游源码（便于 diff 与升级）。
 #
 # 用法：
 #   scripts/build_ffmpeg_ohos.sh [x86_64|arm64-v8a|all] [输出目录]
-# 默认输出：$HOME/_ffmpeg-build/out/<abi>
+# 默认输出：<repo 父目录>/_ffmpeg-build/out/<abi>（仅作中间产物，不参与打包）
 #
-# 产物（每个 ABI）：
-#   out/<abi>/lib/libavcodec.so, libavformat.so, libavutil.so, libswscale.so, libswresample.so
-#   out/<abi>/include/...
+# 环境变量：
+#   FFMPEG_FORCE_REBUILD=1   忽略"已是最新"判断，强制重建
+#   FFMPEG_SKIP_DEPLOY=1     只构建到输出目录，不部署进仓库
+#   BUILD_JOBS=N             并行编译任务数（默认 nproc）
+#   OHOS_COMMAND_LINE_TOOLS  HarmonyOS 命令行工具根目录
 set -euo pipefail
 
 ABI_ARG="${1:-all}"
@@ -29,10 +38,41 @@ WORK_ROOT="${FFMPEG_WORK_ROOT:-$(dirname "$REPO_ROOT")/_ffmpeg-build}"
 OUT_ROOT="${2:-${FFMPEG_OUT_ROOT:-$WORK_ROOT/out}}"
 
 FFMPEG_VERSION="7.1"
-SRC_TARBALL="${FFMPEG_SRC_TARBALL:-$WORK_ROOT/ffmpeg-${FFMPEG_VERSION}.tar.xz}"
-SRC_SHA256="40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6"
+# 上游发行包校验值，用于溯源（本仓库直接内置其解压后的源码树）
+FFMPEG_SRC_TARBALL_SHA256="40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6"
+SRC_DIR="$REPO_ROOT/native/third_party/ffmpeg/source"
 
-TOOLS_ROOT="${OHOS_COMMAND_LINE_TOOLS:-$(dirname "$REPO_ROOT")/_harmony-tools/command-line-tools}"
+# ── 定位 HarmonyOS 命令行工具链 ───────────────────────────────────────────────
+# 工具链在不同环境下位置不同，且本脚本会被"应用构建"自动调用（此时 CWD 不可预期），
+# 因此这里按候选位置逐个探测，而不是只认一个默认路径：
+#   1) OHOS_COMMAND_LINE_TOOLS 显式指定
+#   2) CI：工具链下载在**仓库内**的 command-line-tools/
+#   3) 本沙箱/本地：仓库之上若干层的 _harmony-tools/command-line-tools
+#   4) DevEco 常见安装位置
+find_tools_root() {
+    if [ -n "${OHOS_COMMAND_LINE_TOOLS:-}" ]; then
+        if [ -d "$OHOS_COMMAND_LINE_TOOLS/sdk" ]; then
+            printf '%s\n' "$OHOS_COMMAND_LINE_TOOLS"; return 0
+        fi
+        echo "警告：OHOS_COMMAND_LINE_TOOLS=$OHOS_COMMAND_LINE_TOOLS 下没有 sdk/，继续自动探测" >&2
+    fi
+    local d="$REPO_ROOT" i=0 cand
+    while [ "$i" -lt 4 ]; do
+        for cand in "$d/command-line-tools" "$d/_harmony-tools/command-line-tools"; do
+            if [ -d "$cand/sdk" ]; then printf '%s\n' "$cand"; return 0; fi
+        done
+        d="$(dirname "$d")"
+        i=$((i + 1))
+    done
+    for cand in "$HOME/command-line-tools" "$HOME/_harmony-tools/command-line-tools" \
+                "/opt/command-line-tools" "/opt/harmony/command-line-tools"; do
+        if [ -d "$cand/sdk" ]; then printf '%s\n' "$cand"; return 0; fi
+    done
+    return 1
+}
+
+TOOLS_ROOT="$(find_tools_root || true)"
+[ -n "$TOOLS_ROOT" ] || die "找不到 HarmonyOS 命令行工具链（可设 OHOS_COMMAND_LINE_TOOLS 指定其根目录）"
 SDK_NATIVE="$TOOLS_ROOT/sdk/default/openharmony/native"
 LLVM_BIN="$SDK_NATIVE/llvm/bin"
 SYSROOT="$SDK_NATIVE/sysroot"
@@ -43,11 +83,32 @@ die() { echo "错误：$*" >&2; exit 1; }
 
 [ -d "$LLVM_BIN" ] || die "找不到 OHOS LLVM 工具链：$LLVM_BIN（可用 OHOS_COMMAND_LINE_TOOLS 覆盖）"
 [ -d "$SYSROOT" ] || die "找不到 OHOS sysroot：$SYSROOT"
-[ -f "$SRC_TARBALL" ] || die "找不到 FFmpeg 源码包：$SRC_TARBALL"
 
-# 校验源码包完整性（供应链可追溯）
-echo "校验 $SRC_TARBALL"
-echo "$SRC_SHA256  $SRC_TARBALL" | sha256sum -c - >/dev/null || die "FFmpeg 源码包 sha256 不匹配"
+# ── 源码完整性检查 ────────────────────────────────────────────────────────────
+# 内置的是"解压后的源码树"而非 tarball，无法对整棵树做单值 sha256 校验，
+# 因此检查关键文件是否齐全（上游发行包 sha256 见上方常量，用于溯源）。
+[ -d "$SRC_DIR" ] || die "找不到内置 FFmpeg 源码：$SRC_DIR"
+[ -x "$SRC_DIR/configure" ] || die "FFmpeg 源码树不完整：缺少可执行的 configure（$SRC_DIR）"
+for required in Makefile VERSION libavcodec/allcodecs.c libavformat/allformats.c libavutil/avutil.h; do
+    [ -f "$SRC_DIR/$required" ] || die "FFmpeg 源码树不完整：缺少 $required"
+done
+[ "$(cat "$SRC_DIR/VERSION")" = "$FFMPEG_VERSION" ] \
+    || die "内置 FFmpeg 版本与预期不符：期望 $FFMPEG_VERSION，实际 $(cat "$SRC_DIR/VERSION")"
+echo "源码：$SRC_DIR（FFmpeg $FFMPEG_VERSION，$(find "$SRC_DIR" -type f | wc -l) 个文件）"
+
+# ── 是否需要重建 ──────────────────────────────────────────────────────────────
+# 产物比源码/本脚本新 ⇒ 已是最新，跳过。这让"应用构建顺带编译 FFmpeg"只在首次（或改源码后）付出代价。
+needs_build() {
+    local deployed_lib="$1"
+    [ "${FFMPEG_FORCE_REBUILD:-0}" = "1" ] && return 0
+    [ -f "$deployed_lib" ] || return 0
+    # 用绝对路径（$SCRIPT_DIR 由 cd+pwd 求得）：调用方可能不在仓库根目录，
+    # 相对路径会让 find 找不到本脚本，从而静默漏判"脚本自身已改动"。
+    if [ -n "$(find "$SRC_DIR" "$SCRIPT_DIR/build_ffmpeg_ohos.sh" -newer "$deployed_lib" -print -quit 2>/dev/null)" ]; then
+        return 0
+    fi
+    return 1
+}
 
 build_abi() {
     local abi="$1" arch triple sysroot_lib cpu
@@ -62,11 +123,20 @@ build_abi() {
 
     local work="$OUT_ROOT/work-$abi"
     local prefix="$OUT_ROOT/$abi"
+    local libs_dir="$REPO_ROOT/native/app/entry/libs/$abi"
+    local inc_dir="$REPO_ROOT/native/third_party/ffmpeg/include"
+
+    if [ "${FFMPEG_SKIP_DEPLOY:-0}" != "1" ] && ! needs_build "$libs_dir/libavcodec.so"; then
+        echo "==================== 跳过 $abi（产物已是最新） ===================="
+        return 0
+    fi
+
     echo "==================== 构建 $abi（$triple） ===================="
 
+    # 复制内置源码到工作目录再构建：vendored 源码树保持原始状态
     rm -rf "$work" "$prefix"
     mkdir -p "$work" "$prefix"
-    tar -xf "$SRC_TARBALL" -C "$work" --strip-components=1
+    cp -a "$SRC_DIR/." "$work/"
 
     pushd "$work" >/dev/null
 
@@ -141,8 +211,6 @@ hls,concat,image2,srt,ass,webvtt_raw,sup,pgs"
     #   native/app/entry/libs/<abi>/           → 共享库（hvigor 会打进 HAP；已在 .gitignore 中忽略）
     #   third_party/ffmpeg/include/            → 公开头文件（随仓库提交，便于第三方源码构建）
     if [ "${FFMPEG_SKIP_DEPLOY:-0}" != "1" ]; then
-        local libs_dir="$REPO_ROOT/native/app/entry/libs/$abi"
-        local inc_dir="$REPO_ROOT/native/third_party/ffmpeg/include"
         mkdir -p "$libs_dir" "$inc_dir"
         # -L 跟随符号链接，落盘为真实文件；必须同时保留三种名字：
         #   libX.so（链接用）、libX.so.<major>（**运行时 SONAME**，动态链接器按它查找）、libX.so.<full>
