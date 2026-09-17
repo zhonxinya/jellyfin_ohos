@@ -25,6 +25,20 @@ export class MediaItem {
   seriesName: string = '';
   indexNumber: number = 0;
   genres: string[] = [];
+  /**
+   * 播放列表条目 id（`PlaylistItemId`）。
+   *
+   * 只有"从播放列表里读出来的条目"才有这个字段，它**不同于**媒体条目 id：
+   * 服务端的"移除条目/移动条目"接口认的是列表条目 id，
+   * 设备实测用媒体 id 去删会返回 204 但什么都不删（静默失败）。
+   */
+  playlistItemId: string = '';
+  /**
+   * 子项数量（Jellyfin `ChildCount`）：播放列表条目数、合集内影片数。
+   *
+   * 需要显式在 `Fields` 里请求（播放列表查询与合集查询都已带上）。
+   */
+  childCount: number = 0;
 
   progress(): number {
     if (this.runTimeTicks <= 0 || this.playbackPositionTicks <= 0) {
@@ -39,6 +53,10 @@ export class MediaItem {
 
   metaLine(): string {
     const parts: string[] = [];
+    // 播放列表/合集先给"共 N 项"——这类条目本身没有年份/时长，数量才是用户关心的信息
+    if (this.childCount > 0 && (this.type === 'Playlist' || this.type === 'BoxSet')) {
+      parts.push(`${this.childCount} 项`);
+    }
     if (this.year.length > 0) {
       parts.push(this.year);
     }
@@ -75,6 +93,9 @@ export class MediaItem {
     }
     if (this.type === 'BoxSet') {
       return '合集';
+    }
+    if (this.type === 'Playlist') {
+      return '播放列表';
     }
     if (this.type === 'Audio' || this.type === 'MusicAlbum') {
       return '音乐';
@@ -117,6 +138,8 @@ export class MediaItem {
     item.officialRating = JsonUtil.getString(data, 'OfficialRating', '');
     item.seriesName = JsonUtil.getString(data, 'SeriesName', '');
     item.indexNumber = JsonUtil.getNumber(data, 'IndexNumber', 0);
+    item.playlistItemId = JsonUtil.getString(data, 'PlaylistItemId', '');
+    item.childCount = JsonUtil.getNumber(data, 'ChildCount', 0);
     item.isFolder = item.type === 'CollectionFolder' || item.type === 'UserView' ||
       item.type === 'Folder' || item.type === 'BoxSet';
 

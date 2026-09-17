@@ -187,9 +187,16 @@ export class JellyfinNative {
     }
   }
 
-  static async search(query: string, startIndex: number = 0, limit: number = 40): Promise<string> {
+  /**
+   * 搜索条目。
+   *
+   * @param parentId 限定媒体库（"在某个库里搜索"），空串表示全库
+   * @param includeItemTypes 限定类型（`Movie,Series,Episode,Audio,MusicAlbum,BoxSet`），空串表示默认集合
+   */
+  static async search(query: string, startIndex: number = 0, limit: number = 40,
+                      parentId: string = '', includeItemTypes: string = ''): Promise<string> {
     try {
-      return await jellyfinNative.search(query, startIndex, limit);
+      return await jellyfinNative.search(query, startIndex, limit, parentId, includeItemTypes);
     } catch (error) {
       return JellyfinNative.fail('search', error);
     }
@@ -251,9 +258,10 @@ export class JellyfinNative {
     }
   }
 
-  static async searchHints(query: string, limit: number = 12): Promise<string> {
+  static async searchHints(query: string, limit: number = 12, parentId: string = '',
+                           includeItemTypes: string = ''): Promise<string> {
     try {
-      return await jellyfinNative.searchHints(query, limit);
+      return await jellyfinNative.searchHints(query, limit, parentId, includeItemTypes);
     } catch (error) {
       return JellyfinNative.fail('searchHints', error);
     }
@@ -267,9 +275,10 @@ export class JellyfinNative {
     }
   }
 
-  static async createPlaylist(name: string, itemId: string): Promise<string> {
+  static async createPlaylist(name: string, itemId: string,
+                             mediaType: string = 'Video'): Promise<string> {
     try {
-      return await jellyfinNative.createPlaylist(name, itemId);
+      return await jellyfinNative.createPlaylist(name, itemId, mediaType);
     } catch (error) {
       return JellyfinNative.fail('createPlaylist', error);
     }
@@ -280,6 +289,41 @@ export class JellyfinNative {
       return await jellyfinNative.addToPlaylist(playlistId, itemId);
     } catch (error) {
       return JellyfinNative.fail('addToPlaylist', error);
+    }
+  }
+
+  /** 播放列表内容（条目里带 PlaylistItemId，移除/排序要用它） */
+  static async getPlaylistItems(playlistId: string, startIndex: number = 0,
+                               limit: number = 200): Promise<string> {
+    try {
+      return await jellyfinNative.getPlaylistItems(playlistId, startIndex, limit);
+    } catch (error) {
+      return JellyfinNative.fail('getPlaylistItems', error);
+    }
+  }
+
+  static async removeFromPlaylist(playlistId: string, entryIds: string): Promise<string> {
+    try {
+      return await jellyfinNative.removeFromPlaylist(playlistId, entryIds);
+    } catch (error) {
+      return JellyfinNative.fail('removeFromPlaylist', error);
+    }
+  }
+
+  static async movePlaylistItem(playlistId: string, entryId: string,
+                                newIndex: number): Promise<string> {
+    try {
+      return await jellyfinNative.movePlaylistItem(playlistId, entryId, newIndex);
+    } catch (error) {
+      return JellyfinNative.fail('movePlaylistItem', error);
+    }
+  }
+
+  static async deletePlaylist(playlistId: string): Promise<string> {
+    try {
+      return await jellyfinNative.deletePlaylist(playlistId);
+    } catch (error) {
+      return JellyfinNative.fail('deletePlaylist', error);
     }
   }
 
@@ -485,11 +529,24 @@ export class JellyfinNative {
   }
 
   /** 取下一帧（同步）：返回 {ok,width,height,ptsSec,frameIndex,pixels} */
-  static softPlayNextFrame(maxWidth: number): ESObject | null {
+  /**
+   * 取下一帧（异步）。返回 JSON（用 `parseResult` 解）：
+   * `data = { ok, width, height, ptsSec, frameIndex, bytesFetched, rendered, error?, renderError? }`
+   */
+  static async softPlayNextFrame(maxWidth: number): Promise<string> {
     try {
-      return jellyfinNative.softPlayNextFrame(maxWidth) as ESObject;
+      return await jellyfinNative.softPlayNextFrame(maxWidth);
     } catch (error) {
-      return null;
+      return JellyfinNative.fail('softPlayNextFrame', error);
+    }
+  }
+
+  /** 把最近一帧渲染上屏（须在 UI 线程调用；返回 JSON，用 parseResult 解） */
+  static softPlayRenderLast(): string {
+    try {
+      return jellyfinNative.softPlayRenderLast();
+    } catch (error) {
+      return JellyfinNative.fail('softPlayRenderLast', error);
     }
   }
 

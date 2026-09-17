@@ -1,81 +1,15 @@
 #include "media_api.h"
 
+#include "url_util.h"
+
 #include <sstream>
 
 namespace jellyfin {
 namespace api {
-namespace {
-
-std::string EncodeQuery(const std::string &value)
-{
-    static const char *kHex = "0123456789ABCDEF";
-    std::string out;
-    out.reserve(value.size() * 3);
-    for (unsigned char c : value) {
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
-            c == '_' || c == '.' || c == '~') {
-            out.push_back(static_cast<char>(c));
-        } else if (c == ' ') {
-            out.push_back('+');
-        } else {
-            out.push_back('%');
-            out.push_back(kHex[c >> 4]);
-            out.push_back(kHex[c & 0x0F]);
-        }
-    }
-    return out;
-}
-
-const char *kDefaultItemFields =
-    "BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,Status,EndDate,UserData,CollectionType";
-
-} // namespace
 
 ApiResult queryItems(JellyfinApiClient &client, const std::string &userId, const ItemsQuery &query)
 {
-    std::ostringstream path;
-    path << "/Users/" << EncodeQuery(userId) << "/Items?"
-         << "Recursive=" << (query.recursive ? "true" : "false") << "&Fields="
-         << EncodeQuery(query.fields.empty() ? kDefaultItemFields : query.fields)
-         << "&EnableUserData=" << (query.enableUserData ? "true" : "false")
-         << "&EnableImageTypes=Primary,Backdrop,Thumb"
-         << "&StartIndex=" << query.startIndex << "&Limit=" << query.limit;
-    if (!query.parentId.empty()) {
-        path << "&ParentId=" << EncodeQuery(query.parentId);
-    }
-    if (!query.searchTerm.empty()) {
-        path << "&SearchTerm=" << EncodeQuery(query.searchTerm);
-    }
-    if (!query.includeItemTypes.empty()) {
-        path << "&IncludeItemTypes=" << EncodeQuery(query.includeItemTypes);
-    } else if (query.searchTerm.empty() && query.personIds.empty()) {
-        path << "&IncludeItemTypes=Movie,Series,Episode,Audio,MusicAlbum,Folder,BoxSet";
-    }
-    if (!query.sortBy.empty()) {
-        path << "&SortBy=" << EncodeQuery(query.sortBy);
-    }
-    if (!query.sortOrder.empty()) {
-        path << "&SortOrder=" << EncodeQuery(query.sortOrder);
-    }
-    if (query.favoriteOnly) {
-        path << "&Filters=IsFavorite";
-    }
-    if (!query.genreIds.empty()) {
-        path << "&GenreIds=" << EncodeQuery(query.genreIds);
-    }
-    if (!query.studioIds.empty()) {
-        path << "&StudioIds=" << EncodeQuery(query.studioIds);
-    }
-    if (!query.personIds.empty()) {
-        path << "&PersonIds=" << EncodeQuery(query.personIds);
-    }
-    if (!query.mediaTypes.empty()) {
-        path << "&MediaTypes=" << EncodeQuery(query.mediaTypes);
-    }
-    if (!query.excludeItemTypes.empty()) {
-        path << "&ExcludeItemTypes=" << EncodeQuery(query.excludeItemTypes);
-    }
-    return client.getJson(path.str());
+    return client.getJson(BuildItemsQueryPath(userId, query));
 }
 
 ApiResult getItems(JellyfinApiClient &client, const std::string &userId, const std::string &parentId,
@@ -94,7 +28,7 @@ ApiResult getItems(JellyfinApiClient &client, const std::string &userId, const s
 ApiResult getResumeItems(JellyfinApiClient &client, const std::string &userId, int startIndex, int limit)
 {
     std::ostringstream path;
-    path << "/Users/" << EncodeQuery(userId) << "/Items/Resume?"
+    path << "/Users/" << EncodeQueryComponent(userId) << "/Items/Resume?"
          << "StartIndex=" << startIndex << "&Limit=" << limit
          << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData"
          << "&EnableImageTypes=Primary,Backdrop,Thumb"
@@ -106,12 +40,12 @@ ApiResult getLatest(JellyfinApiClient &client, const std::string &userId, int li
                     const std::string &parentId)
 {
     std::ostringstream path;
-    path << "/Users/" << EncodeQuery(userId) << "/Items/Latest?Limit=" << limit
+    path << "/Users/" << EncodeQueryComponent(userId) << "/Items/Latest?Limit=" << limit
          << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData"
          << "&EnableImageTypes=Primary,Backdrop,Thumb"
          << "&IncludeItemTypes=Movie,Series,Episode";
     if (!parentId.empty()) {
-        path << "&ParentId=" << EncodeQuery(parentId);
+        path << "&ParentId=" << EncodeQueryComponent(parentId);
     }
     return client.getJson(path.str());
 }
@@ -119,7 +53,7 @@ ApiResult getLatest(JellyfinApiClient &client, const std::string &userId, int li
 ApiResult getNextUp(JellyfinApiClient &client, const std::string &userId, int startIndex, int limit)
 {
     std::ostringstream path;
-    path << "/Shows/NextUp?UserId=" << EncodeQuery(userId) << "&StartIndex=" << startIndex
+    path << "/Shows/NextUp?UserId=" << EncodeQueryComponent(userId) << "&StartIndex=" << startIndex
          << "&Limit=" << limit
          << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,IndexNumber"
          << "&EnableImageTypes=Primary,Backdrop,Thumb";
@@ -130,10 +64,10 @@ ApiResult getGenres(JellyfinApiClient &client, const std::string &userId, const 
                     int startIndex, int limit)
 {
     std::ostringstream path;
-    path << "/Genres?UserId=" << EncodeQuery(userId) << "&StartIndex=" << startIndex
+    path << "/Genres?UserId=" << EncodeQueryComponent(userId) << "&StartIndex=" << startIndex
          << "&Limit=" << limit << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio";
     if (!parentId.empty()) {
-        path << "&ParentId=" << EncodeQuery(parentId);
+        path << "&ParentId=" << EncodeQueryComponent(parentId);
     }
     return client.getJson(path.str());
 }
@@ -142,10 +76,10 @@ ApiResult getStudios(JellyfinApiClient &client, const std::string &userId, const
                      int startIndex, int limit)
 {
     std::ostringstream path;
-    path << "/Studios?UserId=" << EncodeQuery(userId) << "&StartIndex=" << startIndex
+    path << "/Studios?UserId=" << EncodeQueryComponent(userId) << "&StartIndex=" << startIndex
          << "&Limit=" << limit << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio";
     if (!parentId.empty()) {
-        path << "&ParentId=" << EncodeQuery(parentId);
+        path << "&ParentId=" << EncodeQueryComponent(parentId);
     }
     return client.getJson(path.str());
 }
@@ -153,21 +87,35 @@ ApiResult getStudios(JellyfinApiClient &client, const std::string &userId, const
 ApiResult getSuggestions(JellyfinApiClient &client, const std::string &userId,
                          const std::string &parentId, int limit)
 {
+    // 该路由在 Jellyfin 版本之间换过：10.8.x 用 `/Users/{userId}/Suggestions`，
+    // 10.10.x 用 `/Items/Suggestions`。设备实测（服务器 10.8.12）：`/Items/Suggestions` 返回 **405**，
+    // 媒体库「建议」标签因此永远为空。按"新式优先、404/405 回退"处理。
     std::ostringstream path;
-    path << "/Items/Suggestions?UserId=" << EncodeQuery(userId) << "&Limit=" << limit
+    path << "/Users/" << EncodeQueryComponent(userId) << "/Suggestions?Limit=" << limit
          << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData"
          << "&EnableImageTypes=Primary,Backdrop,Thumb";
     if (!parentId.empty()) {
-        path << "&ParentId=" << EncodeQuery(parentId);
+        path << "&ParentId=" << EncodeQueryComponent(parentId);
     }
-    return client.getJson(path.str());
+    ApiResult result = client.getJson(path.str());
+    if (!result.ok() && (result.error.statusCode == 404 || result.error.statusCode == 405)) {
+        std::ostringstream legacy;
+        legacy << "/Items/Suggestions?UserId=" << EncodeQueryComponent(userId) << "&Limit=" << limit
+               << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData"
+               << "&EnableImageTypes=Primary,Backdrop,Thumb";
+        if (!parentId.empty()) {
+            legacy << "&ParentId=" << EncodeQueryComponent(parentId);
+        }
+        return client.getJson(legacy.str());
+    }
+    return result;
 }
 
 ApiResult getUpcomingEpisodes(JellyfinApiClient &client, const std::string &userId, int startIndex,
                               int limit)
 {
     std::ostringstream path;
-    path << "/Shows/Upcoming?UserId=" << EncodeQuery(userId) << "&StartIndex=" << startIndex
+    path << "/Shows/Upcoming?UserId=" << EncodeQueryComponent(userId) << "&StartIndex=" << startIndex
          << "&Limit=" << limit
          << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,IndexNumber"
          << "&EnableImageTypes=Primary,Backdrop,Thumb";
@@ -177,7 +125,7 @@ ApiResult getUpcomingEpisodes(JellyfinApiClient &client, const std::string &user
 ApiResult getItem(JellyfinApiClient &client, const std::string &userId, const std::string &itemId)
 {
     std::ostringstream path;
-    path << "/Users/" << EncodeQuery(userId) << "/Items/" << EncodeQuery(itemId)
+    path << "/Users/" << EncodeQueryComponent(userId) << "/Items/" << EncodeQueryComponent(itemId)
          << "?Fields=Overview,Genres,People,MediaSources,Path,PrimaryImageAspectRatio,"
             "ChildCount,RecursiveItemCount,SeriesName,SeasonName,IndexNumber,ParentIndexNumber,"
             "CommunityRating,OfficialRating,ProductionYear,RunTimeTicks,UserData,ImageTags,"
@@ -188,7 +136,7 @@ ApiResult getItem(JellyfinApiClient &client, const std::string &userId, const st
 ApiResult getSeasons(JellyfinApiClient &client, const std::string &userId, const std::string &seriesId)
 {
     std::ostringstream path;
-    path << "/Shows/" << EncodeQuery(seriesId) << "/Seasons?userId=" << EncodeQuery(userId)
+    path << "/Shows/" << EncodeQueryComponent(seriesId) << "/Seasons?userId=" << EncodeQueryComponent(userId)
          << "&Fields=PrimaryImageAspectRatio,BasicSyncInfo"
          << "&EnableImageTypes=Primary";
     return client.getJson(path.str());
@@ -198,8 +146,8 @@ ApiResult getEpisodes(JellyfinApiClient &client, const std::string &userId, cons
                       const std::string &seasonId)
 {
     std::ostringstream path;
-    path << "/Shows/" << EncodeQuery(seriesId) << "/Episodes?userId=" << EncodeQuery(userId)
-         << "&SeasonId=" << EncodeQuery(seasonId)
+    path << "/Shows/" << EncodeQueryComponent(seriesId) << "/Episodes?userId=" << EncodeQueryComponent(userId)
+         << "&SeasonId=" << EncodeQueryComponent(seasonId)
          << "&Fields=Overview,PrimaryImageAspectRatio,RunTimeTicks,IndexNumber,UserData"
          << "&EnableImageTypes=Primary";
     return client.getJson(path.str());
@@ -209,7 +157,7 @@ ApiResult getSimilar(JellyfinApiClient &client, const std::string &userId, const
                      int limit)
 {
     std::ostringstream path;
-    path << "/Items/" << EncodeQuery(itemId) << "/Similar?userId=" << EncodeQuery(userId)
+    path << "/Items/" << EncodeQueryComponent(itemId) << "/Similar?userId=" << EncodeQueryComponent(userId)
          << "&Limit=" << limit
          << "&Fields=PrimaryImageAspectRatio,ProductionYear,UserData"
          << "&EnableImageTypes=Primary";

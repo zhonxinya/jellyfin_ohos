@@ -41,6 +41,14 @@ export struct MediaCollectionView {
   @Prop hasMore: boolean = true;
   @Prop columns: number = 0;
   onItemTap: (item: MediaItem) => void = (_item: MediaItem) => {};
+  /** 长按条目（弹出操作菜单）；默认空实现，未接线的页面行为不变 */
+  onItemLongPress: (item: MediaItem) => void = (_item: MediaItem) => {};
+  /**
+   * 是否在封面中央显示"继续播放"快捷按钮（继续观看/接下来这类带进度的列表用）。
+   * 打开后必须处理 `onQuickPlay`，否则按钮点了没反应。
+   */
+  @Prop quickPlay: boolean = false;
+  onQuickPlay: (item: MediaItem) => void = (_item: MediaItem) => {};
   onReachEnd: () => void = () => {};
 
   private colors(): ThemeColors {
@@ -105,11 +113,16 @@ export struct MediaCollectionView {
                 mode: 'list',
                 onTap: () => {
                   this.onItemTap(item);
+                },
+                onLongPress: () => {
+                  this.onItemLongPress(item);
                 }
               })
             }
             .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING })
-          }, (item: MediaItem) => item.id)
+            // key 里带上观看状态与收藏状态：ArkUI 对 key 未变的项不重建，
+            // 长按菜单里改了状态后卡片（已看角标/进度条）不会刷新（设备实测过的同类缺陷）
+          }, (item: MediaItem) => `${item.id}_${item.isPlayed ? 1 : 0}_${item.isFavorite ? 1 : 0}`)
           if (this.hasMore) {
             ListItem() {
               if (this.loadingMore) {
@@ -144,10 +157,18 @@ export struct MediaCollectionView {
                   cardWidth: this.cardWidthForColumns(),
                   onTap: () => {
                     this.onItemTap(item);
+                  },
+                  onLongPress: () => {
+                    this.onItemLongPress(item);
+                  },
+                  quickPlay: this.quickPlay,
+                  onQuickPlay: () => {
+                    this.onQuickPlay(item);
                   }
                 })
               }.height(this.gridItemHeight())
-            }, (item: MediaItem) => item.id)
+              // 同上：key 带状态，长按菜单改状态后卡片能立刻刷新
+            }, (item: MediaItem) => `${item.id}_${item.isPlayed ? 1 : 0}_${item.isFavorite ? 1 : 0}`)
             if (this.hasMore) {
               this.GridLoadingFooter()
             }

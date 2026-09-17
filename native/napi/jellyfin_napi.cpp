@@ -270,6 +270,16 @@ jellyfin::api::ItemsQuery ParseItemsQueryJson(const nlohmann::json &j)
     query.mediaTypes = j.value("mediaTypes", "");
     query.excludeItemTypes = j.value("excludeItemTypes", "");
     query.enableUserData = j.value("enableUserData", true);
+    query.filters = j.value("filters", "");
+    query.years = j.value("years", "");
+    query.officialRatings = j.value("officialRatings", "");
+    query.minOfficialRating = j.value("minOfficialRating", "");
+    query.tags = j.value("tags", "");
+    query.videoTypes = j.value("videoTypes", "");
+    query.isHd = j.value("isHd", false);
+    query.is4k = j.value("is4k", false);
+    query.hasSubtitles = j.value("hasSubtitles", false);
+    query.enableTotalRecordCount = j.value("enableTotalRecordCount", true);
     return query;
 }
 
@@ -683,11 +693,16 @@ napi_value Search(napi_env env, napi_callback_info info)
         return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
     }
     std::string term;
+    std::string parentId;
+    std::string includeItemTypes;
     int64_t startIndex = 0;
     int64_t limit = 50;
     ReadStringArg(env, info, 0, term);
     ReadIntArg(env, info, 1, startIndex);
     ReadIntArg(env, info, 2, limit);
+    // 可选参数：限定某个媒体库（库内搜索）与条目类型（电影/剧集/单集/音乐/合集…）
+    ReadStringArg(env, info, 3, parentId);
+    ReadStringArg(env, info, 4, includeItemTypes);
     if (term.empty()) {
         return ToNapiJson(env, MakeResult(false, 0, "search term required"));
     }
@@ -695,10 +710,16 @@ napi_value Search(napi_env env, napi_callback_info info)
         limit = 50;
     }
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, term, startIndex, limit]() {
-        auto result =
-            jellyfin::api::getItems(Api(), userId, {}, static_cast<int>(startIndex),
-                                    static_cast<int>(limit), term);
+    return RunAsync(env, [userId, term, startIndex, limit, parentId, includeItemTypes]() {
+        // 走 queryItems（而不是 getItems）以便：限定 ParentId、按类型筛选、并请求总数
+        jellyfin::api::ItemsQuery query;
+        query.parentId = parentId;
+        query.startIndex = static_cast<int>(startIndex);
+        query.limit = static_cast<int>(limit);
+        query.searchTerm = term;
+        query.includeItemTypes = includeItemTypes;
+        query.enableTotalRecordCount = true;
+        auto result = jellyfin::api::queryItems(Api(), userId, query);
         return FromApi(result).dump();
     });
 }
@@ -885,9 +906,15 @@ napi_value SearchHints(napi_env env, napi_callback_info info)
     if (limit <= 0 || limit > 50) {
         limit = 12;
     }
+    // 可选：限定媒体库（库内搜索建议）与条目类型
+    std::string parentId;
+    std::string includeItemTypes;
+    ReadStringArg(env, info, 2, parentId);
+    ReadStringArg(env, info, 3, includeItemTypes);
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, query, limit]() {
-        return FromApi(jellyfin::api::getSearchHints(Api(), userId, query, static_cast<int>(limit)))
+    return RunAsync(env, [userId, query, limit, parentId, includeItemTypes]() {
+        return FromApi(jellyfin::api::getSearchHints(Api(), userId, query, static_cast<int>(limit),
+                                                     parentId, includeItemTypes))
             .dump();
     });
 }
@@ -912,13 +939,16 @@ napi_value CreatePlaylist(napi_env env, napi_callback_info info)
     }
     std::string name;
     std::string itemId;
+    std::string mediaType;
     if (!ReadStringArg(env, info, 0, name) || name.empty() ||
         !ReadStringArg(env, info, 1, itemId) || itemId.empty()) {
         return ToNapiJson(env, MakeResult(false, 0, "name and itemId required"));
     }
+    // 第 3 个参数可选：媒体类型（默认 Video）。音乐曲目应传 Audio，否则服务端把它归到视频列表。
+    ReadStringArg(env, info, 2, mediaType);
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, name, itemId]() {
-        return FromApi(jellyfin::api::createPlaylist(Api(), userId, name, itemId)).dump();
+    return RunAsync(env, [userId, name, itemId, mediaType]() {
+        return FromApi(jellyfin::api::createPlaylist(Api(), userId, name, itemId, mediaType)).dump();
     });
 }
 
@@ -937,6 +967,86 @@ napi_value AddToPlaylist(napi_env env, napi_callback_info info)
     const std::string userId = session.userId();
     return RunAsync(env, [userId, playlistId, itemId]() {
         return FromApi(jellyfin::api::addToPlaylist(Api(), playlistId, userId, itemId)).dump();
+    });
+}
+
+napi_value GetPlaylistItems(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    int64_t startIndex = 0;
+    int64_t limit = 200;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId required"));
+    }
+    ReadIntArg(env, info, 1, startIndex);
+    ReadIntArg(env, info, 2, limit);
+    const std::string userId = session.userId();
+    return RunAsync(env, [userId, playlistId, startIndex, limit]() {
+        // userId 必填（缺省时服务端 400），这里显式传
+        return FromApi(jellyfin::api::getPlaylistItems(Api(), playlistId, userId,
+                                                       static_cast<int>(startIndex),
+                                                       static_cast<int>(limit)))
+            .dump();
+    });
+}
+
+napi_value RemoveFromPlaylist(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    std::string entryIds;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty() ||
+        !ReadStringArg(env, info, 1, entryIds) || entryIds.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId and entryIds required"));
+    }
+    return RunAsync(env, [playlistId, entryIds]() {
+        return FromApi(jellyfin::api::removeFromPlaylist(Api(), playlistId, entryIds)).dump();
+    });
+}
+
+napi_value MovePlaylistItem(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    std::string entryId;
+    int64_t newIndex = -1;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty() ||
+        !ReadStringArg(env, info, 1, entryId) || entryId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId and entryId required"));
+    }
+    ReadIntArg(env, info, 2, newIndex);
+    if (newIndex < 0) {
+        return ToNapiJson(env, MakeResult(false, 0, "newIndex required"));
+    }
+    return RunAsync(env, [playlistId, entryId, newIndex]() {
+        return FromApi(jellyfin::api::movePlaylistItem(Api(), playlistId, entryId,
+                                                       static_cast<int>(newIndex)))
+            .dump();
+    });
+}
+
+napi_value DeletePlaylist(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string playlistId;
+    if (!ReadStringArg(env, info, 0, playlistId) || playlistId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "playlistId required"));
+    }
+    return RunAsync(env, [playlistId]() {
+        return FromApi(jellyfin::api::deletePlaylist(Api(), playlistId)).dump();
     });
 }
 
@@ -1266,7 +1376,18 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
     });
 }
 
-/** 取下一帧：解码 → 存最近帧 → （有渲染器时）EGL 渲染上屏 */
+/**
+ * 取下一帧：解码 → 存最近帧 → （有渲染器时）EGL 渲染上屏。
+ *
+ * **必须异步执行**（`RunAsync`）：这一路会走 `RangeCache::read`，未命中缓存时是**同步 HTTP**。
+ * 设备实测（faultlog 主线程栈 `RangeCache::read → fillCache → FetchRange → THREAD_BLOCK_6S`）：
+ * 同步执行时逐帧拉取会在 UI 线程上做网络请求，一次往返就把主线程阻塞 6 秒以上，
+ * 系统判 appfreeze、界面直接消失。放到工作线程后，UI 线程只等 Promise，不阻塞。
+ *
+ * EGL 渲染放在工作线程是安全的：`EglRenderer` 每次绘制前都会 `eglMakeCurrent`
+ * （见 egl_renderer.cpp 的绘制辅助函数），上下文与线程的绑定由它自己保证；
+ * 宿主侧（PlayerPage）有 `softPulling` 标志保证同一时刻只有一次拉取在飞。
+ */
 napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
 {
     if (SoftSession() == nullptr) {
@@ -1274,60 +1395,77 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
     }
     int64_t maxWidth = 0;
     ReadIntArg(env, info, 0, maxWidth);
+    const int64_t cappedWidth = maxWidth > 0 ? maxWidth : 0;
+    return RunAsync(env, [cappedWidth]() {
+        std::vector<uint8_t> rgba;
+        jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
+        const bool ok = SoftSession()->nextFrameRgba(
+            cappedWidth > 0 ? static_cast<int>(cappedWidth) : 0, rgba, frameInfo);
 
-    napi_value result = nullptr;
-    napi_create_object(env, &result);
+        nlohmann::json out = {
+            {"ok", ok},
+            {"width", frameInfo.width},
+            {"height", frameInfo.height},
+            {"ptsSec", frameInfo.ptsSec},
+            {"frameIndex", frameInfo.frameIndex},
+            {"bytesFetched", SoftSession()->bytesFetched()},
+        };
+        if (!frameInfo.error.empty()) {
+            out["error"] = frameInfo.error;
+        }
+        bool rendered = false;
+        std::string renderError;
+        if (ok && !rgba.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+                SoftLastFrame() = rgba;
+                SoftLastFrameWidth() = frameInfo.width;
+                SoftLastFrameHeight() = frameInfo.height;
+            }
+            // 这里**不做渲染**：EGL 的窗口 surface 不能跨到线程池线程上 swap
+            // （设备实测：从工作线程渲染时 `eglSwapBuffers` 返回 0x12301，帧解出来但上不了屏）。
+            // 渲染交给宿主在 UI 线程调用 `softPlayRenderLast()`。
+        }
+        out["rendered"] = rendered;
+        if (!renderError.empty()) {
+            out["renderError"] = renderError;
+        }
+        return MakeResult(true, 200, "ok", out).dump();
+    });
+}
 
+/**
+ * 把最近一帧解码结果渲染上屏（EGL）。
+ *
+ * 为什么单独一个**同步**方法、且必须由 UI 线程调用：EGL 窗口 surface 的 swap 有线程约束
+ * —— 设备实测在工作线程池里 swap 返回 `0x12301`（帧解出来了但屏幕不变），
+ * 而 UI 线程调用与改动前完全一致、可正常上屏。渲染本身不做网络/解码，不会长时间占用 UI 线程。
+ */
+napi_value SoftPlayRenderLast(napi_env env, napi_callback_info /*info*/)
+{
     std::vector<uint8_t> rgba;
-    jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
-    const bool ok = SoftSession()->nextFrameRgba(maxWidth > 0 ? maxWidth : 0, rgba, frameInfo);
-
-    napi_value status = nullptr;
-    napi_get_boolean(env, ok, &status);
-    napi_set_named_property(env, result, "ok", status);
-    napi_value w = nullptr;
-    napi_create_int32(env, frameInfo.width, &w);
-    napi_set_named_property(env, result, "width", w);
-    napi_value h = nullptr;
-    napi_create_int32(env, frameInfo.height, &h);
-    napi_set_named_property(env, result, "height", h);
-    napi_value pts = nullptr;
-    napi_create_double(env, frameInfo.ptsSec, &pts);
-    napi_set_named_property(env, result, "ptsSec", pts);
-    napi_value frames = nullptr;
-    napi_create_int64(env, frameInfo.frameIndex, &frames);
-    napi_set_named_property(env, result, "frameIndex", frames);
-    if (!frameInfo.error.empty()) {
-        napi_value err = nullptr;
-        napi_create_string_utf8(env, frameInfo.error.c_str(), NAPI_AUTO_LENGTH, &err);
-        napi_set_named_property(env, result, "error", err);
+    int width = 0;
+    int height = 0;
+    {
+        std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
+        rgba = SoftLastFrame();
+        width = SoftLastFrameWidth();
+        height = SoftLastFrameHeight();
     }
-    napi_value bytes = nullptr;
-    napi_create_int64(env, SoftSession()->bytesFetched(), &bytes);
-    napi_set_named_property(env, result, "bytesFetched", bytes);
-
     bool rendered = false;
     std::string renderError;
-    if (ok && !rgba.empty()) {
-        {
-            std::lock_guard<std::mutex> lock(SoftLastFrameMutex());
-            SoftLastFrame() = rgba;
-            SoftLastFrameWidth() = frameInfo.width;
-            SoftLastFrameHeight() = frameInfo.height;
-        }
-        if (SoftRenderer().isReady()) {
-            rendered = SoftRenderer().renderRgba(rgba.data(), frameInfo.width, frameInfo.height, renderError);
-            if (!rendered) {
-                napi_value err = nullptr;
-                napi_create_string_utf8(env, renderError.c_str(), NAPI_AUTO_LENGTH, &err);
-                napi_set_named_property(env, result, "renderError", err);
-            }
-        }
+    if (!rgba.empty() && width > 0 && height > 0 && SoftRenderer().isReady()) {
+        rendered = SoftRenderer().renderRgba(rgba.data(), width, height, renderError);
+    } else if (rgba.empty()) {
+        renderError = "还没有可渲染的帧";
+    } else if (!SoftRenderer().isReady()) {
+        renderError = "渲染器未就绪";
     }
-    napi_value renderedValue = nullptr;
-    napi_get_boolean(env, rendered, &renderedValue);
-    napi_set_named_property(env, result, "rendered", renderedValue);
-    return result;
+    nlohmann::json data = {
+        {"rendered", rendered},
+        {"renderError", renderError},
+    };
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
 }
 
 /**
@@ -2107,6 +2245,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"softPlayOpen", nullptr, SoftPlayOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"softPlayNextFrame", nullptr, SoftPlayNextFrame, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"softPlayRenderLast", nullptr, SoftPlayRenderLast, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
         {"softPlayStatus", nullptr, SoftPlayStatus, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlayClose", nullptr, SoftPlayClose, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -2148,6 +2288,14 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"createPlaylist", nullptr, CreatePlaylist, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"addToPlaylist", nullptr, AddToPlaylist, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"getPlaylistItems", nullptr, GetPlaylistItems, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"removeFromPlaylist", nullptr, RemoveFromPlaylist, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"movePlaylistItem", nullptr, MovePlaylistItem, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"deletePlaylist", nullptr, DeletePlaylist, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"reportPlaybackProgress", nullptr, ReportPlaybackProgress, nullptr, nullptr, nullptr,
          napi_default, nullptr},

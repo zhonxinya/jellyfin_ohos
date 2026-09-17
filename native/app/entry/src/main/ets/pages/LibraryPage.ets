@@ -6,6 +6,7 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -31,6 +32,19 @@ struct LibraryPage {
   @State private footerTriggered: boolean = false;
   @State private sortBy: string = 'SortName';
   @State private sortOrder: string = 'Ascending';
+  /**
+   * 筛选条件。
+   *
+   * 之前媒体库只有"排序"和一个收藏标签，无法回答"哪些还没看""只看 4K"这类最常见的问题；
+   * 这些条件都对应 Jellyfin `/Items` 的查询参数（Filters / IsHD / Is4K / HasSubtitles）。
+   */
+  @State private playStateFilter: string = '';
+  @State private resolutionFilter: string = '';
+  @State private favoriteOnly: boolean = false;
+  @State private subtitlesOnly: boolean = false;
+  @State private showFilterPanel: boolean = false;
+  /** 服务端返回的总条数（TotalRecordCount）；-1 表示服务端未返回 */
+  @State private totalCount: number = -1;
   private readonly pageSize: number = ThemeConstants.PAGE_SIZE;
 
   aboutToAppear(): void {
@@ -107,6 +121,47 @@ struct LibraryPage {
     this.loadPage(false);
   }
 
+  /** 当前生效的筛选条件个数（用于按钮上显示「筛选 · N」） */
+  private activeFilterCount(): number {
+    let n: number = 0;
+    if (this.playStateFilter.length > 0) {
+      n++;
+    }
+    if (this.resolutionFilter.length > 0) {
+      n++;
+    }
+    if (this.favoriteOnly) {
+      n++;
+    }
+    if (this.subtitlesOnly) {
+      n++;
+    }
+    return n;
+  }
+
+  private clearFilters(): void {
+    this.playStateFilter = '';
+    this.resolutionFilter = '';
+    this.favoriteOnly = false;
+    this.subtitlesOnly = false;
+  }
+
+  /** 把筛选条件写进查询（与排序、分页一起决定列表内容） */
+  private applyFilters(query: ItemsQueryOptions, tabKey: string): void {
+    // 「我的最爱」标签本身就等于收藏筛选，此时不再叠加筛选项里的收藏开关
+    query.favoriteOnly = tabKey === 'favorites' ? true : this.favoriteOnly;
+    if (this.playStateFilter.length > 0) {
+      query.filters = this.playStateFilter;
+    }
+    if (this.resolutionFilter === 'hd') {
+      query.isHd = true;
+    } else if (this.resolutionFilter === '4k') {
+      query.is4k = true;
+    }
+    query.hasSubtitles = this.subtitlesOnly;
+    query.enableTotalRecordCount = true;
+  }
+
   private async loadPage(more: boolean): Promise<void> {
     const tabKey: string = this.currentTabKey();
     if (more) {
@@ -135,11 +190,12 @@ struct LibraryPage {
       query.limit = this.pageSize;
       query.sortBy = this.sortBy;
       query.sortOrder = this.sortOrder;
-      if (tabKey === 'favorites') {
-        query.favoriteOnly = true;
-      }
+      this.applyFilters(query, tabKey);
       if (tabKey === 'series') {
-        query.includeItemTypes = 'Series';
+        // 「剧集」= Episodes（Jellyfin Web 的语义）。
+        // 这里原来也是 'Series'，于是与「节目」标签发出**完全相同**的请求，
+        // 用户点「剧集」永远看不到分集列表，两个标签看起来都像坏了。
+        query.includeItemTypes = 'Episode';
       } else if (tabKey === 'boxsets') {
         query.includeItemTypes = 'BoxSet';
       } else if (this.collectionType === 'movies') {
@@ -168,7 +224,17 @@ struct LibraryPage {
         this.items = page;
       }
       this.startIndex = this.startIndex + page.length;
-      this.hasMore = tabKey === 'genres' || tabKey === 'studios' ? false : page.length >= this.pageSize;
+      // 总数优先取服务端返回的 TotalRecordCount：
+      // 原来用"本页条数 >= 每页条数"猜 hasMore，最后一页正好整除时会多请求一次，
+      // 而界面上显示的"N 项"其实是"已加载条数"，用户看到 40 项会以为库里只有 40 项。
+      this.totalCount = JsonUtil.getNumber(result.data as ESObject, 'TotalRecordCount', -1);
+      if (tabKey === 'genres' || tabKey === 'studios') {
+        this.hasMore = false;
+      } else if (this.totalCount >= 0) {
+        this.hasMore = this.items.length < this.totalCount;
+      } else {
+        this.hasMore = page.length >= this.pageSize;
+      }
       this.status = this.items.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
     } catch (err) {
       // 解析异常也必须落到终态，否则界面永远停在"加载中"且分页标志位卡死
@@ -270,6 +336,115 @@ struct LibraryPage {
     });
   }
 
+  /**
+   * 筛选面板里的一行 chip。
+   *
+   * 用 `kind + value` 而不是回调参数来分发点击：本项目此前在播放页遇到过
+   * `@Builder` 传函数类型参数导致转译产物语法错误（es2abc）的问题，
+   * 统一沿用"参数化事件再分发"的写法，避免同类坑。
+   */
+  @Builder
+  FilterChip(label: string, selected: boolean, kind: string, value: string) {
+    ChipButton({
+      label: label,
+      selected: selected,
+      onTap: () => {
+        this.onFilterTap(kind, value);
+      }
+    })
+  }
+
+  /**
+   * 筛选面板里的事件分发。
+   *
+   * 每点一下就**立即重新查询**（面板保持打开）：这样「共 N 项」会实时变化，
+   * 用户能马上看到"只看未观看"到底筛掉了多少，而不是点完「完成」才知道结果为空。
+   */
+  private onFilterTap(kind: string, value: string): void {
+    if (kind === 'state') {
+      this.playStateFilter = this.playStateFilter === value ? '' : value;
+    } else if (kind === 'res') {
+      this.resolutionFilter = this.resolutionFilter === value ? '' : value;
+    } else if (kind === 'fav') {
+      this.favoriteOnly = !this.favoriteOnly;
+    } else if (kind === 'sub') {
+      this.subtitlesOnly = !this.subtitlesOnly;
+    } else if (kind === 'reset') {
+      this.clearFilters();
+    } else {
+      return;
+    }
+    this.reload();
+  }
+
+  /** 筛选面板：观看状态 / 分辨率 / 收藏 / 字幕 */
+  @Builder
+  FilterPanel() {
+    Column({ space: 10 }) {
+      Row() {
+        Text('筛选')
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().textPrimary)
+        Blank()
+        TextButton({
+          label: '重置',
+          onTap: () => {
+            this.onFilterTap('reset', '');
+          }
+        })
+      }
+      .width('100%')
+
+      this.FilterSectionTitle('观看状态')
+      Row({ space: 8 }) {
+        this.FilterChip('全部', this.playStateFilter.length === 0, 'state', '')
+        this.FilterChip('未观看', this.playStateFilter === 'IsUnplayed', 'state', 'IsUnplayed')
+        this.FilterChip('已观看', this.playStateFilter === 'IsPlayed', 'state', 'IsPlayed')
+        this.FilterChip('播放中', this.playStateFilter === 'IsResumable', 'state', 'IsResumable')
+      }
+      .width('100%')
+
+      this.FilterSectionTitle('清晰度')
+      Row({ space: 8 }) {
+        this.FilterChip('全部', this.resolutionFilter.length === 0, 'res', '')
+        this.FilterChip('高清', this.resolutionFilter === 'hd', 'res', 'hd')
+        this.FilterChip('4K', this.resolutionFilter === '4k', 'res', '4k')
+      }
+      .width('100%')
+
+      this.FilterSectionTitle('其他')
+      Row({ space: 8 }) {
+        this.FilterChip('只看收藏', this.favoriteOnly, 'fav', '')
+        this.FilterChip('只看带字幕', this.subtitlesOnly, 'sub', '')
+      }
+      .width('100%')
+
+      Row({ space: 12 }) {
+        Blank()
+        TextButton({
+          label: '完成',
+          onTap: () => {
+            // 筛选在点选时已生效，这里只负责收起面板
+            this.showFilterPanel = false;
+          }
+        })
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  FilterSectionTitle(text: string) {
+    Text(text)
+      .fontSize(ThemeConstants.LABEL_SMALL)
+      .fontColor(this.colors().textTertiary)
+      .margin({ top: 4 })
+  }
+
   /** 分类切换 —— 参考项目用 FilterChips（34vp 圆角 chip，选中品牌实底）而非下划线 Tab */
   @Builder
   TabChips() {
@@ -308,10 +483,27 @@ struct LibraryPage {
         this.TabChips()
 
         Row() {
-          Text(`${this.items.length} 项`)
+          Text(this.totalCount >= 0 ? `共 ${this.totalCount} 项` : `${this.items.length} 项`)
             .fontSize(ThemeConstants.LABEL_SMALL)
             .fontColor(this.colors().textSecondary)
             .layoutWeight(1)
+          // 库内搜索：把当前库作为搜索范围带过去（此前只能全库搜，且搜索页没有范围概念）
+          TextButton({
+            label: '搜索',
+            onTap: () => {
+              router.pushUrl({
+                url: 'pages/SearchPage',
+                params: { parentId: this.parentId, scopeTitle: this.title }
+              });
+            }
+          })
+          // 筛选入口：带上生效条件个数，用户一眼能看出"列表为什么这么短"
+          TextButton({
+            label: this.activeFilterCount() > 0 ? `筛选 · ${this.activeFilterCount()}` : '筛选',
+            onTap: () => {
+              this.showFilterPanel = !this.showFilterPanel;
+            }
+          })
           TextButton({
             label: '排序',
             onTap: () => {
@@ -351,6 +543,12 @@ struct LibraryPage {
             onItemTap: (item: MediaItem) => {
               this.openItem(item);
             },
+            // 长按卡片：不经详情页即可播放/收藏/标记已看/加入播放列表
+            onItemLongPress: (item: MediaItem) => {
+              MediaItemMenu.show(this.getUIContext(), item, () => {
+                this.items = MediaItemMenu.touch(this.items);
+              });
+            },
             onReachEnd: () => {
               if (!this.footerTriggered) {
                 this.footerTriggered = true;
@@ -364,6 +562,27 @@ struct LibraryPage {
       .height('100%')
       .backgroundColor(this.colors().pageBackground)
 
+      // 筛选面板：覆盖层挂在列表之上（列表本身不加模糊/遮罩，保持滚动位置可见）
+      if (this.showFilterPanel) {
+        Column() {
+          Column() {
+            this.FilterPanel()
+          }
+          .width('92%')
+          .backgroundColor(this.colors().cardBackground)
+          .borderRadius(ThemeConstants.CARD_RADIUS)
+          .shadow({ radius: 16, color: '#66000000', offsetX: 0, offsetY: 6 })
+          .id('filterPanel')
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(this.colors().overlayControlStrong)
+        // 刻意不给遮罩层挂 onClick：面板里的 chip 自身有点击处理，
+        // 一旦上层遮罩也响应点击，某些 ArkUI 版本会把子组件的点击一并算到父级，
+        // 表现为"点一下筛选条件面板就关了"。关闭统一走「完成」或再次点「筛选」。
+      }
     }
     .width('100%')
     .height('100%')

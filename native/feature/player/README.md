@@ -119,4 +119,20 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
     实测用默认轨（文件默认音轨 = Jellyfin 的 Default 流）交叉验证过，可按序号映射；
   - ArkTS 侧 `ForEach` 的 key 必须包含"是否选中"，否则切换后选中标记不会移动（key 未变 → 该项不重建）；
   - 转码/无轨道信息的场景才回退到"改写 `AudioStreamIndex`/`SubtitleStreamIndex` → 重新取流 → seek 回原位"。
+- **软解取流绝不能放在 UI 线程上（本模块踩过的最严重的一个坑）**：
+  `RangeCache::read()` 未命中缓存时会走 `FetchRange()`（宿主的同步 HTTP）。设备实测 faultlog
+  主线程栈为 `RangeCache::read → fillCache → FetchRange → IsHttpResponseComplete` +
+  `THREAD_BLOCK_6S`：逐帧拉取时一次网络往返就把主线程阻塞 6 秒以上，系统判 appfreeze、
+  界面直接消失（看起来像"应用退出"，累计 8 条）。两层防护，缺一不可：
+  1. `RangeCache::startPrefetch()` 后台线程预取（默认领先 8 块 = 8 MiB），把取流移出读取路径；
+  2. 宿主侧**帧拉取必须异步**（本项目 `softPlayNextFrame` 用 `napi_create_async_work`），
+     UI 线程只等 Promise —— 预取只覆盖"顺序向前读"，容器解析到处 seek 与网络跟不上时仍会 miss。
+- **EGL 渲染必须留在初始化/上次渲染所在线程（本项目是 UI 线程）**：把 `renderRgba()` 放到
+  线程池线程后，`eglSwapBuffers` 返回 **`0x12301`**、帧解出来了但**上不了屏**
+  （诊断行显示"未渲染"）。正确拆法是"工作线程只解码 + UI 线程渲染"：
+  `softPlayNextFrame()`（异步，解码并缓存最近帧）+ `softPlayRenderLast()`（同步，UI 线程调用）。
+- **软解会话没有"从指定位置起播"**：`RangeCache` 有 `seek()`，但打开后并未 `av_seek_frame`，
+  因此"继续观看"这类续播需求在软解路径上会从片头开始（宿主已按此如实提示）。
+  如需支持：在 `find_stream_info` 之后 `av_seek_frame(..., AVSEEK_FLAG_BACKWARD)` +
+  `avcodec_flush_buffers()`。
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。

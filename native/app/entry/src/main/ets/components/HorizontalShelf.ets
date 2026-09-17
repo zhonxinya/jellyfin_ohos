@@ -12,6 +12,11 @@ export struct HorizontalShelf {
   @Prop cardWidth: number = ThemeConstants.CARD_WIDTH;
   @Prop showMore: boolean = false;
   onItemTap: (item: MediaItem) => void = (_item: MediaItem) => {};
+  /** 长按条目（弹出操作菜单）；默认空实现 */
+  onItemLongPress: (item: MediaItem) => void = (_item: MediaItem) => {};
+  /** 是否显示"继续播放"快捷按钮（继续观看货架用） */
+  @Prop quickPlay: boolean = false;
+  onQuickPlay: (item: MediaItem) => void = (_item: MediaItem) => {};
   onMore: () => void = () => {};
 
   build() {
@@ -35,10 +40,17 @@ export struct HorizontalShelf {
                   cardWidth: this.cardWidth,
                   onTap: () => {
                     this.onItemTap(item);
+                  },
+                  onLongPress: () => {
+                    this.onItemLongPress(item);
+                  },
+                  quickPlay: this.quickPlay,
+                  onQuickPlay: () => {
+                    this.onQuickPlay(item);
                   }
                 })
               }
-            }, (item: MediaItem) => item.id)
+            }, (item: MediaItem) => `${item.id}_${item.isPlayed ? 1 : 0}_${item.isFavorite ? 1 : 0}`)
           }
           .listDirection(Axis.Horizontal)
           .scrollBar(BarState.Off)

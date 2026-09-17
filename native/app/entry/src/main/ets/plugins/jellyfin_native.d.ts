@@ -27,7 +27,7 @@ declare module 'libjellyfin_native.so' {
     getStudios(parentId: string, startIndex: number, limit: number): string;
     getSuggestions(parentId: string, limit: number): string;
     getLibraryItems(parentId: string, startIndex: number, limit: number): string;
-    search(query: string, startIndex: number, limit: number): string;
+    search(query: string, startIndex: number, limit: number, parentId: string, includeItemTypes: string): string;
     getItemDetail(itemId: string): string;
     getSeasonEpisodes(seriesId: string, seasonId: string): string;
     getPlaybackInfo(itemId: string, optionsJson: string): string;
@@ -36,16 +36,37 @@ declare module 'libjellyfin_native.so' {
     getUserItemData(itemId: string): string;
     getUserById(userId: string): string;
     updateUserConfiguration(configurationJson: string): string;
-    searchHints(query: string, limit: number): string;
+    searchHints(query: string, limit: number, parentId: string, includeItemTypes: string): string;
     getPlaylists(): string;
-    createPlaylist(name: string, itemId: string): string;
+    createPlaylist(name: string, itemId: string, mediaType: string): string;
     addToPlaylist(playlistId: string, itemId: string): string;
+    /** 读取播放列表内容（第 2/3 参数为分页）；返回的条目带 PlaylistItemId（列表条目 id） */
+    getPlaylistItems(playlistId: string, startIndex: number, limit: number): string;
+    /** 从播放列表移除条目；entryIds 是逗号分隔的 PlaylistItemId（不是媒体 id） */
+    removeFromPlaylist(playlistId: string, entryIds: string): string;
+    /** 移动列表条目到新下标（0 基） */
+    movePlaylistItem(playlistId: string, entryId: string, newIndex: number): string;
+    /** 删除播放列表本体 */
+    deletePlaylist(playlistId: string): string;
     reportPlaybackProgress(itemId: string, positionTicks: number, isPaused: boolean): string;
     reportPlaybackStopped(itemId: string, positionTicks: number): string;
     playerOpen(itemId: string, optionsJson: string): string;
     playerSoftDecodeProbe(itemId: string, cacheDir: string, optionsJson: string): string;
     softPlayOpen(itemId: string, surfaceId: string, surfaceWidth: number, surfaceHeight: number, renderMode: string, optionsJson: string): string;
-    softPlayNextFrame(maxWidth: number): SoftFrameResult;
+    /**
+     * 取下一帧（解码 + EGL 渲染）。
+     *
+     * **异步**：该路径未命中缓存时会做同步 HTTP，必须放在工作线程执行，
+     * 否则会阻塞 UI 线程触发 appfreeze（设备实测）。返回 JSON：
+     * `{ ok, data: { ok, width, height, ptsSec, frameIndex, bytesFetched, rendered, error?, renderError? } }`
+     */
+    softPlayNextFrame(maxWidth: number): Promise<string>;
+    /**
+     * 把最近一帧渲染上屏（EGL）。**必须由 UI 线程调用**：EGL 窗口 surface 的 swap 有线程约束，
+     * 在工作线程里 swap 会失败（设备实测 0x12301，帧解出来但上不了屏）。
+     * 返回 JSON：`{ ok, data: { rendered, renderError } }`
+     */
+    softPlayRenderLast(): string;
     softPlayStatus(): string;
     softPlayClose(): string;
     softPlayDumpFrame(path: string): string;

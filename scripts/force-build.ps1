@@ -25,11 +25,12 @@ function Invoke-CompileAndRun {
 
     if ($clang) {
         Write-Host "Compiling $Name with clang++..."
-        & clang++.exe -std=c++17 -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
+        & clang++.exe -std=c++17 -pthread -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } elseif ($gpp) {
         Write-Host "Compiling $Name with g++..."
-        & g++ -std=c++17 -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
+        # -pthread：RangeCache 含后台预取线程（std::thread），链接需要 pthread
+        & g++ -std=c++17 -pthread -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } elseif ($cl) {
         Write-Host "Compiling $Name with cl.exe..."
@@ -71,6 +72,13 @@ Invoke-CompileAndRun -Name "test_http_response" -Sources @(
 Invoke-CompileAndRun -Name "test_image_url" -Sources @(
     (Join-Path $Core "tests\test_image_url.cpp"),
     (Join-Path $Core "image_url.cpp"),
+    (Join-Path $Core "url_util.cpp")
+)
+
+# ItemsQuery：媒体库筛选/排序/分页的 query string 构造（纯函数，不依赖网络客户端）
+Invoke-CompileAndRun -Name "test_items_query" -Sources @(
+    (Join-Path $Core "tests\test_items_query.cpp"),
+    (Join-Path $Core "api\items_query.cpp"),
     (Join-Path $Core "url_util.cpp")
 )
 

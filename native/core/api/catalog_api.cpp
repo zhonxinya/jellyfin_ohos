@@ -30,12 +30,19 @@ ApiResult getUserViews(JellyfinApiClient &client, const std::string &userId)
 }
 
 ApiResult getSearchHints(JellyfinApiClient &client, const std::string &userId,
-                         const std::string &term, int limit)
+                         const std::string &term, int limit, const std::string &parentId,
+                         const std::string &includeItemTypes)
 {
     std::ostringstream path;
     path << "/Search/Hints?UserId=" << EncodeQueryValue(userId)
          << "&SearchTerm=" << EncodeQueryValue(term) << "&Limit=" << limit
-         << "&IncludeItemTypes=Movie,Series,Episode,Audio,MusicAlbum";
+         << "&IncludeItemTypes="
+         << EncodeQueryValue(includeItemTypes.empty()
+                                 ? std::string("Movie,Series,Episode,Audio,MusicAlbum")
+                                 : includeItemTypes);
+    if (!parentId.empty()) {
+        path << "&ParentId=" << EncodeQueryValue(parentId);
+    }
     return client.getJson(path.str());
 }
 

@@ -6,6 +6,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { formatTicks } from '../common/format';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -127,6 +128,12 @@ struct DetailPage {
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (result.ok) {
       this.item.isFavorite = next;
+      this.showActionToast(next ? '已加入我的最爱' : '已取消收藏');
+    } else {
+      // 失败必须说出来：此前只在成功时更新图标，服务端 404 时用户看到的是
+      // "点了星标没有任何反应"，既不知道失败也不知道为什么。
+      this.showActionToast(result.message.length > 0 ? `收藏失败：${result.message}`
+                                                     : '收藏失败（服务端未接受该请求）');
     }
     this.favoriting = false;
   }
@@ -137,6 +144,19 @@ struct DetailPage {
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (result.ok) {
       this.item.isPlayed = next;
+      this.showActionToast(next ? '已标记为已播放' : '已标记为未播放');
+    } else {
+      this.showActionToast(result.message.length > 0 ? `标记失败：${result.message}`
+                                                     : '标记失败（服务端未接受该请求）');
+    }
+  }
+
+  /** 操作结果用 toast 反馈（成功与失败都要可见，失败原因直接给用户看） */
+  private showActionToast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 2000 });
+    } catch (err) {
+      // toast 失败不影响状态更新本身
     }
   }
 
@@ -244,19 +264,59 @@ struct DetailPage {
     return JSON.stringify(opts);
   }
 
-  private playItem(id: string): void {
+  /**
+   * 交给播放页播放某个条目。
+   *
+   * `startPositionMs`：该条目的观看进度（`PlaybackPositionTicks` 是 100ns 单位）。
+   * 传下去后播放器会在 `prepared` 之后 seek 到该位置 —— 否则「继续播放」等于从头再来，
+   * 而"继续观看/进度条"也就名不副实。
+   */
+  private playItem(id: string, startPositionMs: number = 0): void {
+    const resumeMs: number = startPositionMs > 1000 ? startPositionMs
+                                                    : this.resumeMsForItem(id);
     router.pushUrl({
       url: 'pages/PlayerPage',
       params: {
         itemId: id,
         title: this.item.name,
         playbackOptions: this.buildPlaybackOptions(),
+        startPositionMs: resumeMs,
         // 把可切换的流列表带给播放页，使其能在**播放中**切换音频/字幕
         // （Jellyfin 的轨道选择是 PlaybackInfo 参数，切换后按原位置重新拉起播放即可，
         //   对硬解与软解两条路径都成立）
         mediaStreams: JSON.stringify(this.mediaStreams)
       }
     });
+  }
+
+  /** 该条目（或它的第一集）的续播位置（毫秒）；没有进度时返回 0 */
+  /**
+   * 主播放按钮文案。
+   *
+   * 有观看进度时显示「继续播放 · mm:ss」：既说明会从上次位置接着播，
+   * 也把"上次看到哪儿"直接告诉用户（此前只有进度条，按钮永远写"播放"，点了却从头开始）。
+   */
+  private playButtonLabel(): string {
+    const resumeMs: number = Math.floor(this.item.playbackPositionTicks / 10000);
+    const compact: boolean = this.item.type === 'Series' || this.item.type === 'Episode';
+    if (resumeMs > 1000) {
+      // 剧集类按钮是固定宽度（150vp），带上时间会被裁掉，因此只在整行按钮上显示时间
+      return compact ? '继续播放'
+                     : `继续播放 · ${formatTicks(this.item.playbackPositionTicks)}`;
+    }
+    return compact ? '播放本集' : '播放';
+  }
+
+  private resumeMsForItem(id: string): number {
+    if (id === this.item.id) {
+      return Math.floor(this.item.playbackPositionTicks / 10000);
+    }
+    for (let i = 0; i < this.episodes.length; i++) {
+      if (this.episodes[i].id === id) {
+        return Math.floor(this.episodes[i].playbackPositionTicks / 10000);
+      }
+    }
+    return 0;
   }
 
   /**
@@ -267,26 +327,69 @@ struct DetailPage {
    * 因此这里先解析出"第一季第一集"再交给播放器，与各 Jellyfin 客户端的行为一致。
    */
   private async startPlayback(): Promise<void> {
-    if (this.item.type !== 'Series') {
-      this.playItem(this.item.id);
+    if (this.item.type === 'Series') {
+      if (this.seasons.length === 0) {
+        this.errorMsg = '该剧集暂无可播放的分集';
+        return;
+      }
+      const raw: string = await JellyfinNative.getSeasonEpisodes(this.item.id, this.seasons[0].id);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok) {
+        this.errorMsg = result.message.length > 0 ? result.message : '加载分集失败';
+        return;
+      }
+      const episodes: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      if (episodes.length === 0) {
+        this.errorMsg = '该剧集暂无可播放的分集';
+        return;
+      }
+      this.playItem(episodes[0].id);
       return;
     }
-    if (this.seasons.length === 0) {
-      this.errorMsg = '该剧集暂无可播放的分集';
+    // 容器类条目（合集/播放列表/季/文件夹）**本身不是可播放媒体**：
+    // 直接拿它的 id 去请求播放信息必然失败（与剧集同因）。
+    // 这里解析出"第一个可播放子项"再交给播放器，与各 Jellyfin 客户端行为一致。
+    if (this.item.type === 'BoxSet' || this.item.type === 'Playlist' ||
+        this.item.type === 'Season' || this.item.type === 'Folder' || this.item.isFolder) {
+      const firstId: string = await this.resolveFirstPlayableChild();
+      if (firstId.length === 0) {
+        this.errorMsg = '该条目暂无可播放的内容';
+        return;
+      }
+      this.playItem(firstId);
       return;
     }
-    const raw: string = await JellyfinNative.getSeasonEpisodes(this.item.id, this.seasons[0].id);
+    this.playItem(this.item.id);
+  }
+
+  /** 取容器条目的第一个可播放子项 id；取不到返回空串 */
+  private async resolveFirstPlayableChild(): Promise<string> {
+    if (this.item.type === 'Playlist') {
+      const raw: string = await JellyfinNative.getPlaylistItems(this.item.id, 0, 1);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok) {
+        return '';
+      }
+      const items: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      return items.length > 0 ? items[0].id : '';
+    }
+    // 季 → 分集；合集/文件夹 → 任意可播放子项（按名称排序取第一个）
+    const query: Record<string, Object> = {
+      'parentId': this.item.id,
+      'startIndex': 0,
+      'limit': 1,
+      'recursive': true,
+      'sortBy': 'SortName',
+      'sortOrder': 'Ascending',
+      'includeItemTypes': this.item.type === 'Season' ? 'Episode' : ''
+    };
+    const raw: string = await JellyfinNative.queryItems(JSON.stringify(query));
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok) {
-      this.errorMsg = result.message.length > 0 ? result.message : '加载分集失败';
-      return;
+      return '';
     }
-    const episodes: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
-    if (episodes.length === 0) {
-      this.errorMsg = '该剧集暂无可播放的分集';
-      return;
-    }
-    this.playItem(episodes[0].id);
+    const items: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    return items.length > 0 ? items[0].id : '';
   }
 
   private mediaInfoLabels(): string[] {
@@ -817,7 +920,7 @@ struct DetailPage {
                 // 播放按钮行 —— 主操作按参考项目规格（48vp / 12vp 圆角 / 品牌实底 + 微光投影），
                 // 其余操作用 40vp 圆形图标按钮 + 系统符号（原来用的是 ▼ ★ ⏱ ⋮ 文本字符）
                 Flex({ wrap: FlexWrap.Wrap }) {
-                  Button(this.item.type === 'Episode' ? '\u64ad\u653e\u672c\u96c6' : '\u64ad\u653e',
+                  Button(this.playButtonLabel(),
                     { type: ButtonType.Normal, stateEffect: false })
                     .height(ThemeConstants.BUTTON_HEIGHT)
                     .width(this.item.type === 'Series' || this.item.type === 'Episode' ? 150 : '100%')

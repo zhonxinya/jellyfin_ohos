@@ -3,6 +3,7 @@
 #include "range_fetcher.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace jellyfin {
@@ -13,100 +14,208 @@ RangeCache::RangeCache(std::string url, int64_t chunkBytes)
 {
 }
 
+RangeCache::~RangeCache()
+{
+    stopPrefetch();
+}
+
+int64_t RangeCache::size() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return size_;
+}
+
+int64_t RangeCache::bytesFetched() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return bytesFetched_;
+}
+
+int64_t RangeCache::position() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return pos_;
+}
+
+int64_t RangeCache::lastRequestStart() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return lastReqStart_;
+}
+
+int64_t RangeCache::lastRequestEnd() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return lastReqEnd_;
+}
+
+int64_t RangeCache::prefetchRequests() const
+{
+    return prefetchRequests_.load();
+}
+
 int64_t RangeCache::probe()
 {
-    lastReqStart_ = 0;
-    lastReqEnd_ = chunk_ - 1;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        chunks_.clear();
+        size_ = -1;
+        lastReqStart_ = 0;
+        lastReqEnd_ = chunk_ - 1;
+    }
     const RangeResponse resp = FetchRange(url_, 0, chunk_ - 1);
     if (resp.status >= 400 || resp.body.empty()) {
         // 服务器可能完全不支持 Range：退回整段请求
-        lastReqStart_ = 0;
-        lastReqEnd_ = -1;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            lastReqStart_ = 0;
+            lastReqEnd_ = -1;
+        }
         const RangeResponse plain = FetchRange(url_, 0, -1);
         if (plain.status >= 400 || plain.body.empty()) {
             return 0;
         }
+        std::lock_guard<std::mutex> lock(mtx_);
         bytesFetched_ += static_cast<int64_t>(plain.body.size());
-        cache_.assign(plain.body.begin(), plain.body.end());
-        cacheStart_ = 0;
-        size_ = static_cast<int64_t>(cache_.size());
+        chunks_.clear();
+        chunks_[0] = plain.body;
+        size_ = static_cast<int64_t>(plain.body.size());
         return size_;
     }
+    std::lock_guard<std::mutex> lock(mtx_);
     bytesFetched_ += static_cast<int64_t>(resp.body.size());
-    cache_.assign(resp.body.begin(), resp.body.end());
-    cacheStart_ = 0;
+    chunks_.clear();
+    chunks_[0] = resp.body;
     if (resp.status == 200) {
         // 服务器忽略了 Range：这就是整片内容
-        size_ = static_cast<int64_t>(cache_.size());
-    } else if (static_cast<int64_t>(cache_.size()) < chunk_) {
+        size_ = static_cast<int64_t>(resp.body.size());
+    } else if (static_cast<int64_t>(resp.body.size()) < chunk_) {
         // 206 但返回不足一个 chunk：说明已到文件末尾，可据此确定长度
-        size_ = static_cast<int64_t>(cache_.size());
+        size_ = static_cast<int64_t>(resp.body.size());
     }
     return size_;
 }
 
- bool RangeCache::inCache(int64_t pos) const
+int64_t RangeCache::chunkEndContainingLocked(int64_t pos) const
 {
-    return !cache_.empty() && pos >= cacheStart_ &&
-           pos < cacheStart_ + static_cast<int64_t>(cache_.size());
+    for (const auto &entry : chunks_) {
+        const int64_t start = entry.first;
+        const int64_t end = start + static_cast<int64_t>(entry.second.size());
+        if (pos >= start && pos < end) {
+            return end;
+        }
+    }
+    return -1;
 }
 
-bool RangeCache::fillCache(int64_t pos, std::string &error)
+int64_t RangeCache::contiguousEndLocked() const
 {
-    if (size_ >= 0 && pos >= size_) {
-        return false;
+    int64_t end = pos_;
+    bool advanced = true;
+    while (advanced) {
+        advanced = false;
+        for (const auto &entry : chunks_) {
+            const int64_t start = entry.first;
+            const int64_t chunkEnd = start + static_cast<int64_t>(entry.second.size());
+            if (start <= end && chunkEnd > end) {
+                end = chunkEnd;
+                advanced = true;
+            }
+        }
     }
-    const int64_t end = (size_ >= 0)
-        ? std::min<int64_t>(pos + chunk_ - 1, size_ - 1)
-        : pos + chunk_ - 1;
-    lastReqStart_ = pos;
-    lastReqEnd_ = end;
-    const RangeResponse resp = FetchRange(url_, pos, end);
-    if (resp.status == 416) {
-        // 416 Range Not Satisfiable = 已越过文件末尾 → 这是 EOF，不是错误。
-        // （此前的实现把它当作取流失败，会让 libavformat 在末尾收到 EIO）
-        size_ = pos;
-        return false;
+    return end;
+}
+
+void RangeCache::evictLocked()
+{
+    while (static_cast<int64_t>(chunks_.size()) > maxChunks_) {
+        auto victim = chunks_.end();
+        for (auto it = chunks_.begin(); it != chunks_.end(); ++it) {
+            const int64_t end = it->first + static_cast<int64_t>(it->second.size());
+            if (end <= pos_) {
+                victim = it;
+                break;
+            }
+        }
+        if (victim == chunks_.end()) {
+            victim = chunks_.begin();
+        }
+        chunks_.erase(victim);
     }
-    if (resp.status >= 400 || resp.body.empty()) {
-        // 仅当"响应成功（2xx）且确实没有内容"才视为已到末尾；
-        // status=0/带 error 表示取流器本身失败（如未注入 RangeFetcher、网络错误），必须报错而非静默 EOF。
-        if (resp.status >= 200 && resp.status < 300 && resp.error.empty() && resp.body.empty()) {
-            size_ = pos;
+}
+
+bool RangeCache::fetchIntoLockedRange(int64_t pos, std::string &error, bool countAsPrefetch)
+{
+    // 注意：调用方**不得持锁** —— FetchRange 是同步网络调用，持锁会连带阻塞读取线程
+    int64_t sizeSnapshot = -1;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (size_ >= 0 && pos >= size_) {
             return false;
         }
-        if (pos == 0) {
-            // 服务器可能不支持 Range：退回整段请求（仅起点可用）
+        sizeSnapshot = size_;
+    }
+    // 按块对齐请求：预取线程与读取线程于是共用同一批分块，命中率才高
+    const int64_t start = (pos / chunk_) * chunk_;
+    const int64_t end = (sizeSnapshot >= 0) ? std::min<int64_t>(start + chunk_ - 1, sizeSnapshot - 1)
+                                           : start + chunk_ - 1;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        lastReqStart_ = start;
+        lastReqEnd_ = end;
+    }
+    const RangeResponse resp = FetchRange(url_, start, end);
+    if (resp.status >= 400 || resp.body.empty()) {
+        // 起点处的失败可能是"服务器不支持 Range"：退化为整段请求再试一次
+        if (start == 0) {
+            std::lock_guard<std::mutex> lock(mtx_);
             lastReqStart_ = 0;
             lastReqEnd_ = -1;
-            const RangeResponse plain = FetchRange(url_, 0, -1);
-            if (plain.status >= 400 || plain.body.empty()) {
-                error = plain.error.empty() ? ("取流失败：HTTP " + std::to_string(plain.status))
-                                            : ("取流失败：" + plain.error);
+        }
+        const RangeResponse plain = (start == 0) ? FetchRange(url_, 0, -1) : resp;
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (plain.status >= 400 || plain.body.empty()) {
+            if (plain.status >= 200 && plain.status < 300 && plain.error.empty() &&
+                plain.body.empty()) {
+                // 2xx 且确实没有内容 = 已到末尾
+                size_ = start;
                 return false;
             }
-            bytesFetched_ += static_cast<int64_t>(plain.body.size());
-            cache_.assign(plain.body.begin(), plain.body.end());
-            cacheStart_ = 0;
-            if (size_ < 0) {
-                size_ = static_cast<int64_t>(cache_.size());
+            if (!resp.error.empty()) {
+                error = "取流失败：" + resp.error;
+            } else if (resp.status == 416) {
+                // 416 Range Not Satisfiable = 越过末尾（EOF，不是错误）
+                size_ = start;
+                return false;
+            } else {
+                error = plain.error.empty() ? ("取流失败：HTTP " + std::to_string(plain.status))
+                                            : ("取流失败：" + plain.error);
             }
-            return true;
+            return false;
         }
-        error = resp.error.empty() ? ("取流失败：HTTP " + std::to_string(resp.status))
-                                   : ("取流失败：" + resp.error);
-        return false;
+        bytesFetched_ += static_cast<int64_t>(plain.body.size());
+        chunks_.clear();
+        chunks_[0] = plain.body;
+        size_ = static_cast<int64_t>(plain.body.size());
+        if (countAsPrefetch) {
+            prefetchRequests_.fetch_add(1);
+        }
+        return true;
     }
+    std::lock_guard<std::mutex> lock(mtx_);
     bytesFetched_ += static_cast<int64_t>(resp.body.size());
-    cache_.assign(resp.body.begin(), resp.body.end());
-    cacheStart_ = pos;
+    // 服务器忽略 Range（200）时 body 是整片：缓存键应为 0
+    const int64_t storeAt = (resp.status == 200) ? 0 : start;
+    chunks_[storeAt] = resp.body;
     if (size_ < 0 && resp.status == 200) {
-        // 服务器忽略了 Range，返回整片
-        size_ = static_cast<int64_t>(cache_.size());
-    } else if (size_ < 0 && static_cast<int64_t>(cache_.size()) < chunk_) {
-        // 206 且不足一个 chunk：已到末尾
-        size_ = pos + static_cast<int64_t>(cache_.size());
+        size_ = static_cast<int64_t>(resp.body.size());
+    } else if (size_ < 0 && static_cast<int64_t>(resp.body.size()) < chunk_) {
+        size_ = storeAt + static_cast<int64_t>(resp.body.size());
     }
+    if (countAsPrefetch) {
+        prefetchRequests_.fetch_add(1);
+    }
+    evictLocked();
     return true;
 }
 
@@ -115,27 +224,47 @@ int RangeCache::read(uint8_t *buf, int bufSize, std::string &error)
     if (bufSize <= 0) {
         return 0;
     }
-    if (size_ >= 0 && pos_ >= size_) {
-        return 0;
-    }
-    if (!inCache(pos_)) {
-        if (!fillCache(pos_, error)) {
-            // 已知到末尾时不算错误，按 EOF 处理
-            if (size_ >= 0 && pos_ >= size_) {
-                return 0;
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (size_ >= 0 && pos_ >= size_) {
+            return 0;
+        }
+        for (const auto &entry : chunks_) {
+            const int64_t start = entry.first;
+            const int64_t end = start + static_cast<int64_t>(entry.second.size());
+            if (pos_ >= start && pos_ < end) {
+                const int n = static_cast<int>(std::min<int64_t>(bufSize, end - pos_));
+                std::memcpy(buf, entry.second.data() + static_cast<size_t>(pos_ - start),
+                            static_cast<size_t>(n));
+                pos_ += n;
+                return n;
             }
-            return -1;
         }
     }
-    const int64_t cacheEnd = cacheStart_ + static_cast<int64_t>(cache_.size());
-    const int64_t avail = cacheEnd - pos_;
-    if (avail <= 0) {
-        return 0;
+    // 未命中：同步取流兜底（后台预取没跟上，或 seek 到了尚未预取的位置）
+    if (!fetchIntoLockedRange(pos_, error, false)) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (size_ >= 0 && pos_ >= size_) {
+            return 0;
+        }
+        if (error.empty()) {
+            error = "读取失败：取流未返回数据";
+        }
+        return -1;
     }
-    const int n = static_cast<int>(std::min<int64_t>(bufSize, avail));
-    std::memcpy(buf, cache_.data() + static_cast<size_t>(pos_ - cacheStart_), static_cast<size_t>(n));
-    pos_ += n;
-    return n;
+    std::lock_guard<std::mutex> lock(mtx_);
+    for (const auto &entry : chunks_) {
+        const int64_t start = entry.first;
+        const int64_t end = start + static_cast<int64_t>(entry.second.size());
+        if (pos_ >= start && pos_ < end) {
+            const int n = static_cast<int>(std::min<int64_t>(bufSize, end - pos_));
+            std::memcpy(buf, entry.second.data() + static_cast<size_t>(pos_ - start),
+                        static_cast<size_t>(n));
+            pos_ += n;
+            return n;
+        }
+    }
+    return 0;
 }
 
 int64_t RangeCache::seek(int64_t offset)
@@ -143,11 +272,59 @@ int64_t RangeCache::seek(int64_t offset)
     if (offset < 0) {
         return -1;
     }
+    std::lock_guard<std::mutex> lock(mtx_);
     if (size_ >= 0) {
         offset = std::min(offset, size_);
     }
     pos_ = offset;
     return pos_;
+}
+
+void RangeCache::startPrefetch(int64_t aheadChunks)
+{
+    if (running_.load()) {
+        return;
+    }
+    aheadChunks_ = aheadChunks > 0 ? aheadChunks : 8;
+    running_.store(true);
+    worker_ = std::thread([this]() { prefetchLoop(); });
+}
+
+void RangeCache::stopPrefetch()
+{
+    const bool wasRunning = running_.exchange(false);
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    (void)wasRunning;
+}
+
+void RangeCache::prefetchLoop()
+{
+    while (running_.load()) {
+        int64_t next = -1;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            const bool complete = (size_ >= 0 && contiguousEndLocked() >= size_);
+            if (!complete) {
+                const int64_t target = pos_ + aheadChunks_ * chunk_;
+                const int64_t haveEnd = contiguousEndLocked();
+                if (haveEnd < target) {
+                    next = haveEnd;
+                }
+            }
+        }
+        if (next < 0) {
+            // 预取够了（或已到末尾）：歇一会儿再看，避免空转吃 CPU
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            continue;
+        }
+        std::string error;
+        if (!fetchIntoLockedRange(next, error, true)) {
+            // 到末尾或取流失败：稍后再试（seek 之后可能又需要数据）
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
 }
 
 } // namespace player

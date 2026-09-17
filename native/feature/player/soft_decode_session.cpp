@@ -145,6 +145,10 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
         impl_->reader.reset();
         return false;
     }
+    // 启动后台预取：让读取路径（宿主的 UI 线程）尽量命中缓存、不做同步网络请求。
+    // 设备实测（faultlog）：不预取时逐帧读取会在 UI 线程上做 HTTP，一次往返就把主线程
+    // 阻塞 6 秒以上触发 appfreeze —— 根因是"取流发生在 UI 线程"，不是"取流慢"。
+    impl_->reader->startPrefetch();
     impl_->bridge.reader = impl_->reader.get();
 
     constexpr int kAvioBuf = 64 * 1024;
@@ -333,6 +337,10 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
 void SoftDecodeSession::close()
 {
 #if defined(JELLYFIN_HAS_FFMPEG)
+    // 先停预取线程再释放读取器：否则后台线程可能正在用已析构的对象取流
+    if (impl_->reader) {
+        impl_->reader->stopPrefetch();
+    }
     if (impl_->sws != nullptr) {
         sws_freeContext(impl_->sws);
         impl_->sws = nullptr;

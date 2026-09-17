@@ -5,6 +5,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -68,6 +69,26 @@ struct ContinueWatchingPage {
     }
   }
 
+  /**
+   * 直接接着上次的位置播放（本页的核心动作）。
+   *
+   * 不再绕详情页：`PlaybackPositionTicks` 是 100ns 单位，换算成毫秒传给播放页，
+   * 播放器会在 `prepared` 之后 seek 到那里。
+   */
+  private continuePlay(item: MediaItem): void {
+    if (item.id.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/PlayerPage',
+      params: {
+        itemId: item.id,
+        title: item.displayTitle(),
+        startPositionMs: Math.floor(item.playbackPositionTicks / 10000)
+      }
+    });
+  }
+
   build() {
     Column() {
       PageHeader({
@@ -92,7 +113,15 @@ struct ContinueWatchingPage {
           viewMode: this.viewMode,
           loadingMore: this.loadingMore,
           hasMore: this.hasMore,
+          // 本页的条目都带观看进度：封面上给一个"继续播放"快捷按钮
+          quickPlay: true,
+          onQuickPlay: (item: MediaItem) => { this.continuePlay(item); },
           onItemTap: (item: MediaItem) => { this.openItem(item); },
+          onItemLongPress: (item: MediaItem) => {
+            MediaItemMenu.show(this.getUIContext(), item, () => {
+              this.items = MediaItemMenu.touch(this.items);
+            });
+          },
           onReachEnd: () => {
             if (!this.footerTriggered) {
               this.footerTriggered = true;

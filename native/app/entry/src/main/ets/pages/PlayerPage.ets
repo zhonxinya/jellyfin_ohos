@@ -117,6 +117,16 @@ struct PlayerPage {
   @State private trackNote: string = '';
   /** 当前 MediaSourceId（Jellyfin 字幕端点需要它） */
   private mediaSourceId: string = '';
+  /**
+   * 续播起点（毫秒）：由宿主页面按条目的观看进度传入。
+   *
+   * 为什么要有它：媒体库「继续观看」的语义就是"接着上次看"，而此前播放器
+   * 一律从 0:00 起播 —— 点继续观看卡片 → 详情页 → 播放，等于**从头再来**，
+   * 进度条与"继续观看"也就名不副实。这里在 `prepared` 之后 seek 到该位置。
+   */
+  private startPositionMs: number = 0;
+  /** 续播只做一次（重开播放/切轨道后不重复 seek 回起点） */
+  private resumeApplied: boolean = false;
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   /** 本次手势判定出的方向：'' 未定 / 'seek' 水平 / 'level' 垂直（亮度或音量） */
@@ -145,8 +155,12 @@ struct PlayerPage {
       const titleVal: Object | undefined = params['title'];
       const urlVal: Object | undefined = params['playUrl'];
       const optsVal: Object | undefined = params['playbackOptions'];
+      const startVal: Object | undefined = params['startPositionMs'];
       if (typeof idVal === 'string') {
         this.itemId = idVal;
+      }
+      if (typeof startVal === 'number' && startVal > 1000) {
+        this.startPositionMs = startVal;
       }
       if (typeof titleVal === 'string' && titleVal.length > 0) {
         this.title = titleVal;
@@ -363,10 +377,15 @@ struct PlayerPage {
     try {
       // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）。
       // 帧宽限制 640：模拟器 GL 为软件光栅化，上传 1920x1080 大纹理会明显拖慢甚至失败。
-      const frame: ESObject | null = JellyfinNative.softPlayNextFrame(640);
-      if (frame === null) {
+      //
+      // 这一步**必须 await**：原生侧走工作线程执行（未命中缓存时是同步 HTTP），
+      // 若在 UI 线程同步等待，会因一次网络往返阻塞主线程数秒 → 系统判 appfreeze。
+      const raw: string = await JellyfinNative.softPlayNextFrame(640);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
         return;
       }
+      const frame: ESObject = result.data as ESObject;
       const ok: boolean = JsonUtil.getBoolean(frame, 'ok', false);
       if (!ok) {
         const reason: string = JsonUtil.getString(frame, 'error', '');
@@ -382,8 +401,13 @@ struct PlayerPage {
       const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
       const idx: number = JsonUtil.getNumber(frame, 'frameIndex', 0);
       const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
-      const rendered: boolean = JsonUtil.getBoolean(frame, 'rendered', false);
-      const renderError: string = JsonUtil.getString(frame, 'renderError', '');
+      // 渲染在 UI 线程做（原生侧只解码）：EGL 窗口 surface 不能在线程池线程上 swap
+      const renderRaw: string = JellyfinNative.softPlayRenderLast();
+      const renderResult: NativeResult = JellyfinNative.parseResult(renderRaw);
+      const rendered: boolean = renderResult.ok && renderResult.data !== null
+        ? JsonUtil.getBoolean(renderResult.data as ESObject, 'rendered', false) : false;
+      const renderError: string = renderResult.ok && renderResult.data !== null
+        ? JsonUtil.getString(renderResult.data as ESObject, 'renderError', '') : '';
       // 软解播放的进度上报（节流）：此前软解只出画面、不向服务端报告进度，
       // 导致"继续观看"位置、多端同步都不生效。按 5 秒节流，与硬解路径一致。
       this.softPositionMs = Math.floor(pts * 1000);
@@ -1117,6 +1141,11 @@ struct PlayerPage {
     if (this.itemId.length === 0) {
       return;
     }
+    // 位置 0 不上报：上报会把服务端的观看进度写成 0，等于**抹掉用户的续播点**
+    // （软解会话刚打开时会先报一次 pts=0.0，实测就在这个时机把进度清了）。
+    if (ptsSec <= 0.5) {
+      return;
+    }
     const now: number = Date.now();
     if (this.lastProgressReportAt > 0 && now - this.lastProgressReportAt < 5000) {
       return;
@@ -1281,6 +1310,14 @@ struct PlayerPage {
           this.avPlayer?.play();
           this.isPlaying = true;
           this.revealControls();
+          // 续播：seek 到宿主传入的观看进度（只做一次；切轨道/重开播放不再回到这里）
+          if (this.startPositionMs > 1000 && !this.resumeApplied) {
+            this.resumeApplied = true;
+            this.avPlayer?.seek(this.startPositionMs);
+            this.positionMs = this.startPositionMs;
+            this.appendProbeFile('player_tracks.txt',
+              `resume seek to ${this.startPositionMs}ms\n`);
+          }
           // 硬解已就绪：清掉软解留下的诊断文案（否则会一直挂着"EGL 已渲染/第 N 帧"这类
           // 上一段软解会话的信息，看起来像两路同时在播）
           this.softDiag = '';
@@ -1327,6 +1364,9 @@ struct PlayerPage {
   private handlePlaybackFailure(message: string): void {
     this.status = UiState.ERROR;
     this.errorMsg = message;
+    // 允许"重试"重新应用续播位置：重试会重建播放器（走一次 prepared），
+    // 若不再应用一次，重试成功后就变成从头播放（设备实测踩到：首次拉流失败 → 重试 → 回到 0:00）。
+    this.resumeApplied = false;
     this.maybeFallbackToSoftDecode(message);
   }
 
@@ -1340,7 +1380,21 @@ struct PlayerPage {
     if (!this.softPlaying) {
       // 软解也起不来时回到错误态，让用户看到原因并手动重试
       this.status = UiState.ERROR;
+      return;
     }
+    // 软解已经跑起来了：必须离开错误态。
+    //
+    // 为什么：此前只在软解失败时改状态，成功回退时 status 仍是 ERROR，
+    // 于是**整屏错误覆盖层盖在正在播放的软解画面上**（设备实测：页面显示"播放器错误 + 重试"，
+    // 而底下软解帧号一直在涨）。用户看到的是错误页，等于自动回退这个功能白做。
+    this.status = UiState.SUCCESS;
+    this.errorMsg = '';
+    this.isPlaying = true;
+    // 软解会话目前没有"从指定位置起播"的能力（进度条会从头开始），
+    // 这种情况下不能继续显示「继续播放」的暗示，否则用户以为会接着上次看。
+    this.softStatus = this.startPositionMs > 1000
+      ? '已自动切换软解（软解暂不支持从上次位置续播，将从头播放）'
+      : '已自动切换软解播放';
   }
 
   private refreshState(): void {
@@ -1400,7 +1454,14 @@ struct PlayerPage {
       return;
     }
     this.stopped = true;
-    if (this.itemId.length > 0) {
+    // 只有"真的播过"才上报停止位置。
+    //
+    // 为什么：上报停止会把服务端的观看进度写成这个位置；如果播放器根本没起来
+    // （拉流失败、或用户刚进来就退出），位置是 0，于是**用户原有的观看进度被清成 0**，
+    // 「继续观看」条目随之消失 —— 设备实测踩到过：一次失败的打开把 9 分多钟的进度抹平了。
+    // 位置为 0 时直接不上报，让服务端保留原进度。
+    const hasProgress: boolean = this.positionMs > 1000 || this.isPlaying || this.isCompleted();
+    if (this.itemId.length > 0 && hasProgress) {
       JellyfinNative.reportPlaybackStopped(this.itemId, this.positionMs * 10000);
     }
     if (this.avPlayer !== null) {
