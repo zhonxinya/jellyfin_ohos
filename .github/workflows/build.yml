@@ -59,7 +59,8 @@ jobs:
             esac
 
             echo "==> 编译并运行 $name"
-            g++ -std=c++17 $INC "$test_src" $extra -o "$OUT/$name"
+            # -pthread：RangeCache 现在含后台预取线程（std::thread），链接需要 pthread
+            g++ -std=c++17 -pthread $INC "$test_src" $extra -o "$OUT/$name"
             "$OUT/$name"
           done
 

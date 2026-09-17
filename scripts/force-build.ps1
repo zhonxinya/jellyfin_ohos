@@ -25,11 +25,12 @@ function Invoke-CompileAndRun {
 
     if ($clang) {
         Write-Host "Compiling $Name with clang++..."
-        & clang++.exe -std=c++17 -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
+        & clang++.exe -std=c++17 -pthread -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } elseif ($gpp) {
         Write-Host "Compiling $Name with g++..."
-        & g++ -std=c++17 -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
+        # -pthread：RangeCache 含后台预取线程（std::thread），链接需要 pthread
+        & g++ -std=c++17 -pthread -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } elseif ($cl) {
         Write-Host "Compiling $Name with cl.exe..."

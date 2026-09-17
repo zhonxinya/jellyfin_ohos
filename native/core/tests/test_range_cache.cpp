@@ -13,9 +13,11 @@
 #include "range_cache.h"
 #include "range_fetcher.h"
 
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -258,6 +260,89 @@ void TestNoFetcherInjected()
 
 } // namespace
 
+/**
+ * 后台预取：把数据填到读取位置之前，读取路径就不再碰网络。
+ *
+ * 这是本次修复的核心断言 —— 设备上软解逐帧读取时，未命中缓存会在调用线程
+ * （UI 线程）上做同步 HTTP，一次往返就把主线程阻塞 6 秒以上，系统判 appfreeze。
+ */
+void TestPrefetchFillsAheadOfReader()
+{
+    FakeServer server;
+    server.content = MakeContent(4096);
+    jellyfin::player::SetRangeFetcher(server.Fetcher());
+
+    jellyfin::player::RangeCache cache("https://example.test/media.mkv", 512);
+    cache.probe();
+    const int afterProbe = server.requests;   // probe 已经取了第 0 块
+
+    cache.startPrefetch(4);
+    // 给预取线程一点时间跑起来（4 块 × 512B）
+    for (int i = 0; i < 40 && server.requests < afterProbe + 4; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const int afterPrefetch = server.requests;
+    cache.stopPrefetch();
+
+    Expect(afterPrefetch >= afterProbe + 3,
+           "预取线程在读取之前就把后续分块取回",
+           "probe 后请求数=" + std::to_string(afterProbe) +
+               "，预取后=" + std::to_string(afterPrefetch));
+
+    // 读取已在缓存里的范围**不应**再产生任何网络请求
+    std::string error;
+    std::vector<uint8_t> buf(64);
+    for (int i = 0; i < 8; ++i) {
+        cache.read(buf.data(), 64, error);
+    }
+    Expect(server.requests == afterPrefetch,
+           "读取预取范围内的数据不产生新的取流请求（关键：网络不在读取路径上）",
+           "读取后请求数=" + std::to_string(server.requests) +
+               "，读取前=" + std::to_string(afterPrefetch));
+}
+
+/** 跨过预取窗口后再读：允许退化为同步取流，但内容仍须正确 */
+void TestPrefetchBeyondWindowStillReads()
+{
+    FakeServer server;
+    server.content = MakeContent(2048);
+    jellyfin::player::SetRangeFetcher(server.Fetcher());
+
+    jellyfin::player::RangeCache cache("https://example.test/media.mkv", 256);
+    cache.probe();
+    cache.startPrefetch(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    std::string error;
+    const std::string got = DrainAll(cache, error, 128);
+    cache.stopPrefetch();
+
+    Expect(got == server.content, "开启预取后仍能顺序读完整内容",
+           "读到 " + std::to_string(got.size()) + " 字节");
+    Expect(cache.prefetchRequests() > 0, "预取计数被记录（诊断用）",
+           "prefetchRequests=" + std::to_string(cache.prefetchRequests()));
+}
+
+/** 停止预取是幂等的，且停止后不再发起请求（避免离开播放页后还在后台拉流） */
+void TestStopPrefetchIsIdempotent()
+{
+    FakeServer server;
+    server.content = MakeContent(8192);
+    jellyfin::player::SetRangeFetcher(server.Fetcher());
+
+    jellyfin::player::RangeCache cache("https://example.test/media.mkv", 512);
+    cache.probe();
+    cache.startPrefetch(8);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    cache.stopPrefetch();
+    cache.stopPrefetch();   // 幂等
+    const int atStop = server.requests;
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    Expect(server.requests == atStop, "停止预取后不再发起取流请求",
+           "停止后请求数=" + std::to_string(atStop) +
+               "，等待后=" + std::to_string(server.requests));
+}
+
 int main()
 {
     std::cout << "== RangeCache 主机单测 ==\n";
@@ -268,6 +353,9 @@ int main()
     TestServerIgnoresRange();
     TestMidStreamRangeFailurePropagates();
     TestNoFetcherInjected();
+    TestPrefetchFillsAheadOfReader();
+    TestPrefetchBeyondWindowStillReads();
+    TestStopPrefetchIsIdempotent();
 
     if (gFailures == 0) {
         std::cout << "All range cache tests passed\n";
