@@ -10,7 +10,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <hilog/log.h>
 #include <ctime>
 #include <sstream>
 #include <string>
@@ -149,28 +148,17 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
     // 而"同一 fd 被关两次"在竞速连接 + select 多分支里很容易发生（设备实测崩溃栈：
     // HttpClient::get → request → ConnectTcp(__fd_chk)）。用统一的关闭器把这类错误变成不可能。
     auto closeOnce = [](int &fd) {
-        // 取证：musl FORTIFY 的 __fd_chk 只在 fd < 0 或超出 fd 上限时 abort
-        // （单纯重复关闭只会得到 EBADF），因此这里把关闭前的值打出来，
-        // 崩溃前最后几行即可指出非法 fd 的来源。
         if (fd >= 0) {
-            // 用 hilog 取证：本项目实测 fprintf(stderr) 不会进入 hilog，OH_LOG_Print 才会
-            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "close fd=%{public}d", fd);
             close(fd);
             fd = -1;
-        } else {
-            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "skip close fd=%{public}d", fd);
         }
     };
-    OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "start host=%{public}s", host.c_str());
     for (addrinfo *p = res; p != nullptr && sock < 0; p = p->ai_next) {
         int fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
         if (fd < 0) {
             lastErrno = errno;
             continue;
         }
-        // 取证：每个请求创建 socket 时打印 fd。若 fd 随请求单调增长（而非回落到小值），
-        // 即说明有 fd 泄漏；这是区分"泄漏"与"瞬时并发尖峰"的唯一可靠手段。
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "socket fd=%{public}d", fd);
         if (!SetNonBlocking(fd, true)) {
             lastErrno = errno;
             closeOnce(fd);
@@ -181,8 +169,6 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         if (errno == EINPROGRESS && pending.size() < kMaxPendingConnects) {
-            OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "ConnectTcp", "pending+= fd=%{public}d family=%{public}d",
-                         fd, p->ai_family);
             pending.push_back(fd);
             continue;
         }
