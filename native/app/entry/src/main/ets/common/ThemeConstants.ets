@@ -98,14 +98,26 @@ export class ThemeColors {
   progressTrack: string = '#3A3A3A';
 
   // ── 海报/浮层专用（不随明暗翻转的叠加色）──────────────────────────────
+  //
+  // ⚠️ 8 位 hex 必须写成 **`#AARRGGBB`（透明度在前）**，这是 ArkUI 的格式约定
+  // （见 `@ohos.arkui` ResourceColor 文档：`'#aarrggbb'`）。
+  // 这一族 token 曾经按 `#RRGGBBAA` 写（透明度在后），后果是：
+  //  - `#FFFFFF33` 被解析成 alpha=FF/色=#FFFF33 → **不透明的亮黄色**（播放器底部按钮实测 (255,255,51)）；
+  //  - `#000000CC` 被解析成 alpha=00 → **完全透明**（播放器的顶部/底部渐变遮罩整条失效）。
+  // 设备实测（截图像素采样）确认后统一按 ARGB 修正，语义与注释保持一致。
   onOverlay: string = '#FFFFFF';
-  onOverlayMuted: string = '#FFFFFFB3';
-  scrim: string = '#00000088';
-  scrimHeavy: string = '#000000CC';
-  overlayControl: string = '#FFFFFF33';
-  overlayControlStrong: string = '#00000066';
-  posterScrim: string = '#00000061';
-  posterGradientStart: string = '#0000009E';
+  /** 70% 白（次级文字/弱图标） */
+  onOverlayMuted: string = '#B3FFFFFF';
+  /** 53% 黑（轻遮罩） */
+  scrim: string = '#88000000';
+  /** 80% 黑（画面渐变压暗） */
+  scrimHeavy: string = '#CC000000';
+  /** 20% 白（画面上的控件底：圆形按钮/工具按钮） */
+  overlayControl: string = '#33FFFFFF';
+  /** 40% 黑（覆盖层面板底） */
+  overlayControlStrong: string = '#66000000';
+  posterScrim: string = '#61000000';
+  posterGradientStart: string = '#9E000000';
   /** 图片上的格式徽标底（参考项目用 #B3000000） */
   badgeScrim: string = '#B3000000';
   /** 视频底色（播放器黑底，与明暗主题无关） */
@@ -335,13 +347,14 @@ export class ThemeConstants {
     c.progressTrack = '#3A3A3A';
 
     c.onOverlay = '#FFFFFF';
-    c.onOverlayMuted = '#FFFFFFB3';
-    c.scrim = '#00000088';
-    c.scrimHeavy = '#000000CC';
-    c.overlayControl = '#FFFFFF33';
-    c.overlayControlStrong = '#00000066';
-    c.posterScrim = '#00000061';
-    c.posterGradientStart = '#0000009E';
+    // 叠加色统一 #AARRGGBB（ArkUI 约定），详见 ThemeColors 里这一族的说明
+    c.onOverlayMuted = '#B3FFFFFF';
+    c.scrim = '#88000000';
+    c.scrimHeavy = '#CC000000';
+    c.overlayControl = '#33FFFFFF';
+    c.overlayControlStrong = '#66000000';
+    c.posterScrim = '#61000000';
+    c.posterGradientStart = '#9E000000';
     c.badgeScrim = '#B3000000';
     return c;
   }
@@ -387,13 +400,14 @@ export class ThemeConstants {
     c.progressTrack = '#DDDDDD';
 
     c.onOverlay = '#FFFFFF';
-    c.onOverlayMuted = '#FFFFFFB3';
-    c.scrim = '#00000066';
-    c.scrimHeavy = '#00000099';
-    c.overlayControl = '#FFFFFF4D';
-    c.overlayControlStrong = '#00000040';
-    c.posterScrim = '#00000040';
-    c.posterGradientStart = '#00000080';
+    // 叠加色统一 #AARRGGBB（ArkUI 约定），详见 ThemeColors 里这一族的说明
+    c.onOverlayMuted = '#B3FFFFFF';
+    c.scrim = '#66000000';
+    c.scrimHeavy = '#99000000';
+    c.overlayControl = '#4DFFFFFF';
+    c.overlayControlStrong = '#40000000';
+    c.posterScrim = '#40000000';
+    c.posterGradientStart = '#80000000';
     c.badgeScrim = '#B3000000';
     return c;
   }
