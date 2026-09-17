@@ -21,6 +21,25 @@ import { PlaybackState } from '../common/PlaybackState';
 /** 控制条自动隐藏延时（毫秒）：给用户留出"看到并点中控件"的时间 */
 const kControlsAutoHideMs: number = 5000;
 
+/** 播放器轨道类型（对应 media.MediaType：0=音频 1=视频 2=字幕 3=附件…） */
+const kMediaTypeAudio: number = 0;
+const kMediaTypeVideo: number = 1;
+const kMediaTypeSubtitle: number = 2;
+
+/**
+ * 是否是图形字幕（位图字幕：PGS/SUP/VOBSUB/DVB…）。
+ *
+ * 这类字幕的内容是图片，服务端**无法**转成文本，播放器也解析不出可渲染的文本，
+ * 因此面板里明确标注"暂不支持"，而不是让用户点了没反应。
+ * 与原生 `jellyfin::IsImageSubtitleCodec`（native/core/subtitle_url.cpp）保持一致。
+ */
+function isImageSubtitleCodec(codec: string): boolean {
+  const c: string = codec.toLowerCase();
+  return c === 'pgssub' || c === 'hdmv_pgs_subtitle' || c === 'pgs' || c === 'sup'
+    || c === 'dvdsub' || c === 'dvd_subtitle' || c === 'vobsub' || c === 'dvbsub'
+    || c === 'dvb_subtitle' || c === 'xsub';
+}
+
 @Entry
 @Component
 struct PlayerPage {
@@ -77,6 +96,27 @@ struct PlayerPage {
   @State private subtitleStreamIndex: number = -1;
   /** 音频/字幕选择面板是否展开（播放页自有覆盖层，不依赖详情页的 bindSheet 机制） */
   @State private showTrackSheet: boolean = false;
+  /**
+   * 播放器（AVPlayer）自带的音轨列表 —— 来自 `getTrackDescription()`。
+   *
+   * 为什么以播放器的轨道为准而不是 Jellyfin 的 MediaStreams：
+   * 直连/直传时播放器拿到的是**原始文件**，能切换的轨道就是文件里的轨道；
+   * 用 `selectTrack()` 切换不需要重新请求播放地址，**不打断播放**。
+   * Jellyfin 的 MediaStreams 只用来补全"这条轨道是什么语言/什么编码"的文案。
+   */
+  @State private avAudioTracks: Object[] = [];
+  /** 播放器自带的字幕轨（内嵌字幕）：直接 selectTrack 即可切换，无需再取字幕文件 */
+  @State private avSubtitleTracks: Object[] = [];
+  /** 播放器当前选中的音轨 index（-1 = 未知/未取到） */
+  @State private avAudioIndex: number = -1;
+  /** 已加载的外挂字幕在播放器里的轨道 index（-1 = 未加载） */
+  @State private avSubtitleIndex: number = -1;
+  /** 当前字幕文本：外挂字幕由 `subtitleUpdate` 推给应用，需要应用自己渲染 */
+  @State private subtitleText: string = '';
+  /** 轨道面板内的提示（切换结果、失败原因、软解模式限制等） */
+  @State private trackNote: string = '';
+  /** 当前 MediaSourceId（Jellyfin 字幕端点需要它） */
+  private mediaSourceId: string = '';
   private feedbackTimerId: number = -1;
   private seekBaseMs: number = 0;
   private seekDragMs: number = 0;
@@ -172,6 +212,11 @@ struct PlayerPage {
       this.hideTimerId = -1;
     }
     if (this.controlsLocked || !this.showControls) {
+      return;
+    }
+    // 轨道面板展开时不自动隐藏控件：面板是挂在控制条之上的覆盖层，
+    // 控制条一消失用户就会觉得"面板也跟着没了"，且面板需要持续可点。
+    if (this.showTrackSheet) {
       return;
     }
     // 自动隐藏时间：3s → 5s。3 秒对"找到并点中某个控件"偏紧（用户与自动化都容易错过），
@@ -478,29 +523,371 @@ struct PlayerPage {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // 播放中切换音频 / 字幕
+  //
+  // 两条路径，"不打断播放"的优先：
+  //
+  // A. **播放器轨道切换（首选）**：AVPlayer 的 `getTrackDescription()` + `selectTrack()`。
+  //    直连/直传时播放器拿到的是**原始文件**，音轨切换是解复用层面的操作：
+  //    画面不中断、进度不跳、也不需要重新向服务端请求播放地址 —— 主流播放器都是这么做的。
+  // B. **重新请求播放地址（兜底）**：转码等由服务端决定轨道的场景，
+  //    只能把新的 `AudioStreamIndex`/`SubtitleStreamIndex` 带回 PlaybackInfo 重新取流，再 seek 回原位。
+  //
+  // 字幕额外说明：外挂字幕由播放器解析后通过 `subtitleUpdate` 回调交给应用渲染
+  // （`SubtitleInfo { startTime, duration, text }`），所以页面自己画字幕文本。
+  // ---------------------------------------------------------------------------
+
+  /** Jellyfin MediaStreams 中指定类型的流；Type 取 "Audio" / "Subtitle" */
+  private streamsOfType(type: string): Object[] {
+    const out: Object[] = [];
+    for (let i = 0; i < this.mediaStreams.length; i++) {
+      const s: ESObject = this.mediaStreams[i] as ESObject;
+      if (JsonUtil.getString(s, 'Type', '') === type) {
+        out.push(this.mediaStreams[i]);
+      }
+    }
+    return out;
+  }
+
+  /** 面板是否值得给出"可切换"入口：播放器轨道或 Jellyfin 流列表任一可用 */
+  private hasSwitchableTracks(): boolean {
+    return this.mediaStreams.length > 0 || this.avAudioTracks.length > 0;
+  }
+
+  /** 展开轨道面板：顺带刷新一次播放器轨道（重新打开播放后轨道会变） */
+  private openTrackSheet(): void {
+    this.trackNote = '';
+    this.showTrackSheet = true;
+    this.revealControls();
+    if (this.avPlayer !== null && !this.softPlaying) {
+      this.refreshAvTracks();
+    }
+    this.appendProbeFile('player_tracks.txt',
+      `openSheet avAudio=${this.avAudioTracks.length} jfStreams=${this.mediaStreams.length}`
+      + ` soft=${this.softPlaying ? 1 : 0}\n`);
+  }
+
+  private closeTrackSheet(): void {
+    this.showTrackSheet = false;
+    this.revealControls();
+  }
+
   /**
-   * 播放中切换音频/字幕。
+   * 读取播放器的轨道列表（prepared 之后才可用），并写入探针。
    *
-   * Jellyfin 的轨道选择是 `PlaybackInfo` 的参数（`AudioStreamIndex`/`SubtitleStreamIndex`），
-   * 因此切换的做法是：**记录当前位置 → 用新索引重新请求播放地址 → 拉起播放并 seek 回原位置**。
-   * 这样硬解与软解两条路径都自然支持（无需各自实现轨道切换）。
+   * 探针 `player_tracks.txt` 是这条链路的设备验证依据：轨道总数、每轨的类型/语言/编码，
+   * 以及当前被选中的轨道 index —— 这些都是"能不能切、切成功了没"的直接证据，
+   * 比看画面可靠（模拟器上无法用读屏观察播放页）。
    */
-  private async switchTrack(audioIndex: number, subtitleIndex: number): Promise<void> {
+  private async refreshAvTracks(): Promise<void> {
+    if (this.avPlayer === null) {
+      return;
+    }
+    try {
+      const tracks: media.MediaDescription[] = await this.avPlayer.getTrackDescription();
+      const audios: Object[] = [];
+      const subs: Object[] = [];
+      let line: string = `avTracks n=${tracks.length}`;
+      for (let i = 0; i < tracks.length; i++) {
+        const t: ESObject = tracks[i] as ESObject;
+        const type: number = JsonUtil.getNumber(t, 'track_type', -1);
+        const idx: number = JsonUtil.getNumber(t, 'track_index', -1);
+        const lang: string = JsonUtil.getString(t, 'language', '');
+        const name: string = JsonUtil.getString(t, 'track_name', '');
+        const mime: string = JsonUtil.getString(t, 'mime_type', '');
+        const ch: number = JsonUtil.getNumber(t, 'channel_count', 0);
+        line += ` | idx=${idx} type=${type} lang=${lang} name=${name} mime=${mime} ch=${ch}`;
+        if (type === kMediaTypeAudio) {
+          const row: ESObject = {
+            'idx': idx, 'lang': lang, 'name': name, 'mime': mime, 'ch': ch
+          };
+          audios.push(row as Object);
+        } else if (type === kMediaTypeSubtitle) {
+          // 内嵌字幕轨：直接 selectTrack 就能切，不需要再去服务端取字幕文件
+          const row: ESObject = { 'idx': idx, 'lang': lang, 'name': name, 'mime': mime };
+          subs.push(row as Object);
+        }
+      }
+      this.avAudioTracks = audios;
+      this.avSubtitleTracks = subs;
+      let selected: number = -1;
+      let selectedSub: number = -1;
+      try {
+        const sel: number[] = await this.avPlayer.getSelectedTracks();
+        let selText: string = '';
+        for (let i = 0; i < sel.length; i++) {
+          selText += (i === 0 ? '' : ',') + sel[i];
+          for (let j = 0; j < audios.length; j++) {
+            if (JsonUtil.getNumber(audios[j] as ESObject, 'idx', -2) === sel[i]) {
+              selected = sel[i];
+            }
+          }
+          for (let j = 0; j < subs.length; j++) {
+            if (JsonUtil.getNumber(subs[j] as ESObject, 'idx', -2) === sel[i]) {
+              selectedSub = sel[i];
+            }
+          }
+        }
+        line += ` selected=[${selText}]`;
+      } catch (selErr) {
+        line += ` selected=err(${(selErr as Error).message})`;
+      }
+      this.avAudioIndex = selected;
+      this.avSubtitleIndex = selectedSub;
+      // 让面板/参数与播放器的真实选择一致：播放器默认选的轨道往往就是文件里的默认轨，
+      // 只有把它映射回 Jellyfin 的流索引，面板的选中标记才不会"什么都没选"。
+      const audioOrdinal: number = this.avOrdinalOf(selected);
+      const jfAudios: Object[] = this.streamsOfType('Audio');
+      if (audioOrdinal >= 0 && audioOrdinal < jfAudios.length && this.audioStreamIndex < 0) {
+        this.audioStreamIndex = JsonUtil.getNumber(jfAudios[audioOrdinal] as ESObject, 'Index', -1);
+      }
+      const subOrdinal: number = this.avSubtitleOrdinalOf(selectedSub);
+      const jfSubs: Object[] = this.streamsOfType('Subtitle');
+      if (subOrdinal >= 0 && subOrdinal < jfSubs.length && this.subtitleStreamIndex < 0) {
+        this.subtitleStreamIndex =
+          JsonUtil.getNumber(jfSubs[subOrdinal] as ESObject, 'Index', -1);
+      }
+      this.appendProbeFile('player_tracks.txt', line + '\n');
+    } catch (err) {
+      this.appendProbeFile('player_tracks.txt',
+        `getTrackDescription error ${(err as Error).message}\n`);
+    }
+  }
+
+  /** 播放器里已加载的字幕轨 index 列表 */
+  private async subtitleTrackIndexes(): Promise<number[]> {
+    const out: number[] = [];
+    if (this.avPlayer === null) {
+      return out;
+    }
+    try {
+      const tracks: media.MediaDescription[] = await this.avPlayer.getTrackDescription();
+      for (let i = 0; i < tracks.length; i++) {
+        const t: ESObject = tracks[i] as ESObject;
+        if (JsonUtil.getNumber(t, 'track_type', -1) === kMediaTypeSubtitle) {
+          out.push(JsonUtil.getNumber(t, 'track_index', -1));
+        }
+      }
+    } catch (err) {
+      this.appendProbeFile('player_tracks.txt',
+        `subtitleTrackIndexes error ${(err as Error).message}\n`);
+    }
+    return out;
+  }
+
+  /** 切换音轨：直接让播放器切（不打断播放） */
+  private async selectAudioTrack(avIndex: number): Promise<void> {
+    if (this.avPlayer === null) {
+      this.trackNote = '播放器未就绪，无法切换音轨';
+      return;
+    }
+    try {
+      await this.avPlayer.selectTrack(avIndex);
+      let confirm: string = '';
+      try {
+        const sel: number[] = await this.avPlayer.getSelectedTracks();
+        for (let i = 0; i < sel.length; i++) {
+          confirm += (i === 0 ? '' : ',') + sel[i];
+        }
+      } catch (selErr) {
+        confirm = `err(${(selErr as Error).message})`;
+      }
+      this.avAudioIndex = avIndex;
+      // 同步到播放参数：兜底重开（转码/软解）时保持同一选择
+      const ordinal: number = this.avOrdinalOf(avIndex);
+      const jfAudios: Object[] = this.streamsOfType('Audio');
+      if (ordinal >= 0 && ordinal < jfAudios.length) {
+        this.audioStreamIndex = JsonUtil.getNumber(jfAudios[ordinal] as ESObject, 'Index', -1);
+      }
+      this.persistTrackOptions();
+      this.trackNote = '已切换音频';
+      this.appendProbeFile('player_tracks.txt',
+        `selectAudio ok track=${avIndex} confirmed=[${confirm}]\n`);
+    } catch (err) {
+      this.trackNote = `切换音频失败：${(err as Error).message}`;
+      this.appendProbeFile('player_tracks.txt',
+        `selectAudio fail track=${avIndex} ${(err as Error).message}\n`);
+    }
+  }
+
+  /** 播放器音轨 index → 它在音轨列表中的序号（用于映射回 Jellyfin 的音轨顺序） */
+  private avOrdinalOf(avIndex: number): number {
+    for (let i = 0; i < this.avAudioTracks.length; i++) {
+      if (JsonUtil.getNumber(this.avAudioTracks[i] as ESObject, 'idx', -2) === avIndex) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** 播放器字幕轨 index → 它在字幕轨列表中的序号（与 Jellyfin 字幕流顺序一一对应） */
+  private avSubtitleOrdinalOf(avIndex: number): number {
+    for (let i = 0; i < this.avSubtitleTracks.length; i++) {
+      if (JsonUtil.getNumber(this.avSubtitleTracks[i] as ESObject, 'idx', -2) === avIndex) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** Jellyfin 字幕流索引 → 它在字幕流列表中的序号 */
+  private jfSubtitleOrdinalOf(streamIndex: number): number {
+    const subs: Object[] = this.streamsOfType('Subtitle');
+    for (let i = 0; i < subs.length; i++) {
+      if (JsonUtil.getNumber(subs[i] as ESObject, 'Index', -2) === streamIndex) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** 把当前选择写回播放参数（供后续重开播放/软解使用） */
+  private persistTrackOptions(): void {
+    try {
+      const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
+      opts['audioStreamIndex'] = this.audioStreamIndex;
+      opts['subtitleStreamIndex'] = this.subtitleStreamIndex;
+      this.playbackOptions = JSON.stringify(opts);
+    } catch (err) {
+      this.appendProbeFile('player_tracks.txt',
+        `persistTrackOptions error ${(err as Error).message}\n`);
+    }
+  }
+
+  /**
+   * 加载并显示某条 Jellyfin 字幕流。
+   *
+   * 两条路：
+   * 1）**内嵌字幕（首选）**：文件里就有这条字幕轨（AVPlayer 的轨道列表里有 type=2 的轨），
+   *    直接 `selectTrack`，不联网、不中断播放 —— 设备实测这样就够用。
+   * 2）**外挂字幕（兜底）**：字幕是独立文件（Jellyfin 的 External 字幕），
+   *    先用原生构造的字幕地址 `addSubtitleFromUrl` 加进来，再 selectTrack。
+   */
+  private async applySubtitleStream(streamIndex: number, codec: string): Promise<void> {
+    if (this.avPlayer === null) {
+      this.trackNote = '播放器未就绪，无法切换字幕';
+      return;
+    }
+    // 1）内嵌字幕：按序号映射到播放器的字幕轨
+    const ordinal: number = this.jfSubtitleOrdinalOf(streamIndex);
+    if (this.avSubtitleTracks.length > 0 && ordinal >= 0
+      && ordinal < this.avSubtitleTracks.length) {
+      const avIdx: number = JsonUtil.getNumber(this.avSubtitleTracks[ordinal] as ESObject, 'idx', -1);
+      this.appendProbeFile('player_tracks.txt',
+        `subtitle embedded stream=${streamIndex} ordinal=${ordinal} track=${avIdx}\n`);
+      await this.selectSubtitleTrack(avIdx, streamIndex);
+      return;
+    }
+    // 2）外挂字幕
+    const raw: string = JellyfinNative.subtitleUrl(this.itemId, this.mediaSourceId, streamIndex, codec);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      this.trackNote = result.message.length > 0 ? result.message : '无法构造字幕地址';
+      return;
+    }
+    const url: string = JsonUtil.getString(result.data as ESObject, 'url', '');
+    const format: string = JsonUtil.getString(result.data as ESObject, 'format', '');
+    if (url.length === 0) {
+      this.trackNote = '字幕地址为空';
+      return;
+    }
+    try {
+      const before: number[] = await this.subtitleTrackIndexes();
+      this.appendProbeFile('player_tracks.txt',
+        `subtitle external stream=${streamIndex} format=${format} before=${before.length}`
+        + ` urlLen=${url.length} loading...\n`);
+      await this.avPlayer.addSubtitleFromUrl(url);
+      this.appendProbeFile('player_tracks.txt', `subtitle external loaded stream=${streamIndex}\n`);
+      const after: number[] = await this.subtitleTrackIndexes();
+      let target: number = -1;
+      for (let i = 0; i < after.length; i++) {
+        let known: boolean = false;
+        for (let j = 0; j < before.length; j++) {
+          if (before[j] === after[i]) {
+            known = true;
+          }
+        }
+        if (!known) {
+          target = after[i];
+        }
+      }
+      if (target < 0 && after.length > 0) {
+        target = after[after.length - 1];
+      }
+      if (target < 0) {
+        this.trackNote = '字幕已加载，但播放器未暴露该字幕轨';
+        this.appendProbeFile('player_tracks.txt',
+          `subtitle loaded stream=${streamIndex} format=${format} but no track\n`);
+        return;
+      }
+      await this.selectSubtitleTrack(target, streamIndex);
+    } catch (err) {
+      this.trackNote = `切换字幕失败：${(err as Error).message}`;
+      this.appendProbeFile('player_tracks.txt',
+        `subtitle fail stream=${streamIndex} ${(err as Error).message}\n`);
+    }
+  }
+
+  /** 选中某条播放器字幕轨（先关掉上一条，避免多轨叠加） */
+  private async selectSubtitleTrack(avIndex: number, streamIndex: number): Promise<void> {
+    if (this.avPlayer === null) {
+      return;
+    }
+    try {
+      if (this.avSubtitleIndex >= 0 && this.avSubtitleIndex !== avIndex) {
+        try {
+          await this.avPlayer.deselectTrack(this.avSubtitleIndex);
+        } catch (desErr) {
+          this.appendProbeFile('player_tracks.txt',
+            `deselect old subtitle ${this.avSubtitleIndex} err ${(desErr as Error).message}\n`);
+        }
+      }
+      await this.avPlayer.selectTrack(avIndex);
+      this.avSubtitleIndex = avIndex;
+      this.subtitleStreamIndex = streamIndex;
+      this.persistTrackOptions();
+      this.trackNote = '字幕已切换';
+      this.appendProbeFile('player_tracks.txt',
+        `subtitle ok stream=${streamIndex} track=${avIndex}\n`);
+    } catch (err) {
+      this.trackNote = `切换字幕失败：${(err as Error).message}`;
+      this.appendProbeFile('player_tracks.txt',
+        `subtitle select fail track=${avIndex} ${(err as Error).message}\n`);
+    }
+  }
+
+  /** 关闭字幕 */
+  private async clearSubtitle(): Promise<void> {
+    if (this.avPlayer !== null && this.avSubtitleIndex >= 0) {
+      try {
+        await this.avPlayer.deselectTrack(this.avSubtitleIndex);
+        this.appendProbeFile('player_tracks.txt', `subtitle off track=${this.avSubtitleIndex}\n`);
+      } catch (err) {
+        this.appendProbeFile('player_tracks.txt',
+          `subtitle off fail ${(err as Error).message}\n`);
+      }
+    }
+    this.avSubtitleIndex = -1;
+    this.subtitleStreamIndex = -1;
+    this.subtitleText = '';
+    this.persistTrackOptions();
+    this.trackNote = '字幕已关闭';
+  }
+
+  /**
+   * 兜底路径：重新请求播放地址并 seek 回原位。
+   *
+   * 什么时候用：播放器没有暴露可切换的轨道（例如服务端转码，轨道由服务端决定）。
+   * 代价是播放会重开一次（画面短暂黑一下、需要 seek 回原位），所以只作为次选。
+   */
+  private async reopenWithTrack(audioIndex: number, subtitleIndex: number): Promise<void> {
     const resumeMs: number = this.positionMs;
     this.audioStreamIndex = audioIndex;
     this.subtitleStreamIndex = subtitleIndex;
-    try {
-      const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
-      opts['audioStreamIndex'] = audioIndex;
-      opts['subtitleStreamIndex'] = subtitleIndex;
-      this.playbackOptions = JSON.stringify(opts);
-    } catch (err) {
-      // 解析失败则保持原参数，切换不生效但不影响当前播放
-      this.appendProbeFile('player_tracks.txt', `switchTrack parse error ${(err as Error).message}\n`);
-      return;
-    }
+    this.persistTrackOptions();
     this.appendProbeFile('player_tracks.txt',
-      `switch audio=${audioIndex} subtitle=${subtitleIndex} resumeMs=${resumeMs}\n`);
+      `reopen audio=${audioIndex} subtitle=${subtitleIndex} resumeMs=${resumeMs}\n`);
     await this.openPlayer();
     // 回到切换前的位置（AVPlayer 在 prepared 后 seek 最稳妥，这里做一次兜底 seek）
     setTimeout(() => {
@@ -509,6 +896,43 @@ struct PlayerPage {
         this.positionMs = resumeMs;
       }
     }, 1200);
+  }
+
+  /** 面板里点击某条音轨（播放器轨道，按 track index 切换） */
+  private onPickAvAudio(avIndex: number): void {
+    if (this.softPlaying) {
+      this.trackNote = '软解模式暂不支持切换音轨（软解只解码视频）';
+      return;
+    }
+    this.selectAudioTrack(avIndex);
+  }
+
+  /** 兜底：没有播放器轨道信息时，按 Jellyfin 音轨序号重新取流 */
+  private onPickJfAudio(ordinal: number): void {
+    if (this.softPlaying) {
+      this.trackNote = '软解模式暂不支持切换音轨（软解只解码视频）';
+      return;
+    }
+    const jfAudios: Object[] = this.streamsOfType('Audio');
+    if (ordinal < 0 || ordinal >= jfAudios.length) {
+      this.trackNote = '未找到对应的音轨';
+      return;
+    }
+    this.reopenWithTrack(JsonUtil.getNumber(jfAudios[ordinal] as ESObject, 'Index', -1),
+      this.subtitleStreamIndex);
+  }
+
+  /** 面板里点击某条字幕 */
+  private onPickSubtitleStream(streamIndex: number, codec: string): void {
+    if (this.softPlaying) {
+      this.trackNote = '软解模式暂不支持外挂字幕（软解只渲染视频帧）';
+      return;
+    }
+    if (this.avPlayer === null) {
+      this.trackNote = '播放器未就绪，无法切换字幕';
+      return;
+    }
+    this.applySubtitleStream(streamIndex, codec);
   }
 
   /** 流列表 → 选项文案：优先显示语言/标题，其次编码与声道 */
@@ -529,66 +953,164 @@ struct PlayerPage {
     return text;
   }
 
-  /** 音频/字幕选择面板 */
-  @Builder
-  TrackSheet() {
-    Column({ space: 10 }) {
-      Text('音频 / 字幕')
-        .fontSize(ThemeConstants.TITLE_MEDIUM)
-        .fontColor(this.colors().textPrimary)
-      Text('切换后将从当前位置继续播放')
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textTertiary)
-      Scroll() {
-        Column({ space: 8 }) {
-          ForEach(this.mediaStreams, (item: Object) => {
-            if (JsonUtil.getString(item as ESObject, 'Type', '') === 'Audio') {
-              ChipButton({
-                label: this.trackLabel(item as ESObject),
-                selected: this.audioStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -1),
-                heightOverride: 48,
-                onTap: () => {
-                  this.switchTrack(JsonUtil.getNumber(item as ESObject, 'Index', -1), this.subtitleStreamIndex);
-                }
-              })
-            }
-          }, (item: Object) => `a${JsonUtil.getNumber(item as ESObject, 'Index', -1)}`)
-          // 关闭字幕
-          ChipButton({
-            label: '关闭字幕',
-            selected: this.subtitleStreamIndex < 0,
-            heightOverride: 48,
-            onTap: () => {
-              this.switchTrack(this.audioStreamIndex, -1);
-            }
-          })
-          ForEach(this.mediaStreams, (item: Object) => {
-            if (JsonUtil.getString(item as ESObject, 'Type', '') === 'Subtitle') {
-              ChipButton({
-                label: this.trackLabel(item as ESObject),
-                selected: this.subtitleStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -1),
-                heightOverride: 48,
-                onTap: () => {
-                  this.switchTrack(this.audioStreamIndex, JsonUtil.getNumber(item as ESObject, 'Index', -1));
-                }
-              })
-            }
-          }, (item: Object) => `s${JsonUtil.getNumber(item as ESObject, 'Index', -1)}`)
-        }
-        .width('100%')
+  /** 播放器音轨 → 选项文案：以 Jellyfin 的语言/标题为准（播放器通常只有语言码） */
+  private avAudioLabel(track: ESObject, ordinal: number): string {
+    const jfAudios: Object[] = this.streamsOfType('Audio');
+    const lang: string = JsonUtil.getString(track, 'lang', '');
+    const name: string = JsonUtil.getString(track, 'name', '');
+    const mime: string = JsonUtil.getString(track, 'mime', '');
+    const ch: number = JsonUtil.getNumber(track, 'ch', 0);
+    let text: string = '';
+    if (ordinal >= 0 && ordinal < jfAudios.length) {
+      text = this.trackLabel(jfAudios[ordinal] as ESObject);
+    } else {
+      text = name.length > 0 ? name : (lang.length > 0 ? lang : `音轨 ${ordinal + 1}`);
+      if (mime.length > 0) {
+        text += ` · ${mime}`;
       }
-      .constraintSize({ maxHeight: 520 })
-      // 播放页没有详情页那套 bindSheet，这里用 ChipButton 作为关闭动作（组件已存在、样式统一）
-      ChipButton({
-        label: '关闭',
-        heightOverride: 48,
-        onTap: () => {
-          this.showTrackSheet = false;
-        }
-      })
+      if (ch > 0) {
+        text += ` · ${ch}ch`;
+      }
+    }
+    return text;
+  }
+
+  /**
+   * 轨道面板里的一行（整行可点、选中态高亮 + ✓）。
+   *
+   * 为什么不用 ChipButton：一集剧常有几十条字幕，chip 流式排布既不好读也不好点，
+   * 主流播放器的轨道菜单都是"整行列表 + 右侧选中标记"。
+   *
+   * 参数用 `kind + value` 而不是回调函数：@Builder 的参数由 ArkTS 统一转译，
+   * 传函数类型参数在转译产物里不被接受（es2abc 语法错误），改为参数化事件再分发。
+   */
+  @Builder
+  TrackRow(label: string, selected: boolean, kind: string, value: number) {
+    Row() {
+      Text(label)
+        .fontSize(ThemeConstants.BODY_MEDIUM)
+        .fontWeight(selected ? FontWeight.Medium : FontWeight.Regular)
+        .fontColor(selected ? this.colors().brandPrimary : this.colors().textPrimary)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+      if (selected) {
+        Text('✓')
+          .fontSize(ThemeConstants.TITLE_MEDIUM)
+          .fontColor(this.colors().brandPrimary)
+          .margin({ left: 8 })
+      }
     }
     .width('100%')
-    .alignItems(HorizontalAlign.Center)
+    .height(48)
+    .padding({ left: 12, right: 12 })
+    .borderRadius(ThemeConstants.CHIP_RADIUS)
+    .backgroundColor(selected ? this.colors().chipBackgroundPressed : '#00000000')
+    .onClick(() => {
+      this.onTrackRowTap(kind, value);
+    })
+  }
+
+  /** 轨道行点击分发：kind 见 TrackSheet（av / jfaudio / sub / suboff / none） */
+  private onTrackRowTap(kind: string, value: number): void {
+    if (kind === 'av') {
+      this.onPickAvAudio(value);
+    } else if (kind === 'jfaudio') {
+      this.onPickJfAudio(value);
+    } else if (kind === 'sub') {
+      this.onPickSubtitleStream(value, this.subtitleCodecAt(value));
+    } else if (kind === 'suboff') {
+      this.clearSubtitle();
+    }
+  }
+
+  /** 某条字幕流的编码（用于决定请求格式与是否图形字幕） */
+  private subtitleCodecAt(streamIndex: number): string {
+    const subs: Object[] = this.streamsOfType('Subtitle');
+    for (let i = 0; i < subs.length; i++) {
+      if (JsonUtil.getNumber(subs[i] as ESObject, 'Index', -2) === streamIndex) {
+        return JsonUtil.getString(subs[i] as ESObject, 'Codec', '');
+      }
+    }
+    return '';
+  }
+
+  @Builder
+  TrackSectionTitle(text: string) {
+    Text(text)
+      .fontSize(ThemeConstants.LABEL_SMALL)
+      .fontColor(this.colors().textTertiary)
+      .width('100%')
+      .margin({ top: 6, bottom: 2 })
+  }
+
+  /** 音频/字幕选择面板内容 */
+  @Builder
+  TrackSheet() {
+    Column() {
+      this.TrackSectionTitle('音频')
+      if (this.avAudioTracks.length > 0) {
+        // ForEach 的 key 里带上"是否选中"：ArkUI 对 key 未变的项不会重建，
+        // 若只用轨道 index 作 key，切换后选中标记不会移动（设备实测的缺陷）。
+        ForEach(this.avAudioTracks, (item: Object, index: number) => {
+          this.TrackRow(this.avAudioLabel(item as ESObject, index),
+            this.avAudioIndex === JsonUtil.getNumber(item as ESObject, 'idx', -2),
+            'av', JsonUtil.getNumber(item as ESObject, 'idx', -1))
+        }, (item: Object) => `av${JsonUtil.getNumber(item as ESObject, 'idx', -1)}`
+          + `-${this.avAudioIndex === JsonUtil.getNumber(item as ESObject, 'idx', -2) ? 1 : 0}`)
+      } else {
+        // 播放器没给出轨道列表（转码等）：按 Jellyfin 流列表走兜底重开
+        ForEach(this.streamsOfType('Audio'), (item: Object, index: number) => {
+          this.TrackRow(this.trackLabel(item as ESObject),
+            this.audioStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -2),
+            'jfaudio', index)
+        }, (item: Object) => `jfa${JsonUtil.getNumber(item as ESObject, 'Index', -1)}`
+          + `-${this.audioStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -2) ? 1 : 0}`)
+        if (this.streamsOfType('Audio').length === 0) {
+          this.TrackRow('无可切换的音轨', false, 'none', -1)
+        }
+      }
+
+      this.TrackSectionTitle('字幕')
+      this.TrackRow('关闭字幕',
+        this.avSubtitleIndex < 0 && this.subtitleStreamIndex < 0, 'suboff', -1)
+      ForEach(this.streamsOfType('Subtitle'), (item: Object) => {
+        this.TrackRow(this.subtitleLabel(item as ESObject),
+          this.subtitleStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -2),
+          'sub', JsonUtil.getNumber(item as ESObject, 'Index', -1))
+      }, (item: Object) => `sub${JsonUtil.getNumber(item as ESObject, 'Index', -1)}`
+        + `-${this.subtitleStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -2) ? 1 : 0}`)
+      if (this.streamsOfType('Subtitle').length === 0) {
+        this.TrackRow('该视频没有字幕', false, 'none', -1)
+      }
+
+      if (this.trackNote.length > 0) {
+        Text(this.trackNote)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().brandPrimary)
+          .width('100%')
+          .margin({ top: 8 })
+      }
+      Text(this.softPlaying
+        ? '软解模式：轨道切换不可用（软解只解码视频帧）'
+        : '切换即时生效，不中断播放')
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().textTertiary)
+        .width('100%')
+        .margin({ top: 8 })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /** 字幕行文案：图形字幕标注"本机不支持" */
+  private subtitleLabel(stream: ESObject): string {
+    const codec: string = JsonUtil.getString(stream, 'Codec', '');
+    const base: string = this.trackLabel(stream);
+    if (isImageSubtitleCodec(codec)) {
+      return `${base}（图形字幕，暂不支持）`;
+    }
+    return base;
   }
 
   private async reportSoftProgressThrottled(ptsSec: number): Promise<void> {
@@ -727,6 +1249,8 @@ struct PlayerPage {
       this.errorMsg = '无法获取播放地址';
       return;
     }
+    // MediaSourceId：Jellyfin 外挂字幕端点需要（字幕切换时用）
+    this.mediaSourceId = JsonUtil.getString(result.data, 'mediaSourceId', '');
     // 创建 AVPlayer 进行实际视频渲染
     this.createAvPlayer(resolvedUrl);
     // 进入系统媒体会话体系（后台播放/媒体控件）；失败不影响播放
@@ -757,6 +1281,12 @@ struct PlayerPage {
           this.avPlayer?.play();
           this.isPlaying = true;
           this.revealControls();
+          // 硬解已就绪：清掉软解留下的诊断文案（否则会一直挂着"EGL 已渲染/第 N 帧"这类
+          // 上一段软解会话的信息，看起来像两路同时在播）
+          this.softDiag = '';
+          this.softStatus = '';
+          // 轨道列表只有 prepared 之后才取得到（音轨/字幕切换的基础）
+          this.refreshAvTracks();
         } else if (state === 'completed') {
           this.isPlaying = false;
           this.revealControls();
@@ -769,6 +1299,12 @@ struct PlayerPage {
       });
       this.avPlayer.on('error', (_err: Error) => {
         this.handlePlaybackFailure('播放器错误');
+      });
+      // 外挂字幕：播放器解析字幕文件后把"当前该显示哪句"推给应用，由应用渲染
+      // （`SubtitleInfo { startTime, duration, text }`；文本型字幕才有内容）
+      this.avPlayer.on('subtitleUpdate', (info: media.SubtitleInfo) => {
+        const text: string = info.text !== undefined ? info.text : '';
+        this.subtitleText = text;
       });
       // 如果 surfaceId 已经从 XComponent.onLoad 获取到，立即绑定
       if (this.surfaceId.length > 0) {
@@ -1140,6 +1676,15 @@ struct PlayerPage {
             }
           })
         }
+        // 播放中切换音频/字幕：播放页自己的覆盖层面板（不依赖详情页的 bindSheet）
+        ChipButton({
+          label: '音频/字幕',
+          selected: this.showTrackSheet,
+          heightOverride: 48,
+          onTap: () => {
+            this.openTrackSheet();
+          }
+        })
       }
       .width('100%')
       .justifyContent(FlexAlign.Center)
@@ -1439,6 +1984,27 @@ struct PlayerPage {
         this.GestureFeedback()
       }
 
+      // 字幕：外挂字幕由播放器推文本、应用绘制（原生 SURFACE 上画不了文本）
+      // hitTestBehavior(None)：字幕只是显示，不能挡住手势层与控制条
+      if (this.subtitleText.length > 0 && !this.controlsLocked) {
+        Column() {
+          Text(this.subtitleText)
+            .fontSize(20)
+            .fontColor('#FFFFFF')
+            .textAlign(TextAlign.Center)
+            .backgroundColor('#99000000')
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .borderRadius(6)
+            .constraintSize({ maxWidth: '88%' })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .alignItems(HorizontalAlign.Center)
+        .padding({ bottom: 150 })
+        .hitTestBehavior(HitTestMode.None)
+      }
+
       // 播放结束覆盖层
       if (this.isCompleted() && !this.controlsLocked) {
         this.CompletedOverlay()
@@ -1467,6 +2033,49 @@ struct PlayerPage {
         }
         .width('100%')
         .height('100%')
+      }
+
+      // 音频/字幕面板：播放页自有的覆盖层（详情页那套 bindSheet 在播放页不可用）
+      if (this.showTrackSheet && !this.controlsLocked) {
+        Column() {
+          Column({ space: 2 }) {
+            Row() {
+              Text('音频 / 字幕')
+                .fontSize(ThemeConstants.TITLE_MEDIUM)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.colors().textPrimary)
+              Blank()
+              Text('关闭')
+                .fontSize(ThemeConstants.META_MEDIUM)
+                .fontColor(this.colors().brandPrimary)
+                .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+                .onClick(() => {
+                  this.closeTrackSheet();
+                })
+            }
+            .width('100%')
+            .margin({ bottom: 4 })
+
+            Scroll() {
+              this.TrackSheet()
+            }
+            .width('100%')
+            .constraintSize({ maxHeight: 560 })
+            .scrollBar(BarState.Off)
+          }
+          .width('88%')
+          .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+          .backgroundColor(this.colors().cardBackground)
+          .borderRadius(ThemeConstants.CARD_RADIUS)
+          .shadow({ radius: 16, color: this.colors().buttonShadow, offsetX: 0, offsetY: 6 })
+          // 组件 id：设备验证时用 componentSnapshot.get('trackSheetCard') 抓面板实际渲染结果
+          .id('trackSheetCard')
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(this.colors().overlayControlStrong)
       }
 
       // 加载状态：不只是转圈，同时给出"在播什么"与"在做什么"，

@@ -15,6 +15,7 @@
 #include "image_url.h"
 #include "playback_policy.h"
 #include "session.h"
+#include "subtitle_url.h"
 #include "url_util.h"
 #include "version.h"
 
@@ -1972,6 +1973,45 @@ napi_value GetImageUrl(napi_env env, napi_callback_info info)
     return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"url", url}}));
 }
 
+/**
+ * 构造外挂字幕地址（播放中切换字幕用）。
+ *
+ * 参数：itemId, mediaSourceId, streamIndex（Jellyfin MediaStreams[].Index）, codec
+ * 返回：{ ok, data: { url, format, imageSubtitle } }
+ *
+ * 为什么由原生构造：服务器地址、访问令牌与 URL 形态属于 Jellyfin 集成细节，
+ * ArkTS 侧不应自行拼接（见 AGENTS.md 的分层约定）。
+ */
+napi_value SubtitleUrl(napi_env env, napi_callback_info info)
+{
+    std::string itemId;
+    std::string mediaSourceId;
+    std::string codec;
+    int64_t streamIndex = -1;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, mediaSourceId);
+    ReadIntArg(env, info, 2, streamIndex);
+    ReadStringArg(env, info, 3, codec);
+    if (itemId.empty() || streamIndex < 0) {
+        return ToNapiJson(env, MakeResult(false, 0, "itemId and streamIndex required"));
+    }
+    auto &session = jellyfin::SessionManager::instance();
+    const std::string format = jellyfin::SubtitleFormatForCodec(codec);
+    const std::string url = jellyfin::BuildSubtitleUrl(
+        session.baseUrl(), itemId, mediaSourceId, static_cast<int>(streamIndex), format,
+        session.accessToken());
+    if (url.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "Unable to build subtitle url"));
+    }
+    nlohmann::json data = {
+        {"url", url},
+        {"format", format},
+        {"codec", codec},
+        {"imageSubtitle", jellyfin::IsImageSubtitleCodec(codec)},
+    };
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
+}
+
 napi_value SetImageCacheDir(napi_env env, napi_callback_info info)
 {
     std::string dir;
@@ -2140,6 +2180,7 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getPreferences", nullptr, GetPreferences, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"getImageUrl", nullptr, GetImageUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"subtitleUrl", nullptr, SubtitleUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setImageCacheDir", nullptr, SetImageCacheDir, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"setCaBundlePath", nullptr, SetCaBundlePath, nullptr, nullptr, nullptr, napi_default,
