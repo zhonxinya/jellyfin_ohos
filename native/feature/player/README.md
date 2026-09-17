@@ -102,4 +102,21 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   另注意：服务器支持 Range 且每次返回整块时**无法**推断总长度（响应经回调返回、不含响应头），
   此时 `size()` 为 -1 属正常，长度会在读到末尾时补上。
 - **音频**：本目录尚未包含音频输出（需宿主接 `OH_AudioRenderer`）。
+- **播放中切换音频/字幕轨（宿主侧做法，实测可用）**：不要用"重新请求播放地址再 seek"这种重开式切换，
+  优先用 **AVPlayer 自身的轨道接口**，画面不中断、进度不跳：
+  1. `prepared` 之后 `getTrackDescription()` 拿到文件真实轨道
+     （`track_index` / `track_type`：0=音频 1=视频 2=字幕 / `language` / `channel_count`）；
+  2. 音频、**内嵌**字幕直接 `selectTrack(trackIndex)`；关闭字幕用 `deselectTrack`；
+  3. **外挂**字幕先 `addSubtitleFromUrl(url)`（Jellyfin 侧由宿主构造
+     `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.vtt`，服务端会按格式转换），
+     再在轨道列表里找出新增的字幕轨并 `selectTrack`；
+  4. 字幕文本由播放器通过 `on('subtitleUpdate')` 推给应用（`{ startTime, duration, text }`），
+     **应用自己绘制**（原生 SURFACE 上画不了文本）；该浮层要设 `hitTestBehavior(HitTestMode.None)`，否则挡手势。
+  踩过的坑：
+  - `getSelectedTracks()` 在 `selectTrack()` 之后**立刻**读可能仍是旧值（异步生效），
+    要过一会儿（本次实测重开面板时）才读到新值 —— 别据此判定"切换失败"；
+  - 同一文件里"第 N 条 Jellyfin 音频/字幕流"与"第 N 条 AVPlayer 轨道"顺序一致，
+    实测用默认轨（文件默认音轨 = Jellyfin 的 Default 流）交叉验证过，可按序号映射；
+  - ArkTS 侧 `ForEach` 的 key 必须包含"是否选中"，否则切换后选中标记不会移动（key 未变 → 该项不重建）；
+  - 转码/无轨道信息的场景才回退到"改写 `AudioStreamIndex`/`SubtitleStreamIndex` → 重新取流 → seek 回原位"。
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。
