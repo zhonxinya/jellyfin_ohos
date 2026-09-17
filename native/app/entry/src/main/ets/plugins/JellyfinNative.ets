@@ -594,6 +594,24 @@ export class JellyfinNative {
     }
   }
 
+  /** 软解会话 seek：跳转到指定时间点（秒），用于续播 */
+  static softPlaySeek(positionSec: number): string {
+    try {
+      return jellyfinNative.softPlaySeek(positionSec);
+    } catch (error) {
+      return JellyfinNative.fail('softPlaySeek', error);
+    }
+  }
+
+  /** 读取 XComponent 视频区域的最新触摸事件（由 DispatchTouchEvent 捕获） */
+  static getXComponentTouchEvent(): string {
+    try {
+      return jellyfinNative.getXComponentTouchEvent();
+    } catch (error) {
+      return JellyfinNative.fail('getXComponentTouchEvent', error);
+    }
+  }
+
   /** 配置 HTTPS 用的 CA 根证书 PEM 路径（未配置则 https 连接会明确失败） */
   static setCaBundlePath(path: string): string {
     try {

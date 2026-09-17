@@ -56,6 +56,16 @@ public:
      */
     bool nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, FrameInfo &info);
 
+    /**
+     * 跳转到指定时间点（秒）。
+     * 用于续播（"继续观看"）：打开会话后 seek 到上次观看位置。
+     * 实现：av_seek_frame(AVSEEK_FLAG_BACKWARD) + avcodec_flush_buffers。
+     * @param seconds 目标时间点（秒）
+     * @param error 输出错误信息
+     * @return true 表示 seek 成功
+     */
+    bool seek(double seconds, std::string &error);
+
     void close();
 
     bool isOpen() const;

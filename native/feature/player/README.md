@@ -86,6 +86,13 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   （判定着色器/VBO/attribute/纹理采样这一整条绘制路径是否真的产出内容）。
   实测第二步回读为 `rgba=(128,128,128,255)`（四个纹素经线性过滤的平均值）⇒ **绘制路径正常**。
   这个两步自检能把"surface/发布层"与"绘制层"的问题一刀切开，强烈建议移植后先跑它。
+- **自检的收尾必须无条件把画面恢复为中性色（两条路径都要）** —— 踩过的坑：
+  收尾的"清黑 + swap"原本被 `if (nativeImage_ != nullptr)` 包着，只覆盖 TEXTURE 路径；
+  而宿主 `softPlayOpen` 的 `'xcomponent'` 模式走的是 `initFromWindow()`（window surface，
+  `nativeImage_` 恒为 `nullptr`），于是**"清屏为红"的测试图案再也没被抹掉**。
+  设备实测后果：起播即结束（续播点靠近片尾）时视频区整块红屏（截图统计 `avg=(224,6,6)`），
+  看起来像渲染坏了。**自检是有副作用的**：它会改写可见 surface，宿主必须假设"自检之后
+  屏幕上留下的是测试图案"，并立刻用真实帧或中性色覆盖。
 - **TEXTURE 路径的三种渲染目标配置（均实测，便于移植时少走弯路）**：
 
   | 配置 | 实测结果（DevEco x86_64 模拟器） |
@@ -131,8 +138,20 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   线程池线程后，`eglSwapBuffers` 返回 **`0x12301`**、帧解出来了但**上不了屏**
   （诊断行显示"未渲染"）。正确拆法是"工作线程只解码 + UI 线程渲染"：
   `softPlayNextFrame()`（异步，解码并缓存最近帧）+ `softPlayRenderLast()`（同步，UI 线程调用）。
-- **软解会话没有"从指定位置起播"**：`RangeCache` 有 `seek()`，但打开后并未 `av_seek_frame`，
-  因此"继续观看"这类续播需求在软解路径上会从片头开始（宿主已按此如实提示）。
-  如需支持：在 `find_stream_info` 之后 `av_seek_frame(..., AVSEEK_FLAG_BACKWARD)` +
-  `avcodec_flush_buffers()`。
+- **软解会话的 seek 续播**：`SoftDecodeSession::seek(seconds)` 支持跳转到指定时间点（秒），
+  用于"继续观看"续播。实现：`av_seek_frame(AVSEEK_FLAG_BACKWARD)` + `avcodec_flush_buffers()`。
+  宿主侧在 `softPlayOpen` 成功后调用 `softPlaySeek(positionSec)` 即可续播。
+  两点容易漏：①`av_seek_frame(fmt, -1, ts, ...)` 的 `stream_index = -1` 要求时间戳是
+  `AV_TIME_BASE`（微秒）单位，不是秒；②seek 后必须 `avcodec_flush_buffers()`，
+  否则解码器里残留的旧帧会先被吐出来（表现为"seek 了但先闪几帧旧画面"）。
+- **`DispatchTouchEvent` 非 null 是"参与输入派发"的开关，不是"手势判定"的实现** —— 实测结论：
+  XComponent 之上的 ArkUI 透明层能收到触摸的前提，是原生回调**不为 `nullptr`**
+  （为 `nullptr` 时框架不向该区域派发触摸，视频区手势全失效）；但回调本身**从未被调用**
+  （hilog 只有 `RegisterCallback rc=0` 与 `OnSurfaceCreated`），因为 ArkUI 在应用层就消化了触摸。
+  所以：手势判定留在 ArkUI 层，原生侧只需保证回调非空；想从原生侧接管才需要把事件转回 ArkTS。
+- **软解拉帧必须带超时（否则会永久挂死）**：设备实测 4K 8-bit HEVC（「流浪地球2」，3840x1608）
+  会出现**某次拉帧永不返回**的情况，宿主若只用 `softPulling` 互斥标志，就会永远停在最后一帧、
+  既不报错也没有重试入口（违反"异常与超时必须到达终态"）。同环境下 4K 10-bit HEVC
+  （「流浪地球」，3840x2160）可正常解码播放（约 10fps），因此这是**内容/解码器相关**的挂起，
+  不是取流问题。宿主侧务必加看门狗（本项目 `PlayerPage` 为 20 秒）把它变成终态。
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。

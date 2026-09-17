@@ -22,6 +22,10 @@ int g_height = 0;
 std::atomic<bool> g_surfaceReady{false};
 std::atomic<uint64_t> g_generation{0};
 
+/** 最新触摸事件（由 OnDispatchTouchEvent 写入，由 TakeTouchEvent 读取并清除） */
+std::mutex g_touchMutex;
+TouchEventData g_latestTouch;
+
 /** surface 创建/变更：framework 在这里把 OHNativeWindow* 交给我们（官方 EGL/GLES 入口） */
 void OnSurfaceCreated(OH_NativeXComponent *component, void *window)
 {
@@ -69,12 +73,20 @@ void OnSurfaceDestroyed(OH_NativeXComponent * /*component*/, void * /*window*/)
 /**
  * 视频区域触摸回调（官方契约：`OH_NativeXComponent_Callback.DispatchTouchEvent`）。
  *
- * 为什么必须有它：XComponent 指定 `libraryname` 后，**视频区域的触摸由原生侧接管**，
- * ArkUI 层的 onTouch/onClick 收不到（设备实测：视频区长按/滑动均无反应，
- * 而按钮区正常）。此前本回调是 `nullptr`，导致视频区手势（seek/音量/亮度/长按快进）全部失效。
+ * **本回调必须非 nullptr。** 这是设备实测的关键结论：此前该字段是 `nullptr`，
+ * 结果框架**根本不向视频区域派发触摸**，视频区的 seek/音量/亮度/长按手势全部失效；
+ * 换成真实函数后，位于 XComponent 之上的 ArkUI 透明手势层立刻能收到触摸。
+ * 也就是说，这个回调在此配置下的作用是"声明原生组件参与输入派发"，
+ * 而不是"由原生侧判定手势"。
  *
- * 本轮回调只做**取证**：把触摸动作与坐标打到 hilog，用来确认触摸确实到达原生侧，
- * 为后续把这些事件转发给 ArkTS 的手势逻辑（或原生侧直接判定手势）打基础。
+ * 实测补充（hilog `XComponentBridge`）：`OH_NativeXComponent_RegisterCallback rc=0`、
+ * `OnSurfaceCreated` 均正常，但本回调**从未被调用** —— ArkUI 在应用层就消化了触摸
+ * （`player_gesture.txt` 里记录的是 ArkUI 手势层的 `gesture seekDeltaMs=...`）。
+ * 因此这里捕获的触摸事件是一条**兜底通道**：宿主按需低频轮询，
+ * 一旦原生侧真的开始派发，宿主立刻切回高频以保证跟手（见 PlayerPage 的自适应退避）。
+ *
+ * 官方文档：`OH_NativeXComponent_GetTouchEvent` 获取触摸点与动作；
+ * `OH_NativeXComponent_TouchEventType`：DOWN=0 / UP=1 / MOVE=2 / CANCEL=3 / UNKNOWN=4。
  */
 void OnDispatchTouchEvent(OH_NativeXComponent *component, void *window)
 {
@@ -84,12 +96,20 @@ void OnDispatchTouchEvent(OH_NativeXComponent *component, void *window)
         OH_LOG_Print(LOG_APP, LOG_WARN, kLogDomain, kLogTag, "GetTouchEvent rc=%{public}d", rc);
         return;
     }
-    const uint32_t index = touchEvent.numPoints > 0 ? 0 : 0;
+    // 将触摸事件存储到共享状态，供 ArkTS 轮询读取
+    {
+        std::lock_guard<std::mutex> lock(g_touchMutex);
+        g_latestTouch.type = static_cast<int>(touchEvent.type);
+        g_latestTouch.x = touchEvent.x;
+        g_latestTouch.y = touchEvent.y;
+        g_latestTouch.numPoints = static_cast<int>(touchEvent.numPoints);
+        g_latestTouch.timestamp = static_cast<int64_t>(touchEvent.timeStamp);
+        g_latestTouch.valid = true;
+    }
     OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag,
                  "touch type=%{public}d x=%{public}.1f y=%{public}.1f points=%{public}d",
                  static_cast<int>(touchEvent.type), touchEvent.x, touchEvent.y,
                  static_cast<int>(touchEvent.numPoints));
-    (void)index;
 }
 
 OH_NativeXComponent_Callback g_callback = {
@@ -155,6 +175,17 @@ bool XComponentBridge::SurfaceSize(int &width, int &height)
 uint64_t XComponentBridge::SurfaceGeneration()
 {
     return g_generation.load();
+}
+
+bool XComponentBridge::TakeTouchEvent(TouchEventData &out)
+{
+    std::lock_guard<std::mutex> lock(g_touchMutex);
+    if (!g_latestTouch.valid) {
+        return false;
+    }
+    out = g_latestTouch;
+    g_latestTouch.valid = false;
+    return true;
 }
 
 } // namespace player

@@ -334,6 +334,37 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
 #endif
 }
 
+bool SoftDecodeSession::seek(double seconds, std::string &error)
+{
+#if !defined(JELLYFIN_HAS_FFMPEG)
+    error = "本构建未链接 FFmpeg";
+    return false;
+#else
+    if (!impl_->open || impl_->failed) {
+        error = impl_->error.empty() ? "会话未打开" : impl_->error;
+        return false;
+    }
+    if (impl_->fmt == nullptr || impl_->dec == nullptr || impl_->videoIndex < 0) {
+        error = "播放器未就绪";
+        return false;
+    }
+    // 将秒数转换为 AV_TIME_BASE 单位（微秒）
+    const int64_t targetTs = static_cast<int64_t>(seconds * AV_TIME_BASE);
+    // AVSEEK_FLAG_BACKWARD：向后 seek 到最近的关键帧（标准做法）
+    const int rc = av_seek_frame(impl_->fmt, -1, targetTs, AVSEEK_FLAG_BACKWARD);
+    if (rc < 0) {
+        error = "seek 失败：" + AvErrorStr(rc);
+        return false;
+    }
+    // 冲刷解码器缓冲：seek 后解码器里残留的旧帧必须清掉，
+    // 否则 nextFrameRgba 会先输出几帧旧数据才到目标位置
+    avcodec_flush_buffers(impl_->dec);
+    // 重置 EOF 标志：seek 回中间位置后流还有数据
+    impl_->eof = false;
+    return true;
+#endif
+}
+
 void SoftDecodeSession::close()
 {
 #if defined(JELLYFIN_HAS_FFMPEG)

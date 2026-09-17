@@ -438,14 +438,20 @@ bool EglRenderer::selfTest(std::string &report)
     } else {
         report += "；纹理四边形绘制失败：" + drawError;
     }
-    // 自检结束时把画面恢复为黑并发布，避免把测试图案留在屏幕上
-    if (nativeImage_ != nullptr) {
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) ==
-            EGL_TRUE) {
-            OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
-        }
+    // 自检结束时把画面恢复为中性黑，避免把测试图案留在屏幕上。
+    //
+    // 必须**两条路径都做**。此前这段被 `if (nativeImage_ != nullptr)` 包着，只覆盖了
+    // TEXTURE 路径；而本工程 `softPlayOpen` 的 'xcomponent' 模式走的是 `initFromWindow()`
+    // （window surface，`nativeImage_` 恒为 nullptr），于是"清屏为红"的测试图案**再也没被抹掉**。
+    // 设备实测后果：起播即结束（续播点靠近片尾）时视频区整块红屏 avg=(224,6,6)，
+    // 看起来像渲染坏了 —— 截图验证一口咬到这个缺陷。
+    // 正确顺序：清黑 → glFinish → swap（使内容真正上屏）→ 仅有 NativeImage 时才发布。
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
+    if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) ==
+        EGL_TRUE && nativeImage_ != nullptr) {
+        OH_NativeImage_UpdateSurfaceImage(static_cast<OH_NativeImage *>(nativeImage_));
     }
     return surfaceRenderable && quadOk;
 }

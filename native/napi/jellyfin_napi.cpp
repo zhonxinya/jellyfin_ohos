@@ -1663,6 +1663,59 @@ napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
 }
 
 /**
+ * 软解会话 seek：跳转到指定时间点（秒）。
+ * 用于续播（"继续观看"）：打开会话后 seek 到上次观看位置。
+ * 参数：positionSec（目标时间点，秒）。
+ */
+napi_value SoftPlaySeek(napi_env env, napi_callback_info info)
+{
+    if (SoftSession() == nullptr || !SoftSession()->isOpen()) {
+        return ToNapiJson(env, MakeResult(false, 0, "软解会话未打开"));
+    }
+    double positionSec = 0.0;
+    {
+        size_t argc = 1;
+        napi_value args[1] = {};
+        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+        if (argc >= 1) {
+            napi_get_value_double(env, args[0], &positionSec);
+        }
+    }
+    std::string error;
+    const bool ok = SoftSession()->seek(positionSec, error);
+    nlohmann::json data = {
+        {"ok", ok},
+        {"positionSec", positionSec},
+    };
+    if (!ok) {
+        data["error"] = error;
+    }
+    return ToNapiJson(env, MakeResult(ok, ok ? 200 : 500, ok ? "ok" : error, data));
+}
+
+/**
+ * 读取 XComponent 视频区域的最新触摸事件（由 OnDispatchTouchEvent 捕获）。
+ *
+ * 官方文档：`OH_NativeXComponent_GetTouchEvent` 获取触摸点与动作。
+ * 返回：{type, x, y, numPoints, timestamp, valid}
+ * 无新事件时 valid=false。
+ */
+napi_value GetXComponentTouchEvent(napi_env env, napi_callback_info /*info*/)
+{
+    jellyfin::player::TouchEventData touch;
+    const bool hasEvent = jellyfin::player::XComponentBridge::TakeTouchEvent(touch);
+    nlohmann::json data = {
+        {"type", touch.type},
+        {"x", touch.x},
+        {"y", touch.y},
+        {"numPoints", touch.numPoints},
+        {"timestamp", touch.timestamp},
+        {"valid", hasEvent},
+    };
+    return ToNapiJson(env, MakeResult(true, 200, "ok", data));
+}
+
+/**
  * 软解码探测：解析播放地址 → 取文件前缀字节 → 用 FFmpeg 软解出前若干帧。
  *
  * 用途：
@@ -2250,12 +2303,15 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"softPlayStatus", nullptr, SoftPlayStatus, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlayClose", nullptr, SoftPlayClose, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"softPlaySeek", nullptr, SoftPlaySeek, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"softPlayDumpFrame", nullptr, SoftPlayDumpFrame, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlaySelfTest", nullptr, SoftPlaySelfTest, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"renderTargetProbe", nullptr, RenderTargetProbe, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"getXComponentTouchEvent", nullptr, GetXComponentTouchEvent, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
         {"login", nullptr, Login, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"logout", nullptr, Logout, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restoreSession", nullptr, RestoreSession, nullptr, nullptr, nullptr, napi_default,
