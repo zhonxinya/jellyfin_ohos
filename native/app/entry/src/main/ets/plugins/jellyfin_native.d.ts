@@ -69,6 +69,10 @@ declare module 'libjellyfin_native.so' {
     softPlayRenderLast(): string;
     softPlayStatus(): string;
     softPlayClose(): string;
+    /** 软解会话 seek：跳转到指定时间点（秒），用于续播 */
+    softPlaySeek(positionSec: number): string;
+    /** 读取 XComponent 视频区域的最新触摸事件（由 DispatchTouchEvent 捕获） */
+    getXComponentTouchEvent(): string;
     softPlayDumpFrame(path: string): string;
     softPlaySelfTest(): string;
     renderTargetProbe(surfaceId: string, width: number, height: number, renderMode: string): string;

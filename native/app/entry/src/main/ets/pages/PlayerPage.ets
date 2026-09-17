@@ -27,6 +27,49 @@ const kMediaTypeVideo: number = 1;
 const kMediaTypeSubtitle: number = 2;
 
 /**
+ * 原生触摸事件类型（对齐官方 `OH_NativeXComponent_TouchEventType` 枚举值）。
+ *
+ * 为什么用常量而不是字面量：这些值与官方 SDK 头文件一一对应，
+ * 写死数字后一旦平台调整枚举（或我们误判）就无法察觉；命名后语义自解释。
+ * 来源：`ace/xcomponent/native_interface_xcomponent.h`
+ *   OH_NATIVEXCOMPONENT_DOWN = 0 / UP = 1 / MOVE = 2 / CANCEL = 3 / UNKNOWN = 4
+ */
+const kTouchTypeDown: number = 0;
+const kTouchTypeUp: number = 1;
+const kTouchTypeMove: number = 2;
+const kTouchTypeCancel: number = 3;
+
+/**
+ * 原生触摸兜底通道的轮询节奏（自适应退避）。
+ *
+ * 背景：ArkUI 手势层已经在应用层消化了触摸，原生 `DispatchTouchEvent` 实测从不回调
+ * （见 startTouchPollTimer 的说明），所以常驻 60fps 轮询是纯浪费。
+ * 连续 kTouchPollBackoffLimit 次读不到事件就降到 kTouchPollSlowMs；
+ * 一旦读到事件立刻回到 kTouchPollFastMs，保证兜底通道真被用到时依然跟手。
+ */
+const kTouchPollFastMs: number = 16;
+const kTouchPollSlowMs: number = 250;
+const kTouchPollBackoffLimit: number = 120;
+
+/**
+ * 软解单次拉帧的最长容忍时间（毫秒）。超过即判定"原生侧卡死"并进入终态。
+ *
+ * 依据：正常一帧的耗时是几十毫秒（模拟器 4K 软解约 100ms 级）；
+ * 设备实测「流浪地球2」(4K 8-bit HEVC) 会永久卡住不返回，
+ * 因此 20 秒足以区分"慢"与"死"，又不会误杀正常的慢帧。
+ */
+const kSoftPullStallMs: number = 20000;
+
+/**
+ * 软解**打开会话**阶段的最长容忍时间（毫秒）。超过即判定挂起并进入终态。
+ *
+ * 依据：正常打开（取流探测 + 解容器 + 找流信息）在设备上是秒级；
+ * 实测 4K 8-bit HEVC 会卡在 `openUrl` 90 秒以上不返回，
+ * 因此 30 秒足以区分"慢"与"死"。
+ */
+const kSoftOpenTimeoutMs: number = 30000;
+
+/**
  * 是否是图形字幕（位图字幕：PGS/SUP/VOBSUB/DVB…）。
  *
  * 这类字幕的内容是图片，服务端**无法**转成文本，播放器也解析不出可渲染的文本，
@@ -62,6 +105,12 @@ struct PlayerPage {
   @State private softDiag: string = '';
   private softTimerId: number = -1;
   private softPulling: boolean = false;
+  /** 当前这次拉帧的起始时刻（0 表示空闲）；用于卡死看门狗 */
+  private softPullStartedAt: number = 0;
+  /** 最近一次成功解出的帧号；卡死时用它说明"卡在哪一帧" */
+  private softLastFrameIndex: number = 0;
+  /** 打开软解会话是否已按超时判定为挂起（true 时不再继续后续流程） */
+  private softOpenTimedOut: boolean = false;
   @State private errorMsg: string = '';
   @State private showControls: boolean = true;
   @State private playbackSpeed: number = 1.0;
@@ -90,6 +139,14 @@ struct PlayerPage {
   private longPressBoosting: boolean = false;
   /** 系统媒体会话（AVSession）；null 表示未创建 */
   private avSessionRef: avSession.AVSession | null = null;
+  /** 视频区触摸事件轮询定时器（用于原生侧 DispatchTouchEvent 转发） */
+  private touchPollTimerId: number = -1;
+  /** 上一次处理的触摸事件时间戳（避免重复处理） */
+  private lastProcessedTouchTs: number = 0;
+  /** 自适应退避：连续读不到事件的次数（达到上限后降到低频轮询） */
+  private touchPollBackoff: number = 0;
+  /** 当前轮询间隔（毫秒），用于判断是否需要重建定时器 */
+  private touchPollIntervalMs: number = 16;
   /** 可切换的媒体流列表（由详情页随路由参数传入）与当前音频/字幕索引 */
   @State private mediaStreams: Object[] = [];
   @State private audioStreamIndex: number = -1;
@@ -197,9 +254,12 @@ struct PlayerPage {
       }
     }, 1000);
     this.scheduleHideControls();
+    // 启动视频区触摸事件轮询：从原生侧 DispatchTouchEvent 捕获的触摸事件中读取并处理手势
+    this.startTouchPollTimer();
   }
 
   onPageHide(): void {
+    this.stopTouchPollTimer();
     this.flushStop();
   }
 
@@ -218,6 +278,7 @@ struct PlayerPage {
       clearTimeout(this.feedbackTimerId);
       this.feedbackTimerId = -1;
     }
+    this.stopTouchPollTimer();
     this.flushStop();
   }
 
@@ -280,9 +341,33 @@ struct PlayerPage {
     // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
     this.softStopAvPlayer();
     const pxSize: number[] = this.surfacePixelSize();
-    // XComponent 为 TEXTURE 类型：surfaceId 是 GL 纹理 id，原生侧走 OH_NativeImage 渲染并发布
-    const raw: string = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, pxSize[0],
-                                                          pxSize[1], 'xcomponent', this.playbackOptions);
+    // ── 打开阶段的超时兜底 ────────────────────────────────────────────────
+    // 打开会话里的 avformat/取流同样可能**永不返回**（设备实测 4K 8-bit HEVC
+    // 「流浪地球2」卡在 openUrl 90 秒以上，界面一直停在"正在打开软解会话…"）。
+    // 与拉帧看门狗同理：项目约定"异常与超时都必须到达终态"，
+    // 所以这里也必须给出明确结果，而不是无限等待。
+    // 注：原生侧那次调用无法真正取消（工作线程仍在跑），但**界面必须到达终态**，
+    // 用户可以重试或换条目；重试会重建会话。
+    this.softOpenTimedOut = false;
+    const openTimerId: number = setTimeout(() => {
+      if (!this.softPlaying) {
+        this.softOpenTimedOut = true;
+        this.softStatus = `打开软解会话超时（${Math.round(kSoftOpenTimeoutMs / 1000)} 秒无响应），`
+          + '已放弃；可点「软解」重试或改看其它条目';
+        this.appendProbeFile('player_soft.txt', 'softOpenTimeout\n');
+      }
+    }, kSoftOpenTimeoutMs);
+    let raw: string = '';
+    try {
+      raw = await JellyfinNative.softPlayOpen(this.itemId, this.surfaceId, pxSize[0],
+                                              pxSize[1], 'xcomponent', this.playbackOptions);
+    } finally {
+      clearTimeout(openTimerId);
+    }
+    if (this.softOpenTimedOut) {
+      // 已按超时给出终态，不再继续后续流程（避免"超时提示"被随后的成功覆盖成正常播放）
+      return;
+    }
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.softStatus = `软解打开失败：${result.message}`;
@@ -294,12 +379,29 @@ struct PlayerPage {
       return;
     }
     this.softPlaying = true;
+    this.softLastFrameIndex = 0;
+    this.softPullStartedAt = 0;
     const renderReady: boolean = JsonUtil.getBoolean(data, 'renderReady', false);
     const renderError: string = JsonUtil.getString(data, 'renderError', '');
     this.softStatus = `软解中：${JsonUtil.getString(data, 'videoCodec', '?')} `
       + `${JsonUtil.getNumber(data, 'width', 0)}x${JsonUtil.getNumber(data, 'height', 0)}`
       + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
       + (renderError.length > 0 ? `（${renderError}）` : '');
+    // 续播支持：如果传入了起始位置，seek 到该位置
+    if (this.startPositionMs > 1000) {
+      const seekSec: number = this.startPositionMs / 1000;
+      const seekRaw: string = JellyfinNative.softPlaySeek(seekSec);
+      const seekResult: NativeResult = JellyfinNative.parseResult(seekRaw);
+      if (seekResult.ok && seekResult.data !== null) {
+        const seekOk: boolean = JsonUtil.getBoolean(seekResult.data as ESObject, 'ok', false);
+        if (seekOk) {
+          this.softPositionMs = this.startPositionMs;
+          this.softDiag = `已续播到 ${this.formatTime(this.startPositionMs)}`;
+        } else {
+          this.softDiag = `续播 seek 失败：${JsonUtil.getString(seekResult.data as ESObject, 'error', '')}`;
+        }
+      }
+    }
     this.startSoftTimer();
     // 启动即自检（清屏为红并回读）：把"渲染目标是否可用"的判定一次性落到 softDiag，
     // 不依赖再点一次按钮（避免自动化/人工都容易错过的时序）
@@ -370,10 +472,31 @@ struct PlayerPage {
   }
 
   private async pullSoftFrame(): Promise<void> {
-    if (this.softPulling || !this.softPlaying) {
+    if (!this.softPlaying) {
+      return;
+    }
+    if (this.softPulling) {
+      // ── 卡死看门狗 ─────────────────────────────────────────────────────────
+      // 设备实测（4K 8-bit HEVC「流浪地球2」）：原生侧某次拉帧**永不返回**
+      // （解码器卡在某一帧 / 取流挂起），此前 `softPulling` 会一直是 true，
+      // 于是定时器每次都直接 return —— 界面永远停在最后一帧，既不报错也没有重试入口。
+      // 项目约定是"异常与超时都必然到达终态"，这个永久挂起正好违反了它。
+      // 这里补上终态：超时即判卡死 → 明确报错 + 停掉软解（用户可点「软解」重试）。
+      if (this.softPullStartedAt > 0
+        && Date.now() - this.softPullStartedAt > kSoftPullStallMs) {
+        const stalledMs: number = Date.now() - this.softPullStartedAt;
+        this.appendProbeFile('player_soft.txt',
+          `softPullStall stalledMs=${stalledMs} frames=${this.softLastFrameIndex}\n`);
+        this.softStatus = `软解无响应已 ${Math.round(stalledMs / 1000)} 秒（解到第 `
+          + `${this.softLastFrameIndex} 帧），已停止；可点「软解」重试或改看其它条目`;
+        this.softPulling = false;
+        this.softPullStartedAt = 0;
+        this.stopSoftPlay();
+      }
       return;
     }
     this.softPulling = true;
+    this.softPullStartedAt = Date.now();
     try {
       // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）。
       // 帧宽限制 640：模拟器 GL 为软件光栅化，上传 1920x1080 大纹理会明显拖慢甚至失败。
@@ -411,6 +534,7 @@ struct PlayerPage {
       // 软解播放的进度上报（节流）：此前软解只出画面、不向服务端报告进度，
       // 导致"继续观看"位置、多端同步都不生效。按 5 秒节流，与硬解路径一致。
       this.softPositionMs = Math.floor(pts * 1000);
+      this.softLastFrameIndex = idx;
       this.reportSoftProgressThrottled(pts);
       this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
         + ` · 第 ${idx} 帧 · ${(fetched / 1048576).toFixed(1)} MB`
@@ -424,6 +548,7 @@ struct PlayerPage {
       this.softStatus = `软解异常：${(err as Error).message}`;
     } finally {
       this.softPulling = false;
+      this.softPullStartedAt = 0;
     }
   }
 
@@ -432,13 +557,15 @@ struct PlayerPage {
    *
    * 为什么要自动：手动点「存帧」需要控制条处于显示状态，设备自动化下时序很难对齐；
    * 这条路径只要软解在跑就必然产出文件，便于确证"软解画面确实渲染到了帧缓冲"。
+   * 截图验证：同时导出组件快照和渲染缓冲，提供双重验证证据。
    */
   private async autoDumpRenderedFrame(): Promise<void> {
     try {
       const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const timestamp: string = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
       // ① 组件级快照：XComponent(TEXTURE) 的内容由 ArkUI 合成，
       //    componentSnapshot 能抓到组件真实显示结果（系统 snapshot_display 未必包含）。
-      const capturePath: string = `${ctx.cacheDir}/softcapture.png`;
+      const capturePath: string = `${ctx.cacheDir}/softcapture_${timestamp}.png`;
       try {
         const shot: image.PixelMap = await componentSnapshot.get('softVideoArea');
         const packer: image.ImagePacker = image.createImagePacker();
@@ -446,24 +573,24 @@ struct PlayerPage {
         const file = fs.openSync(capturePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
         fs.writeSync(file.fd, buf);
         fs.closeSync(file);
-        this.softDiag = `已组件快照 → ${capturePath}`;
+        this.softDiag = `截图验证：组件快照 → ${capturePath}`;
       } catch (snapErr) {
-        this.softDiag = `组件快照失败：${(snapErr as Error).message}`;
+        this.softDiag = `截图验证：组件快照失败 — ${(snapErr as Error).message}`;
       }
       // ② 原生渲染缓冲回读（TEXTURE 路径不支持时会明确报错，不再给误导性黑图）
-      const path: string = `${ctx.cacheDir}/softrender_frame.png`;
+      const path: string = `${ctx.cacheDir}/softrender_${timestamp}.png`;
       const raw: string = JellyfinNative.softPlayDumpFrame(path);
       const result: NativeResult = JellyfinNative.parseResult(raw);
       if (result.ok && result.data !== null) {
         const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
         const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
         const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
-        this.softDiag = `${this.softDiag}\n已自动存帧：${source} ${w}x${h}`;
+        this.softDiag = `${this.softDiag}\n截图验证：渲染缓冲 ${source} ${w}x${h} → ${path}`;
       } else {
-        this.softDiag = `${this.softDiag}\n自动存帧：${result.message}`;
+        this.softDiag = `${this.softDiag}\n截图验证：渲染缓冲 — ${result.message}`;
       }
     } catch (err) {
-      this.softDiag = `自动存帧异常：${(err as Error).message}`;
+      this.softDiag = `截图验证异常：${(err as Error).message}`;
     }
   }
 
@@ -1218,6 +1345,195 @@ struct PlayerPage {
     }
   }
 
+  /**
+   * 启动视频区触摸事件轮询：从原生侧 DispatchTouchEvent 捕获的触摸事件中读取并处理手势。
+   *
+   * **这是一个兜底通道，不是主通道。** 设备实测（hilog `XComponentBridge`）：
+   * `OH_NativeXComponent_RegisterCallback rc=0`、`OnSurfaceCreated` 都正常，但
+   * `DispatchTouchEvent` 从未被回调 —— 因为 XComponent 之上还有一层透明 ArkUI 手势层
+   * （见 build() 里的 Column + onTouch），ArkUI 在应用层就把触摸消化了，
+   * 原生回调因此不会触发（`player_gesture.txt` 里出现的是 `gesture seekDeltaMs=...`，
+   * 即 ArkUI 层的记录）。真正的修复是"回调不能为 nullptr"（为 nullptr 时框架不向该区域派发触摸），
+   * 那一点已经在 xcomponent_bridge.cpp 里落实。
+   *
+   * 既然如此，轮询就不该常驻 60fps 空转（每秒 60 次 NAPI 往返 + JSON 序列化，
+   * 在软解播放这种 CPU 已经很紧的场景纯属浪费）。改为**自适应退避**：
+   * 连续若干次读不到事件就降到低频；一旦真读到事件（说明原生通道确实在工作）
+   * 立刻恢复高频，保证兜底通道可用时依然跟手。
+   */
+  private startTouchPollTimer(): void {
+    this.stopTouchPollTimer();
+    this.touchPollBackoff = 0;
+    this.touchPollTimerId = setInterval(() => {
+      this.pollNativeTouchEvent();
+    }, kTouchPollFastMs);
+  }
+
+  private stopTouchPollTimer(): void {
+    if (this.touchPollTimerId >= 0) {
+      clearInterval(this.touchPollTimerId);
+      this.touchPollTimerId = -1;
+    }
+    this.touchPollBackoff = 0;
+  }
+
+  /** 按当前退避档位重设定轮询间隔（16ms ↔ 250ms） */
+  private retuneTouchPoll(hasEvent: boolean): void {
+    if (hasEvent) {
+      this.touchPollBackoff = 0;
+      if (this.touchPollTimerId >= 0 && this.touchPollIntervalMs !== kTouchPollFastMs) {
+        clearInterval(this.touchPollTimerId);
+        this.touchPollIntervalMs = kTouchPollFastMs;
+        this.touchPollTimerId = setInterval(() => {
+          this.pollNativeTouchEvent();
+        }, kTouchPollFastMs);
+      }
+      return;
+    }
+    if (this.touchPollBackoff < kTouchPollBackoffLimit) {
+      this.touchPollBackoff++;
+      if (this.touchPollBackoff === kTouchPollBackoffLimit && this.touchPollTimerId >= 0
+        && this.touchPollIntervalMs !== kTouchPollSlowMs) {
+        // 连续读不到 → 原生通道在本配置下不工作，降到低频（保留兜底能力，几乎不耗电）
+        clearInterval(this.touchPollTimerId);
+        this.touchPollIntervalMs = kTouchPollSlowMs;
+        this.touchPollTimerId = setInterval(() => {
+          this.pollNativeTouchEvent();
+        }, kTouchPollSlowMs);
+      }
+    }
+  }
+
+  /**
+   * 从原生侧读取并处理最新的触摸事件。
+   * 事件类型映射：0=down 1=up 2=move 3=cancel
+   */
+  private pollNativeTouchEvent(): void {
+    try {
+      const raw: string = JellyfinNative.getXComponentTouchEvent();
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        this.retuneTouchPoll(false);
+        return;
+      }
+      const data: ESObject = result.data as ESObject;
+      const valid: boolean = JsonUtil.getBoolean(data, 'valid', false);
+      if (!valid) {
+        // 没读到事件 → 累计退避（原生通道在本配置下不工作，别空转 60fps）
+        this.retuneTouchPoll(false);
+        return;
+      }
+      const ts: number = JsonUtil.getNumber(data, 'timestamp', 0);
+      // 避免重复处理同一事件
+      if (ts === this.lastProcessedTouchTs || ts <= 0) {
+        this.retuneTouchPoll(false);
+        return;
+      }
+      // 原生通道确实在工作 → 恢复高频，保证跟手
+      this.retuneTouchPoll(true);
+      this.lastProcessedTouchTs = ts;
+      const type: number = JsonUtil.getNumber(data, 'type', -1);
+      const x: number = JsonUtil.getNumber(data, 'x', 0);
+      const y: number = JsonUtil.getNumber(data, 'y', 0);
+      // 按官方枚举分发：0=Down 1=Up 2=Move 3=Cancel
+      // CANCEL 与 Up 同样处理：手势被打断（来电、系统手势抢占）时必须结束本次滑动，
+      // 否则手势状态会卡在"拖拽中"，下一次按下被当成同一次滑动的延续。
+      if (type === kTouchTypeDown) {
+        this.handleNativeTouchDown(x, y);
+      } else if (type === kTouchTypeMove) {
+        this.handleNativeTouchMove(x, y);
+      } else if (type === kTouchTypeUp || type === kTouchTypeCancel) {
+        this.handleNativeTouchUp(x, y);
+      }
+    } catch (_err) {
+      // 轮询失败静默忽略，但同样计入退避（避免持续失败时空转）
+      this.retuneTouchPoll(false);
+    }
+  }
+
+  private handleNativeTouchDown(x: number, y: number): void {
+    if (this.controlsLocked) {
+      return;
+    }
+    this.seekBaseMs = this.positionMs;
+    this.seekDragMs = 0;
+    this.seekLastX = x;
+    this.brightnessBase = 0.5;
+    this.brightnessLastY = y;
+    this.volumeBase = this.volume;
+    this.volumeLastY = y;
+    this.touchDownX = x;
+    this.touchDownY = y;
+    this.gestureAxis = '';
+    this.startLongPressBoost();
+    // 探针：记录原生触摸事件到达，便于设备验证
+    this.appendProbeFile('player_gesture.txt', `nativeDown x=${x.toFixed(1)} y=${y.toFixed(1)}\n`);
+  }
+
+  private handleNativeTouchMove(x: number, y: number): void {
+    if (this.controlsLocked) {
+      return;
+    }
+    const totalX: number = x - this.touchDownX;
+    const totalY: number = y - this.touchDownY;
+    if (this.gestureAxis.length === 0) {
+      if (Math.abs(totalX) > 12 || Math.abs(totalY) > 12) {
+        this.gestureAxis = Math.abs(totalX) >= Math.abs(totalY) ? 'seek' : 'level';
+      }
+    }
+    const screenWidth: number = this.getScreenWidth();
+    const isLeftSide: boolean = x < screenWidth / 2;
+    if (this.gestureAxis === 'seek') {
+      this.seekLastX = x;
+      this.seekDragMs = totalX * 2;
+      const total: number = this.durationMs > 0 ? this.durationMs : 1;
+      const clamped: number = Math.max(0, Math.min(total, this.seekBaseMs + this.seekDragMs));
+      this.positionMs = clamped;
+      this.lastSeekForward = totalX >= 0;
+      this.gestureFeedback = this.lastSeekForward
+        ? `+${this.formatTime(Math.abs(this.seekDragMs))}`
+        : `-${this.formatTime(Math.abs(this.seekDragMs))}`;
+      this.gestureIcon = 'seek';
+      this.gestureRatio = total > 0 ? clamped / total : 0;
+      this.showFeedback = true;
+    } else if (this.gestureAxis === 'level' && Math.abs(totalY) > 12) {
+      if (isLeftSide) {
+        const newBrightness: number = Math.max(0, Math.min(1, this.brightnessBase - totalY / 500));
+        this.gestureFeedback = `${Math.round(newBrightness * 100)}%`;
+        this.gestureIcon = 'brightness';
+        this.gestureRatio = newBrightness;
+        this.showFeedback = true;
+        this.brightnessLastY = y;
+      } else {
+        const newVolume: number = Math.max(0, Math.min(1, this.volumeBase - totalY / 500));
+        this.volume = newVolume;
+        if (this.avPlayer !== null) {
+          this.avPlayer.setVolume(newVolume);
+        }
+        this.gestureFeedback = `${Math.round(newVolume * 100)}%`;
+        this.gestureIcon = 'volume';
+        this.gestureRatio = newVolume;
+        this.showFeedback = true;
+        this.volumeLastY = y;
+      }
+    }
+  }
+
+  private handleNativeTouchUp(x: number, y: number): void {
+    if (this.controlsLocked) {
+      return;
+    }
+    if (Math.abs(this.seekDragMs) > 100 && this.avPlayer !== null) {
+      this.avPlayer.seek(this.positionMs);
+    }
+    this.stopLongPressBoost();
+    this.appendProbeFile('player_gesture.txt',
+      `nativeGesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
+      + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
+    this.seekDragMs = 0;
+    this.dismissFeedback();
+  }
+
   private stopLongPressBoost(): void {
     this.cancelLongPressTimer();
     if (!this.longPressBoosting) {
@@ -1252,6 +1568,9 @@ struct PlayerPage {
     this.stopSoftTimer();
     JellyfinNative.softPlayClose();
     this.softPlaying = false;
+    // 清掉看门狗状态：否则上一次卡死的起始时刻会留到下一次播放，导致新的拉帧被立刻误判为卡死
+    this.softPulling = false;
+    this.softPullStartedAt = 0;
     // 停止/切换/退出时补发最终进度：只靠节流中的周期上报会丢失最后几秒位置
     // （与硬解路径的 flushStop 行为保持一致）
     if (this.itemId.length > 0 && this.lastProgressReportAt > 0) {
@@ -1390,10 +1709,10 @@ struct PlayerPage {
     this.status = UiState.SUCCESS;
     this.errorMsg = '';
     this.isPlaying = true;
-    // 软解会话目前没有"从指定位置起播"的能力（进度条会从头开始），
-    // 这种情况下不能继续显示「继续播放」的暗示，否则用户以为会接着上次看。
+    // 软解会话已支持 seek 续播（av_seek_frame + avcodec_flush_buffers），
+    // 这里如实提示用户当前状态
     this.softStatus = this.startPositionMs > 1000
-      ? '已自动切换软解（软解暂不支持从上次位置续播，将从头播放）'
+      ? `已自动切换软解（将从 ${this.formatTime(this.startPositionMs)} 续播）`
       : '已自动切换软解播放';
   }
 
