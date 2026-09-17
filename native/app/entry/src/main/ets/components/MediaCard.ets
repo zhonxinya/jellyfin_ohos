@@ -24,6 +24,13 @@ export struct MediaCard {
   @Prop mode: string = 'grid';
   @Prop cardWidth: number = ThemeConstants.CARD_WIDTH;
   onTap: () => void = () => {};
+  /**
+   * 长按（弹出条目操作菜单：播放/收藏/标记已看/加入播放列表）。
+   *
+   * 为什么要有它：媒体库里管理观看状态原来必须"进详情页 → 操作 → 返回"，
+   * 这是与主流 Jellyfin 客户端最大的交互差距。默认空实现，老调用点不受影响。
+   */
+  onLongPress: () => void = () => {};
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
@@ -118,6 +125,10 @@ export struct MediaCard {
     .onClick(() => {
       this.onTap();
     })
+    .gesture(LongPressGesture({ repeat: false, duration: 500 })
+      .onAction(() => {
+        this.onLongPress();
+      }))
   }
 
   @Builder
@@ -169,6 +180,10 @@ export struct MediaCard {
     .onClick(() => {
       this.onTap();
     })
+    .gesture(LongPressGesture({ repeat: false, duration: 500 })
+      .onAction(() => {
+        this.onLongPress();
+      }))
   }
 
   build() {

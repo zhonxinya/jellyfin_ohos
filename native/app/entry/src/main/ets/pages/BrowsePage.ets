@@ -5,6 +5,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -164,6 +165,11 @@ struct BrowsePage {
 
           onItemTap: (item: MediaItem) => {
             this.openItem(item);
+          },
+          onItemLongPress: (item: MediaItem) => {
+            MediaItemMenu.show(this.getUIContext(), item, () => {
+              this.items = MediaItemMenu.touch(this.items);
+            });
           },
           onReachEnd: () => {
             if (!this.footerTriggered) {

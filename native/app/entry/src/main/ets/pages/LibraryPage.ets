@@ -6,6 +6,7 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -531,6 +532,12 @@ struct LibraryPage {
             hasMore: this.hasMore,
             onItemTap: (item: MediaItem) => {
               this.openItem(item);
+            },
+            // 长按卡片：不经详情页即可播放/收藏/标记已看/加入播放列表
+            onItemLongPress: (item: MediaItem) => {
+              MediaItemMenu.show(this.getUIContext(), item, () => {
+                this.items = MediaItemMenu.touch(this.items);
+              });
             },
             onReachEnd: () => {
               if (!this.footerTriggered) {

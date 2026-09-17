@@ -7,6 +7,7 @@ import { WindowLayout } from '../common/WindowLayout';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
@@ -177,6 +178,11 @@ struct PersonPage {
           columns: WindowLayout.gridColumns(),
           onItemTap: (item: MediaItem) => {
             router.pushUrl({ url: 'pages/DetailPage', params: { itemId: item.id } });
+          },
+          onItemLongPress: (item: MediaItem) => {
+            MediaItemMenu.show(this.getUIContext(), item, () => {
+              this.works = MediaItemMenu.touch(this.works);
+            });
           }
         })
         .height(Math.max(260, Math.ceil(this.works.length / WindowLayout.gridColumns()) * 230 + 24))

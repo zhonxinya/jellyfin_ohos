@@ -7,6 +7,7 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
 import { SectionState } from '../models/SectionState';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { HorizontalShelf } from '../components/HorizontalShelf';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingState } from '../components/LoadingState';
@@ -67,6 +68,18 @@ export struct HomePage {
       return;
     }
     apply(SectionState.data(this.extractItems(result.data)));
+  }
+
+  /**
+   * 首页货架卡片长按 → 条目操作菜单。
+   *
+   * 货架状态是**整对象** `@State`（`SectionState`），就地改条目字段不会触发刷新，
+   * 因此状态变化后重新拉一次货架数据（每个货架只有十来条，代价可接受且不会跳位置）。
+   */
+  private onShelfItemLongPress(item: MediaItem): void {
+    MediaItemMenu.show(this.getUIContext(), item, () => {
+      this.loadAllSections();
+    });
   }
 
   private loadAllSections(): void {
@@ -221,6 +234,7 @@ export struct HomePage {
               cardWidth: ThemeConstants.CARD_WIDTH,
               showMore: true,
               onItemTap: (item: MediaItem) => { this.openItem(item); },
+              onItemLongPress: (item: MediaItem) => { this.onShelfItemLongPress(item); },
               onMore: () => { this.openBrowse('resume', '继续观看'); }
             })
           } else {
@@ -260,6 +274,7 @@ export struct HomePage {
               cardWidth: ThemeConstants.CARD_WIDTH,
               showMore: true,
               onItemTap: (item: MediaItem) => { this.openItem(item); },
+              onItemLongPress: (item: MediaItem) => { this.onShelfItemLongPress(item); },
               onMore: () => { this.openBrowse('nextUp', '接下来'); }
             })
           } else {
@@ -299,6 +314,7 @@ export struct HomePage {
               cardWidth: ThemeConstants.CARD_WIDTH,
               showMore: true,
               onItemTap: (item: MediaItem) => { this.openItem(item); },
+              onItemLongPress: (item: MediaItem) => { this.onShelfItemLongPress(item); },
               onMore: () => { this.openBrowse('latest', '最新添加'); }
             })
           } else {

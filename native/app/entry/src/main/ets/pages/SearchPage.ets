@@ -5,6 +5,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { MediaItemMenu } from '../common/MediaItemMenu';
 import { MediaCollectionView, MediaViewToggle } from '../components/MediaCollectionView';
 import { PageScaffold } from '../components/PageScaffold';
 import { SearchBar } from '../components/SearchBar';
@@ -204,6 +205,11 @@ struct SearchPage {
           hasMore: this.hasMore,
           onItemTap: (item: MediaItem) => {
             router.pushUrl({ url: 'pages/DetailPage', params: { itemId: item.id } });
+          },
+          onItemLongPress: (item: MediaItem) => {
+            MediaItemMenu.show(this.getUIContext(), item, () => {
+              this.items = MediaItemMenu.touch(this.items);
+            });
           },
           onReachEnd: () => {
             if (!this.footerTriggered) {
