@@ -351,18 +351,6 @@ export class JellyfinNative {
     }
   }
 
-  /**
-   * FFmpeg 软解码探测：解析播放地址 → 取前缀字节 → 软解出前若干帧（可落盘首帧 PNG）。
-   * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 PlayerSoftDecodeProbe。
-   */
-  static async playerSoftDecodeProbe(itemId: string, cacheDir: string,
-                                     optionsJson: string = '{}'): Promise<string> {
-    try {
-      return await jellyfinNative.playerSoftDecodeProbe(itemId, cacheDir, optionsJson);
-    } catch (error) {
-      return JellyfinNative.fail('playerSoftDecodeProbe', error);
-    }
-  }
 
   static playerPlay(): string {
     try {
@@ -582,33 +570,8 @@ export class JellyfinNative {
     }
   }
 
-  /** 回读当前渲染缓冲并写成 PNG（验证渲染结果，与系统截图无关） */
-  static softPlayDumpFrame(path: string): string {
-    try {
-      return jellyfinNative.softPlayDumpFrame(path);
-    } catch (error) {
-      return JellyfinNative.fail('softPlayDumpFrame', error);
-    }
-  }
 
-  /** 渲染自检：清屏为红并回读（判断 surface 能否作为 GL 渲染目标） */
-  static softPlaySelfTest(): string {
-    try {
-      return jellyfinNative.softPlaySelfTest();
-    } catch (error) {
-      return JellyfinNative.fail('softPlaySelfTest', error);
-    }
-  }
 
-  /** 渲染目标判定：给定 surfaceId 即初始化 EGL 并清屏回读（无需开始播放） */
-  static renderTargetProbe(surfaceId: string, width: number, height: number,
-                           renderMode: string = 'texture'): string {
-    try {
-      return jellyfinNative.renderTargetProbe(surfaceId, width, height, renderMode);
-    } catch (error) {
-      return JellyfinNative.fail('renderTargetProbe', error);
-    }
-  }
 
   static softPlayClose(): string {
     try {
