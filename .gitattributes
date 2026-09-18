@@ -5,3 +5,7 @@
 native/third_party/ffmpeg/source/** linguist-vendored
 native/third_party/mbedtls/**       linguist-vendored
 native/third_party/nlohmann/**      linguist-vendored
+
+# 预编译的 FFmpeg 共享库（随仓库提交的二进制产物）：按二进制处理（不做行尾/文本转换），
+# 理由与刷新方式见 native/third_party/README.md「Prebuilt shared libraries are committed」。
+native/app/entry/libs/** binary

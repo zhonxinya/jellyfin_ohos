@@ -11,8 +11,10 @@ native/core/tests/out/
 # FFmpeg（软解码）
 # 源码随仓库提交：native/third_party/ffmpeg/source/（FFmpeg 7.1 原始源码，便于按 LGPL 要求重建）
 # 公开头文件也随仓库提交：native/third_party/ffmpeg/include/
-# 共享库二进制不入库：由 scripts/build_ffmpeg_ohos.sh 从内置源码编译后部署到下面这个目录
-native/app/entry/libs/
+# 预编译共享库同样随仓库提交：native/app/entry/libs/{x86_64,arm64-v8a}/
+#   —— 克隆后无需 HarmonyOS 工具链重编译 FFmpeg 即可构建（CI/协作者/离线环境）；
+#      让产物失效并重建：bash scripts/build_ffmpeg_ohos.sh（或 FFMPEG_FORCE_REBUILD=1）
+#      细节见 native/third_party/README.md「Prebuilt shared libraries are committed」一节。
 # 防御：万一有人在源码树内直接 configure/make（脚本本身在临时工作目录构建，不产生这些）
 native/third_party/ffmpeg/source/config.h
 native/third_party/ffmpeg/source/config.asm

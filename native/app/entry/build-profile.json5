@@ -10,10 +10,30 @@
       "abiFilters": ["arm64-v8a", "x86_64"]
     }
   },
+  // 两个目标：
+  //   default → 日常开发与 CI 编译校验，双 ABI（真机 + 模拟器都能装）
+  //   phone   → 发布用的真机包，只编 arm64-v8a（省掉 x86_64 那一份 native 载荷）
+  // 注意：abiFilters 只决定**编哪些 ABI**，不决定**打包哪些库**——
+  // entry/libs/ 下的每个 <abi> 子目录都会被原样打进 HAP。因此发布工作流在构建 phone 之前
+  // 会先把 native/app/entry/libs/x86_64 移开，否则 x86_64 的预编译 FFmpeg 库照样进包。
   "targets": [
     {
       "name": "default",
       "runtimeOS": "HarmonyOS"
+    },
+    {
+      "name": "phone",
+      "runtimeOS": "HarmonyOS",
+      "config": {
+        "buildOption": {
+          "externalNativeOptions": {
+            "path": "./src/main/cpp/CMakeLists.txt",
+            "arguments": "",
+            "cppFlags": "",
+            "abiFilters": ["arm64-v8a"]
+          }
+        }
+      }
     }
   ]
 }

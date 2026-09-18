@@ -10,6 +10,10 @@ inputs:
     description: 鸿蒙命令行工具链版本（对应 commandline-tools-linux-x64 发布包）
     required: false
     default: '6.1.0.816'
+  product:
+    description: 产品/目标名（对应 build-profile 里的 product 与 entry 的 target）
+    required: false
+    default: default
 
 outputs:
   hap-path:
@@ -86,17 +90,21 @@ runs:
       id: build
       shell: bash
       working-directory: native/app
+      env:
+        PRODUCT: ${{ inputs.product }}
       run: |
         set -euo pipefail
         hvigorw assembleHap \
-          -p module=entry@default \
-          -p product=default \
+          -p "module=entry@${PRODUCT}" \
+          -p "product=${PRODUCT}" \
           -p buildMode=${{ inputs.build-mode }} \
           --no-daemon
 
-        HAP=$(find . -path '*/outputs/*' -name '*.hap' -type f | head -n 1)
+        # 按产品目录精确取产物：同一工作区里可能先构建过别的产品（例如发布流程先编
+        # default 再编 phone），全仓库 find 会随机取到上一个产品的 HAP。
+        HAP=$(find "entry/build/${PRODUCT}/outputs" -name '*.hap' -type f 2>/dev/null | head -n 1)
         if [ -z "$HAP" ]; then
-          echo "::error::未找到构建产物 HAP"
+          echo "::error::未找到构建产物 HAP（product=${PRODUCT}）"
           find . -name '*.hap' -type f || true
           exit 1
         fi

@@ -8,6 +8,7 @@
 #include "api/system_api.h"
 #include "api/user_items_api.h"
 #include "api_client.h"
+#include "app_version.h"
 #include "engine.h"
 #include "http_client.h"
 #include "http_tls.h"
@@ -45,7 +46,8 @@
 
 namespace {
 
-constexpr const char *kNativeVersion = "0.1.0-native";
+// 版本号与 app.json5 的 versionName 同源（CMake 注入 JELLYFIN_APP_VERSION），不再单独写死
+constexpr const char *kNativeVersion = JELLYFIN_APP_VERSION "-native";
 
 
 /**
