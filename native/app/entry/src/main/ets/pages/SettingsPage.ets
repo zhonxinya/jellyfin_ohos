@@ -7,6 +7,7 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { PageHeader } from '../components/PageHeader';
 import { JsonUtil } from '../common/JsonUtil';
 import { SessionUtil } from '../services/SessionUtil';
+import { ShortVideoPrefs } from '../common/ShortVideoPrefs';
 
 interface SettingsItem {
   /** 系统符号名，映射见 iconResource()；info 行忽略 */
@@ -151,6 +152,20 @@ export struct SettingsPage {
       }
     }
     return '\u539f\u751f\u64ad\u653e\u5668';
+  }
+
+  /**
+   * 「短视频模式」这一行的副标题：直接说清"当前选了几个库"。
+   *
+   * 为什么读偏好而不是用 @State：这一行只是入口，勾选发生在子页里、返回时本页不会重建；
+   * 每次渲染都从偏好现读（本地读，无网络）才能保证返回后看到的数字是新的。
+   */
+  private shortVideoSubtitle(): string {
+    const count: number = ShortVideoPrefs.loadLibraryIds().length;
+    if (count === 0) {
+      return '选择进入短视频模式的媒体库（当前未设置）';
+    }
+    return `已选 ${count} 个媒体库，「视频」页按随机顺序连播`;
   }
 
   private selectDefaultPlayer(value: string): void {
@@ -672,6 +687,9 @@ export struct SettingsPage {
           Column() {
             this.SectionCard('\u64ad\u653e', 'play_circle', [
               { icon: 'video', title: '\u9ed8\u8ba4\u64ad\u653e\u5668', subtitle: `\u65b0\u6253\u5f00\u7684\u5a92\u4f53\u5c06\u4f7f\u7528${this.playerLabel()}`, action: 'defaultPlayer' },
+              // 短视频模式：选择哪些媒体库进入「视频」页的短视频流（承载页见 pages/ShortVideoPage）
+              { icon: 'play_circle', title: '短视频模式', subtitle: this.shortVideoSubtitle(),
+                route: 'pages/settings/ShortVideoSettingsPage' },
             ])
             Column() {
               this.ToggleRow('\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6', '\u64ad\u653e\u5b8c\u4e00\u96c6\u540e\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6',

@@ -35,6 +35,7 @@
     "pages/admin/AdminGenericPage",
     "pages/settings/ThemeSettingsPage",
     "pages/settings/ControlsSettingsPage",
-    "pages/settings/SubtitleSettingsPage"
+    "pages/settings/SubtitleSettingsPage",
+    "pages/settings/ShortVideoSettingsPage"
   ]
 }
