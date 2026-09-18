@@ -97,6 +97,8 @@ struct SoftDecodeSession::Impl {
     int swsDstH = 0;
     bool eof = false;
     bool failed = false;
+    /** 解码器实际使用的线程数（0 = 解码器自行决定；见 openUrl 里的多核设置） */
+    int threadCount = 0;
     std::string error;
 #endif
     /**
@@ -209,12 +211,25 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
         return false;
     }
     impl_->dec = avcodec_alloc_context3(codec);
-    if (impl_->dec == nullptr || avcodec_parameters_to_context(impl_->dec, par) < 0 ||
-        avcodec_open2(impl_->dec, codec, nullptr) < 0) {
+    if (impl_->dec == nullptr || avcodec_parameters_to_context(impl_->dec, par) < 0) {
         error = "打开视频解码器失败：" + impl_->codec;
         close();
         return false;
     }
+    // ── 解码效率：让 FFmpeg 用满多核 ──────────────────────────────────────
+    // FFmpeg 的软件解码器默认**单线程**（`thread_count = 1`），在 1080p/4K HEVC 上
+    // 单核解码就是帧率瓶颈（真机实测软解约 5–10fps，模拟器更低）。
+    // `thread_count = 0` 表示"自动"（按 CPU 核数）；`thread_type` 同时请求
+    // 帧级与片级并行 —— 解码器会按自身能力取其一（HEVC/H.264 通常支持帧级并行，
+    // 能拿到接近线性的多核加速）。两者都必须在 `avcodec_open2()` **之前**设置。
+    impl_->dec->thread_count = 0;
+    impl_->dec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    if (avcodec_open2(impl_->dec, codec, nullptr) < 0) {
+        error = "打开视频解码器失败：" + impl_->codec;
+        close();
+        return false;
+    }
+    impl_->threadCount = impl_->dec->thread_count;
     impl_->pkt = av_packet_alloc();
     impl_->frame = av_frame_alloc();
     if (impl_->pkt == nullptr || impl_->frame == nullptr) {
@@ -326,8 +341,11 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
         if (impl_->sws != nullptr) {
             sws_freeContext(impl_->sws);
         }
+        // 缩放用 FAST_BILINEAR：每帧都要做一次 YUV→RGBA + 缩放，是软解路径里仅次于
+        // 解码的第二大开销；高质量双线性在这个尺寸下的观感差异肉眼不可辨，
+        // 但省下的 CPU 能直接换成帧率（软解帧率本来就紧）。
         impl_->sws = sws_getContext(srcW, srcH, static_cast<AVPixelFormat>(frame->format), dstW, dstH,
-                                    AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                    AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         impl_->swsSrcW = srcW;
         impl_->swsSrcH = srcH;
         impl_->swsSrcFmt = frame->format;
@@ -489,6 +507,11 @@ int64_t SoftDecodeSession::bytesFetched() const
 int64_t SoftDecodeSession::framesDecoded() const
 {
     return impl_->frames;
+}
+
+int SoftDecodeSession::decoderThreads() const
+{
+    return impl_->threadCount;
 }
 
 } // namespace player
