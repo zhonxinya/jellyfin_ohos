@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,20 +49,47 @@ std::string MakeContent(size_t size)
     return out;
 }
 
-/** 记录每次请求的假取流器；behavior 决定是否支持 Range */
+/**
+ * 记录每次请求的假取流器；behavior 决定是否支持 Range。
+ *
+ * **必须线程安全**：`RangeCache::startPrefetch()` 会在后台线程里调用这个取流器，
+ * 而测试主线程同时会读请求计数与请求区间。此前两处都没有同步 —— ASan 实测会在
+ * `ranges.emplace_back()` 重新分配数组时被后台线程读到旧内存而报
+ * `heap-use-after-free`（本机 5 次复现 2 次；CI 上表现为 `test_range_cache` 偶发
+ * segfault / exit 139，与本改动无关的 PR 也会被它挡住）。因此计数与区间列表一律用
+ * 互斥量保护，读取走访问器。
+ */
 struct FakeServer {
     std::string content;
     bool ignoreRange = false;      // true → 忽略 Range，总是返回整片（HTTP 200）
     bool failFromByte = false;     // true → 起点 > 0 的请求返回 500（模拟中途不可 Range）
+    mutable std::mutex mtx;
     int requests = 0;
     std::vector<std::pair<int64_t, int64_t>> ranges;
+
+    /** 请求次数（线程安全快照） */
+    int RequestCount() const
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        return requests;
+    }
+
+    /** 第 index 次请求的区间 [start, end]（线程安全快照） */
+    std::pair<int64_t, int64_t> RangeAt(size_t index) const
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        return index < ranges.size() ? ranges[index] : std::make_pair<int64_t, int64_t>(-1, -1);
+    }
 
     jellyfin::player::RangeFetchFn Fetcher()
     {
         return [this](const std::string &, int64_t start, int64_t end) {
             jellyfin::player::RangeResponse resp;
-            ++requests;
-            ranges.emplace_back(start, end);
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                ++requests;
+                ranges.emplace_back(start, end);
+            }
             if (ignoreRange) {
                 resp.status = 200;
                 resp.body = content;
@@ -126,11 +154,11 @@ void TestSequentialReadAcrossChunks()
     Expect(error.empty(), "顺序读无错误", error);
     Expect(cache.size() == 1000, "读到末尾后总长度被推断出来",
            "size=" + std::to_string(cache.size()));
-    Expect(server.requests >= 4, "跨分片时发生多次 Range 请求",
-           "requests=" + std::to_string(server.requests));
-    Expect(server.ranges[0].first == 0 && server.ranges[0].second == 255,
+    Expect(server.RequestCount() >= 4, "跨分片时发生多次 Range 请求",
+           "requests=" + std::to_string(server.RequestCount()));
+    Expect(server.RangeAt(0).first == 0 && server.RangeAt(0).second == 255,
            "首个 Range 请求区间为 0-255",
-           std::to_string(server.ranges[0].first) + "-" + std::to_string(server.ranges[0].second));
+           std::to_string(server.RangeAt(0).first) + "-" + std::to_string(server.RangeAt(0).second));
     // 末尾之后的读取必须是 EOF 而不是错误（否则 libavformat 会收到 EIO）
     std::vector<uint8_t> buf(16);
     Expect(cache.read(buf.data(), 16, error) == 0, "读完后继续读返回 EOF(0) 而非错误");
@@ -144,7 +172,7 @@ void TestSeekBackwardsUsesCache()
     jellyfin::player::SetRangeFetcher(server.Fetcher());
     jellyfin::player::RangeCache cache("https://example.test/media.mkv", 512);
     cache.probe();
-    const int requestsAfterProbe = server.requests;
+    const int requestsAfterProbe = server.RequestCount();
 
     std::string error;
     std::vector<uint8_t> buf(16);
@@ -156,13 +184,13 @@ void TestSeekBackwardsUsesCache()
     // 回到已缓存区间内不应再发请求
     cache.seek(20);
     cache.read(buf.data(), 16, error);
-    Expect(server.requests == requestsAfterProbe, "回退到已缓存区间不再发起请求",
-           "requests=" + std::to_string(server.requests));
+    Expect(server.RequestCount() == requestsAfterProbe, "回退到已缓存区间不再发起请求",
+           "requests=" + std::to_string(server.RequestCount()));
 
     // 跳到未缓存区间应触发新请求
     cache.seek(900);
     cache.read(buf.data(), 16, error);
-    Expect(server.requests > requestsAfterProbe, "跳到未缓存区间触发新请求");
+    Expect(server.RequestCount() > requestsAfterProbe, "跳到未缓存区间触发新请求");
     Expect(std::string(reinterpret_cast<char *>(buf.data()), 16) == server.content.substr(900, 16),
            "跳转后内容正确");
 }
@@ -274,14 +302,14 @@ void TestPrefetchFillsAheadOfReader()
 
     jellyfin::player::RangeCache cache("https://example.test/media.mkv", 512);
     cache.probe();
-    const int afterProbe = server.requests;   // probe 已经取了第 0 块
+    const int afterProbe = server.RequestCount();   // probe 已经取了第 0 块
 
     cache.startPrefetch(4);
     // 给预取线程一点时间跑起来（4 块 × 512B）
-    for (int i = 0; i < 40 && server.requests < afterProbe + 4; ++i) {
+    for (int i = 0; i < 40 && server.RequestCount() < afterProbe + 4; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    const int afterPrefetch = server.requests;
+    const int afterPrefetch = server.RequestCount();
     cache.stopPrefetch();
 
     Expect(afterPrefetch >= afterProbe + 3,
@@ -295,9 +323,9 @@ void TestPrefetchFillsAheadOfReader()
     for (int i = 0; i < 8; ++i) {
         cache.read(buf.data(), 64, error);
     }
-    Expect(server.requests == afterPrefetch,
+    Expect(server.RequestCount() == afterPrefetch,
            "读取预取范围内的数据不产生新的取流请求（关键：网络不在读取路径上）",
-           "读取后请求数=" + std::to_string(server.requests) +
+           "读取后请求数=" + std::to_string(server.RequestCount()) +
                "，读取前=" + std::to_string(afterPrefetch));
 }
 
@@ -336,11 +364,11 @@ void TestStopPrefetchIsIdempotent()
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     cache.stopPrefetch();
     cache.stopPrefetch();   // 幂等
-    const int atStop = server.requests;
+    const int atStop = server.RequestCount();
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
-    Expect(server.requests == atStop, "停止预取后不再发起取流请求",
+    Expect(server.RequestCount() == atStop, "停止预取后不再发起取流请求",
            "停止后请求数=" + std::to_string(atStop) +
-               "，等待后=" + std::to_string(server.requests));
+               "，等待后=" + std::to_string(server.RequestCount()));
 }
 
 int main()
