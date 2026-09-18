@@ -35,8 +35,10 @@ FFmpeg（软解码）
 Status: **源码已内置**（native/third_party/ffmpeg/source/，未经修改的上游源码树），
         由本仓库脚本交叉编译为共享库并打进 HAP：
         scripts/build_ffmpeg_ohos.sh
-        （构建应用时若尚无编译产物，CMake 会自动调用该脚本，无需手工前置步骤；
-          见 native/app/entry/src/main/cpp/CMakeLists.txt 的 FFmpeg 段）
+        （编译产物已随仓库提交，克隆后构建应用直接链接，不会重新编译；
+          仅当指纹失效——源码树或脚本变化——时 CMake 才会自动调用该脚本，
+          见 native/app/entry/src/main/cpp/CMakeLists.txt 的 FFmpeg 段与
+          native/third_party/README.md）
 版本:   FFmpeg 7.1
        对应上游源码包 ffmpeg-7.1.tar.xz
        sha256 = 40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
@@ -48,7 +50,10 @@ Status: **源码已内置**（native/third_party/ffmpeg/source/，未经修改�
 使用位置: native/feature/player/ffmpeg_decoder.cpp（软解：解容器 → 软件解码 → swscale 转 RGB）
 源码:   native/third_party/ffmpeg/source/（随仓库提交，未经修改的上游源码）
 构建产物: native/app/entry/libs/<abi>/libav{format,codec,util}.so*、libsw{scale,resample}.so*
-          ABI: arm64-v8a、x86_64
+          ABI: arm64-v8a、x86_64（两者均**随仓库提交**，见 .gitignore 的 FFmpeg 段）
+编译指纹: native/third_party/ffmpeg/build-stamp-<abi>.txt
+          （记录 FFmpeg 版本、ABI、构建脚本 sha256、内置源码树 git tree oid：
+            证明仓库内的二进制就是仓库内的源码编译出来的，便于 LGPL 溯源）
 公开头文件: native/third_party/ffmpeg/include/（随仓库提交，便于第三方按 LGPL 要求重建）
 
 LGPL 合规说明（**动态链接**）:

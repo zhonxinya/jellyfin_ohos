@@ -77,14 +77,16 @@ target_link_libraries(jellyfin_native PUBLIC
   native_image
 )
 
-# ── FFmpeg 软解码（源码内置，构建期自动编译）─────────────────────────────────────
-# FFmpeg 7.1 的**源码随仓库提交**在 native/third_party/ffmpeg/source/。
-# 若还没编译出共享库，这里会自动调用 scripts/build_ffmpeg_ohos.sh 从内置源码交叉编译，
-# 因此"构建应用"这一步本身就会把 FFmpeg 编译出来——不需要事先手工跑脚本，
-# 也不依赖仓库外的源码包。首次约数分钟；之后脚本判定"产物比源码新"会秒过。
+# ── FFmpeg 软解码（预编译库已入库，构建期仅在失效时重编译）─────────────────────
+# FFmpeg 7.1 的**源码随仓库提交**在 native/third_party/ffmpeg/source/，
+# **编译好的共享库也随仓库提交**在 native/app/entry/libs/{x86_64,arm64-v8a}/，
+# 因此克隆后构建应用直接链接既有产物，不需要用 HarmonyOS 工具链重新编译 FFmpeg。
+# 只有产物缺失、或指纹（内置源码树 / 构建脚本）失效时，这里才会自动调用
+# scripts/build_ffmpeg_ohos.sh 从内置源码交叉编译（首次约数分钟）；
+# 指纹机制与"刷新产物后如何处理 git 变更"见 native/third_party/README.md。
 #
 # 查找已编译库的顺序：
-#   1) 模块内目录  native/app/entry/libs/<abi>/   （由脚本生成；hvigor 会打进 HAP）
+#   1) 模块内目录  native/app/entry/libs/<abi>/   （随仓库提交；hvigor 会打进 HAP）
 #   2) JELLYFIN_FFMPEG_ROOT/<abi>/lib             （默认 <repo 父目录>/_ffmpeg-build/out）
 # 仍找不到时**不**定义 JELLYFIN_HAS_FFMPEG：FfmpegDecoder 会如实报告"解码不可用"，
 # 而不是假装可用（见 native/feature/player/ffmpeg_decoder.cpp）。

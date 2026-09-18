@@ -18,7 +18,8 @@
 
 1. **FFmpeg 7.1 共享库**（LGPL-2.1+，动态链接）：
    `libavformat` `libavcodec` `libavutil` `libswscale` `libswresample`
-   本仓库的交叉编译脚本：`scripts/build_ffmpeg_ohos.sh`（x86_64 / arm64-v8a）
+   预编译产物**随仓库提交**：`native/app/entry/libs/{x86_64,arm64-v8a}/`（克隆后直接可用）
+   需要刷新时的交叉编译脚本：`scripts/build_ffmpeg_ohos.sh`（x86_64 / arm64-v8a）
    公开头文件：`native/third_party/ffmpeg/include`；许可与分发要求见 `native/third_party/NOTICE`
 2. **OHOS NDK 图形库**：`EGL` `GLESv3` `native_window`
 3. C++17
