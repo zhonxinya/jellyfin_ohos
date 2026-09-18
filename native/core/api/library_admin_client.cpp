@@ -52,5 +52,35 @@ ApiResult getLocalization(JellyfinApiClient &client)
     return combined;
 }
 
+ApiResult getMetadataSettings(JellyfinApiClient &client)
+{
+    // 1) 整份服务器配置（元数据抓取器配置就在 ServerConfiguration.MetadataOptions 里；
+    //    keyed 路由 `/System/Configuration/metadataoptions` 实测 404）
+    ApiResult config = execute(client, buildServerConfigurationRequest());
+    if (!config.ok()) {
+        return config;
+    }
+
+    // 2) 每个内容类型各查一次可选项再合并：10.8 没有"一次拿全部条目类型"的端点
+    //    （`GetRepresentativeItemTypes(null)` 只返回 Series/Season/Episode/Movie）
+    nlohmann::json available = nlohmann::json::array();
+    for (const std::string &contentType : metadataContentTypes()) {
+        ApiResult options =
+            execute(client, buildAvailableOptionsRequest(contentType, /*isNewLibrary=*/false));
+        if (options.ok()) {
+            available.push_back(options.data);
+        }
+    }
+    if (available.empty()) {
+        // 一个都拿不到时不要把页面做成空的：把错误往上抛，让界面能显示原因
+        return execute(client, buildAvailableOptionsRequest("movies", false));
+    }
+
+    ApiResult result;
+    result.error.statusCode = 200;
+    result.data = buildMetadataSettingsModel(config.data, available);
+    return result;
+}
+
 } // namespace api
 } // namespace jellyfin

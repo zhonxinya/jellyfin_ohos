@@ -421,6 +421,89 @@ void TestNormalizeAvailableOptions()
     ExpectTrue("empty type options", empty["typeOptions"].is_array() && empty["typeOptions"].empty());
 }
 
+void TestMetadataSettingsModel()
+{
+    using jellyfin::api::buildMetadataSettingsModel;
+
+    // 现在读写的都是**整份** ServerConfiguration（keyed 路由对 MetadataOptions 是 404），
+    // 所以入参要带 MetadataOptions 段和几个无关字段
+    const nlohmann::json config = nlohmann::json::parse(R"({
+      "ServerName":"probe",
+      "MetadataOptions":[
+        {"ItemType":"Movie","DisabledMetadataFetchers":["The Open Movie Database"],
+         "MetadataFetcherOrder":["TheMovieDb"],"UnknownField":7}
+      ]
+    })");
+    const nlohmann::json available = nlohmann::json::parse(R"([
+      {"MetadataSavers":[{"Name":"Nfo","DefaultEnabled":true}],
+       "TypeOptions":[
+         {"Type":"Movie",
+          "MetadataFetchers":[{"Name":"TheMovieDb","DefaultEnabled":true},
+                              {"Name":"The Open Movie Database","DefaultEnabled":true}],
+          "ImageFetchers":[{"Name":"Screen Grabber","DefaultEnabled":true}]},
+         {"Type":"Series",
+          "MetadataFetchers":[{"Name":"TheMovieDb","DefaultEnabled":true}],
+          "ImageFetchers":[{"Name":"Screen Grabber","DefaultEnabled":false}]}
+       ]}
+    ])");
+
+    const nlohmann::json model = buildMetadataSettingsModel(config, available);
+
+    // 1) 回传的是整份配置：无关字段在，MetadataOptions 里补齐六个数组字段、未知字段保留
+    ExpectEq("config keeps unrelated field", model["config"]["ServerName"].get<std::string>(), "probe");
+    ExpectTrue("config keeps unknown option field",
+               model["config"]["MetadataOptions"][0]["UnknownField"] == 7);
+    for (const char *field : {"DisabledMetadataSavers", "LocalMetadataReaderOrder",
+                              "DisabledMetadataFetchers", "MetadataFetcherOrder",
+                              "DisabledImageFetchers", "ImageFetcherOrder"}) {
+        ExpectTrue(std::string("config has ") + field,
+                   model["config"]["MetadataOptions"][0][field].is_array());
+    }
+
+    // 2) 有条目的类型按 Disabled* 算启用；没条目的类型用服务端给的 defaultEnabled
+    ExpectEq("item type order", model["itemTypes"][0]["type"].get<std::string>(), "Movie");
+    ExpectTrue("configured flag", model["itemTypes"][0]["configured"] == true);
+    ExpectTrue("disabled fetcher is off",
+               model["itemTypes"][0]["metadataFetchers"][1]["enabled"] == false);
+    ExpectTrue("enabled fetcher stays on",
+               model["itemTypes"][0]["metadataFetchers"][0]["enabled"] == true);
+    ExpectTrue("series has no entry",
+               model["itemTypes"][1]["configured"] == false);
+    ExpectTrue("series falls back to defaultEnabled (true)",
+               model["itemTypes"][1]["metadataFetchers"][0]["enabled"] == true);
+    ExpectTrue("series image fetcher falls back to defaultEnabled (false)",
+               model["itemTypes"][1]["imageFetchers"][0]["enabled"] == false);
+
+    // 3) 保存器：条目里没禁 → enabled；禁了 → partial（还有类型没禁）
+    ExpectTrue("one saver", model["savers"].size() == 1);
+    ExpectTrue("saver enabled when not disabled anywhere", model["savers"][0]["enabled"] == true);
+
+    const nlohmann::json disabledSavers = nlohmann::json::parse(R"({
+      "MetadataOptions":[{"ItemType":"Movie","DisabledMetadataSavers":["Nfo"]}]
+    })");
+    const nlohmann::json off = buildMetadataSettingsModel(disabledSavers, available);
+    // 只有 Movie 一条配置且它禁用了 → 就是"关"，不是"部分"
+    ExpectTrue("saver off when the only configured type disables it",
+               off["savers"][0]["enabled"] == false && off["savers"][0]["partial"] == false);
+
+    // 两个条目类型、只有一个禁了 → partial（外部改过就会是这种中间状态）
+    const nlohmann::json mixedSavers = nlohmann::json::parse(R"({
+      "MetadataOptions":[
+        {"ItemType":"Movie","DisabledMetadataSavers":["Nfo"]},
+        {"ItemType":"Series","DisabledMetadataSavers":[]}
+      ]
+    })");
+    const nlohmann::json partial = buildMetadataSettingsModel(mixedSavers, available);
+    ExpectTrue("saver partial when only one of two types disables it",
+               partial["savers"][0]["enabled"] == false && partial["savers"][0]["partial"] == true);
+
+    // 4) 空输入不崩：模型要有空数组而不是 null
+    const nlohmann::json bare = buildMetadataSettingsModel(nullptr, nullptr);
+    ExpectTrue("empty model is well formed",
+               bare["config"].is_object() && bare["config"]["MetadataOptions"].is_array() &&
+               bare["savers"].is_array() && bare["itemTypes"].is_array());
+}
+
 void TestNormalizeServerConfiguration()
 {
     using jellyfin::api::normalizeServerConfiguration;
@@ -455,6 +538,7 @@ int main()
     TestNormalizeVirtualFolders();
     TestNormalizeAvailableOptions();
     TestNormalizeServerConfiguration();
+    TestMetadataSettingsModel();
 
     if (gFailures != 0) {
         std::cerr << gFailures << " failure(s)\n";

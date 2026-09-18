@@ -2,6 +2,10 @@
 
 #include "url_util.h"
 
+#include <algorithm>
+#include <map>
+#include <set>
+
 namespace jellyfin {
 namespace api {
 namespace {
@@ -325,6 +329,19 @@ LibraryRequest buildUpdateServerConfigurationRequest(const nlohmann::json &confi
                           configuration.is_object() ? configuration : nlohmann::json::object()};
 }
 
+LibraryRequest buildNamedConfigurationRequest(const std::string &key)
+{
+    return LibraryRequest{"GET", "/System/Configuration/" + EncodeQueryComponent(key), nullptr};
+}
+
+LibraryRequest buildUpdateNamedConfigurationRequest(const std::string &key,
+                                                    const nlohmann::json &configuration)
+{
+    // 只替换这一段配置（比 POST /System/Configuration 整体替换安全）
+    return LibraryRequest{"POST", "/System/Configuration/" + EncodeQueryComponent(key),
+                          configuration};
+}
+
 LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::string &metadataRefreshMode,
                                        const std::string &imageRefreshMode, bool replaceAllMetadata,
                                        bool replaceAllImages)
@@ -522,6 +539,194 @@ nlohmann::json normalizeAvailableOptions(const nlohmann::json &serverJson)
         {"metadataReaders", NormalizeOptionInfoList(JsonArrayOr(src, "MetadataReaders"))},
         {"subtitleFetchers", NormalizeOptionInfoList(JsonArrayOr(src, "SubtitleFetchers"))},
         {"typeOptions", typeOptions},
+    });
+}
+
+const std::vector<std::string> &metadataContentTypes()
+{
+    // 与服务端 GetRepresentativeItemTypes 的分组对应；并集覆盖 13 种条目类型：
+    // Movie / Series,Season,Episode / MusicArtist,MusicAlbum,Audio,MusicVideo /
+    // Video,Photo / BoxSet / Book / Playlist
+    static const std::vector<std::string> kTypes = {
+        "movies", "tvshows", "music", "musicvideos", "homevideos", "boxsets", "books",
+        "playlists",
+    };
+    return kTypes;
+}
+
+namespace {
+
+/** 界面上的条目类型顺序（对齐 jellyfin-web 的元数据页；未列到的排在最后） */
+const std::vector<std::string> &kItemTypeOrder()
+{
+    static const std::vector<std::string> kOrder = {
+        "Movie", "Series", "Season", "Episode", "Video", "MusicVideo", "MusicArtist",
+        "MusicAlbum", "Audio", "Photo", "BoxSet", "Book", "Playlist",
+    };
+    return kOrder;
+}
+
+int ItemTypeRank(const std::string &type)
+{
+    const auto &order = kItemTypeOrder();
+    for (size_t i = 0; i < order.size(); ++i) {
+        if (order[i] == type) {
+            return static_cast<int>(i);
+        }
+    }
+    return static_cast<int>(order.size());
+}
+
+/** `MetadataOptions` 的六个数组字段（缺一个都会让服务端按 C# 默认值重算） */
+const char *const kMetadataArrayFields[] = {
+    "DisabledMetadataSavers", "LocalMetadataReaderOrder", "DisabledMetadataFetchers",
+    "MetadataFetcherOrder", "DisabledImageFetchers", "ImageFetcherOrder",
+};
+
+nlohmann::json FindMetadataEntry(const nlohmann::json &config, const std::string &type)
+{
+    if (!config.is_array()) {
+        return nullptr;
+    }
+    for (const auto &entry : config) {
+        if (JsonStringOr(entry, "ItemType") == type) {
+            return entry;
+        }
+    }
+    return nullptr;
+}
+
+bool ArrayHas(const nlohmann::json &array, const std::string &value)
+{
+    if (!array.is_array()) {
+        return false;
+    }
+    for (const auto &item : array) {
+        if (item.is_string() && item.get<std::string>() == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+nlohmann::json buildMetadataSettingsModel(const nlohmann::json &serverConfig,
+                                          const nlohmann::json &availableOptionsList)
+{
+    // 0) 整份配置：缺 MetadataOptions 时补空数组（回传时不能丢别的字段）
+    nlohmann::json config = normalizeServerConfiguration(serverConfig);
+    if (!config.contains("MetadataOptions") || !config["MetadataOptions"].is_array()) {
+        config["MetadataOptions"] = nlohmann::json::array();
+    }
+
+    // 1) 配置侧：按 ItemType 建索引，并把六个数组字段补成数组（可原样回传）
+    nlohmann::json options = nlohmann::json::array();
+    std::vector<std::string> configuredTypes;
+    for (const auto &raw : config["MetadataOptions"]) {
+        nlohmann::json entry = raw.is_object() ? raw : nlohmann::json::object();
+        const std::string type = JsonStringOr(entry, "ItemType");
+        if (type.empty()) {
+            continue;
+        }
+        for (const char *field : kMetadataArrayFields) {
+            if (!entry.contains(field) || !entry[field].is_array()) {
+                entry[field] = nlohmann::json::array();
+            }
+        }
+        options.push_back(entry);
+        configuredTypes.push_back(type);
+    }
+    config["MetadataOptions"] = options;
+
+    // 2) 可选项侧：把多次 AvailableOptions 的响应合并成"每个条目类型有哪些抓取器"
+    std::vector<std::string> types;
+    std::map<std::string, nlohmann::json> metadataFetchers; // type -> [{name, defaultEnabled}]
+    std::map<std::string, nlohmann::json> imageFetchers;
+    std::vector<std::pair<std::string, bool>> saverDefault; // 保存器：名称 + 是否默认启用
+    std::set<std::string> saverSeen;
+
+    if (availableOptionsList.is_array()) {
+        for (const auto &response : availableOptionsList) {
+            const nlohmann::json normalized = normalizeAvailableOptions(response);
+            for (const auto &saver : normalized["metadataSavers"]) {
+                const std::string name = JsonStringOr(saver, "name");
+                if (name.empty() || saverSeen.count(name) > 0) {
+                    continue;
+                }
+                saverSeen.insert(name);
+                saverDefault.emplace_back(name, saver.value("defaultEnabled", false));
+            }
+            for (const auto &typeOption : normalized["typeOptions"]) {
+                const std::string type = JsonStringOr(typeOption, "type");
+                if (type.empty()) {
+                    continue;
+                }
+                if (metadataFetchers.find(type) == metadataFetchers.end()) {
+                    types.push_back(type);
+                }
+                metadataFetchers[type] = typeOption["metadataFetchers"];
+                imageFetchers[type] = typeOption["imageFetchers"];
+            }
+        }
+    }
+    std::sort(types.begin(), types.end(), [](const std::string &a, const std::string &b) {
+        const int ra = ItemTypeRank(a);
+        const int rb = ItemTypeRank(b);
+        return ra == rb ? a < b : ra < rb;
+    });
+
+    // 3) 每个条目类型的"当前启用"：有条目看 Disabled*Fetchers，没有就用 defaultEnabled
+    nlohmann::json itemTypes = nlohmann::json::array();
+    for (const std::string &type : types) {
+        const nlohmann::json entry = FindMetadataEntry(options, type);
+        const bool hasEntry = !entry.is_null();
+
+        auto buildList = [&](const char *disabledField, const nlohmann::json &pool) {
+            nlohmann::json list = nlohmann::json::array();
+            for (const auto &option : pool) {
+                const std::string name = JsonStringOr(option, "name");
+                if (name.empty()) {
+                    continue;
+                }
+                const bool enabled = hasEntry
+                    ? !ArrayHas(entry[disabledField], name)
+                    : option.value("defaultEnabled", false);
+                list.push_back(nlohmann::json::object({{"name", name}, {"enabled", enabled}}));
+            }
+            return list;
+        };
+
+        itemTypes.push_back(nlohmann::json::object({
+            {"type", type},
+            {"configured", hasEntry},
+            {"metadataFetchers", buildList("DisabledMetadataFetchers", metadataFetchers[type])},
+            {"imageFetchers", buildList("DisabledImageFetchers", imageFetchers[type])},
+        }));
+    }
+
+    // 4) 保存器：服务端是"按条目类型禁用"，所以可能出现"某些类型禁了、某些没禁"的中间状态
+    nlohmann::json savers = nlohmann::json::array();
+    for (const auto &item : saverDefault) {
+        int disabledCount = 0;
+        for (const std::string &type : configuredTypes) {
+            const nlohmann::json entry = FindMetadataEntry(options, type);
+            if (!entry.is_null() && ArrayHas(entry["DisabledMetadataSavers"], item.first)) {
+                ++disabledCount;
+            }
+        }
+        const bool enabled = disabledCount == 0;
+        savers.push_back(nlohmann::json::object({
+            {"name", item.first},
+            {"enabled", enabled},
+            {"partial", !enabled && disabledCount < static_cast<int>(configuredTypes.size())},
+        }));
+    }
+
+    return nlohmann::json::object({
+        {"config", config},
+        {"savers", savers},
+        {"itemTypes", itemTypes},
     });
 }
 
