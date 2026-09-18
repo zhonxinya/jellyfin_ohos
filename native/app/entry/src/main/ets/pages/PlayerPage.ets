@@ -999,12 +999,33 @@ struct PlayerPage {
    * 再次点击锁可以取消锁定模式" —— 所以单击只把锁亮出来，不再顺手解锁
    * （此前点画面任意位置都会解锁，"想看一眼进度就把锁解掉了"）。
    */
+  /**
+   * 锁定态的单击：只做"显示/收起锁提示"，**不做**双击快进、不做拖动 seek。
+   *
+   * 复用与正常路径相同的单击延时（`kSingleTapDelayMs`），保证两条通道（ArkUI 手势层 /
+   * 原生兜底轮询）的判定口径一致。
+   */
+  private handleLockedTap(x: number): void {
+    this.lastTapUpAt = Date.now();
+    this.lastTapX = x;
+    if (this.singleTapTimerId >= 0) {
+      clearTimeout(this.singleTapTimerId);
+    }
+    this.singleTapTimerId = setTimeout(() => {
+      this.singleTapTimerId = -1;
+      this.onSingleTap();
+    }, kSingleTapDelayMs);
+  }
+
   private onSingleTap(): void {
+    // 刚切换过锁定状态的那一次单击不算"用户意图"，**两个方向都要挡**：
+    // · 点"锁定"：同一次抬手的单击若被采纳，锁提示会当场弹出来；
+    // · 点"解锁"（锁图标）：解锁已经唤出了控制面板，而这次抬手产生的单击
+    //   又会把它再收起（实测：解锁后控制面板没留住）。
+    if (Date.now() - this.lockChangedAt < kLockGraceMs) {
+      return;
+    }
     if (this.controlsLocked) {
-      // 刚锁定那一下不算"用户想看锁"（见 kLockGraceMs 的说明）
-      if (Date.now() - this.lockChangedAt < kLockGraceMs) {
-        return;
-      }
       if (this.lockBadgeVisible) {
         this.hideLockBadge();
       } else {
@@ -2187,6 +2208,8 @@ struct PlayerPage {
 
   private handleNativeTouchUp(x: number, y: number): void {
     if (this.controlsLocked) {
+      // 与 ArkUI 手势层同一口径：锁定态只保留"单击显示/收起锁提示"
+      this.handleLockedTap(x);
       return;
     }
 
@@ -3275,11 +3298,19 @@ struct PlayerPage {
         .height('100%')
         .backgroundColor(Color.Transparent)
         .onTouch((event: TouchEvent) => {
-          if (this.controlsLocked) {
-            return;
-          }
           const touches: TouchObject[] = event.touches;
           if (touches.length !== 1) {
+            return;
+          }
+          if (this.controlsLocked) {
+            // 锁定态**只保留"单击"这一条路径**（显示/收起锁提示），其余手势一律忽略。
+            //
+            // 为什么不能直接 return（原实现如此）：那样锁定后画面收不到任何触摸，
+            // 「单击显示锁」就永远不可能发生 —— 设备实测：锁定后单击，锁提示不出现，
+            // 用户也就没有任何"点锁解锁"的入口（等于把自己锁死）。
+            if (event.type === TouchType.Up) {
+              this.handleLockedTap(touches[0].x);
+            }
             return;
           }
           const touch: TouchObject = touches[0];
