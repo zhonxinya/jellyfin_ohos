@@ -313,6 +313,18 @@ LibraryRequest buildRefreshLibraryRequest()
     return LibraryRequest{"POST", "/Library/Refresh", nullptr};
 }
 
+LibraryRequest buildServerConfigurationRequest()
+{
+    return LibraryRequest{"GET", "/System/Configuration", nullptr};
+}
+
+LibraryRequest buildUpdateServerConfigurationRequest(const nlohmann::json &configuration)
+{
+    // 整体替换：必须回传完整配置对象（缺字段会被服务端按 C# 默认值重置）
+    return LibraryRequest{"POST", "/System/Configuration",
+                          configuration.is_object() ? configuration : nlohmann::json::object()};
+}
+
 LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::string &metadataRefreshMode,
                                        const std::string &imageRefreshMode, bool replaceAllMetadata,
                                        bool replaceAllImages)
@@ -328,6 +340,30 @@ LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::str
 }
 
 // ── 响应归一化 ──────────────────────────────────────────────────────────────
+
+nlohmann::json normalizeServerConfiguration(const nlohmann::json &serverConfig)
+{
+    // 只补"媒体库"这一组设置的默认值，其余字段原样保留（回传时不能丢）：
+    // 默认值逐项抄自 MediaBrowser.Model/Configuration/ServerConfiguration.cs（10.8.12）
+    const nlohmann::json defaults = nlohmann::json::object({
+        {"EnableFolderView", false},
+        {"EnableGroupingIntoCollections", false},
+        {"DisplaySpecialsWithinSeasons", true},
+        {"SaveMetadataHidden", false},
+        {"ImageSavingConvention", "Legacy"},
+        {"LibraryMonitorDelay", 60},
+        {"LibraryScanFanoutConcurrency", 0},
+        {"LibraryMetadataRefreshConcurrency", 0},
+    });
+
+    nlohmann::json out = serverConfig.is_object() ? serverConfig : nlohmann::json::object();
+    for (auto it = defaults.begin(); it != defaults.end(); ++it) {
+        if (!out.contains(it.key()) || out[it.key()].is_null()) {
+            out[it.key()] = it.value();
+        }
+    }
+    return out;
+}
 
 nlohmann::json normalizeLibraryOptions(const nlohmann::json &serverOptions)
 {

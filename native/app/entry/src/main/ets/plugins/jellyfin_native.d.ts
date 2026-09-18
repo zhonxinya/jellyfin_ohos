@@ -129,6 +129,10 @@ declare module 'libjellyfin_native.so' {
     /** 只扫描一个媒体库（媒体库条目本身就是 CollectionFolder，可单独刷新） */
     libraryScanFolder(itemId: string, metadataRefreshMode: string, imageRefreshMode: string,
                       replaceAllMetadata: boolean, replaceAllImages: boolean): string;
+    /** 服务器级媒体库设置（显示方式/图片落盘/扫描并发），返回已补齐默认值的完整 ServerConfiguration */
+    libraryServerConfig(): string;
+    /** 整体替换服务器配置：必须回传 `libraryServerConfig()` 拿到的完整对象 */
+    libraryUpdateServerConfig(configJson: string): string;
     setPreference(key: string, value: string): string;
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;

@@ -202,6 +202,22 @@ void TestRequestBuilders()
                  "/Items/id-1/Refresh?metadataRefreshMode=FullRefresh&imageRefreshMode=None"
                  "&replaceAllMetadata=true&replaceAllImages=false");
     }
+
+    {
+        // 服务器级媒体库设置：整体替换，POST 的体就是完整配置对象本身
+        const LibraryRequest get = buildServerConfigurationRequest();
+        ExpectEq("server config method", get.method, "GET");
+        ExpectEq("server config route", get.path, "/System/Configuration");
+
+        const nlohmann::json cfg =
+            nlohmann::json::parse(R"({"EnableFolderView":true,"Unknown":{"a":1}})");
+        const LibraryRequest post = buildUpdateServerConfigurationRequest(cfg);
+        ExpectEq("server config post method", post.method, "POST");
+        ExpectEq("server config body is the config itself", post.body.dump(), cfg.dump());
+        // 非对象一律回传空对象，避免把 null 当配置发出去
+        ExpectEq("server config rejects non-object",
+                 buildUpdateServerConfigurationRequest(nullptr).body.dump(), "{}");
+    }
 }
 
 void TestNormalizeLibraryOptions()
@@ -382,6 +398,31 @@ void TestNormalizeAvailableOptions()
     ExpectTrue("empty type options", empty["typeOptions"].is_array() && empty["typeOptions"].empty());
 }
 
+void TestNormalizeServerConfiguration()
+{
+    using jellyfin::api::normalizeServerConfiguration;
+
+    {
+        // 缺字段补 C# 默认值，未知字段原样保留（要能整体回传）
+        const nlohmann::json out = normalizeServerConfiguration(
+            nlohmann::json::parse(R"({"EnableFolderView":true,"ServerName":"probe"})"));
+        ExpectTrue("folder view kept", out["EnableFolderView"] == true);
+        ExpectTrue("grouping default", out["EnableGroupingIntoCollections"] == false);
+        ExpectTrue("specials in seasons default", out["DisplaySpecialsWithinSeasons"] == true);
+        ExpectEq("image saving convention default",
+                 out["ImageSavingConvention"].get<std::string>(), "Legacy");
+        ExpectTrue("monitor delay default", out["LibraryMonitorDelay"] == 60);
+        ExpectTrue("scan fanout default", out["LibraryScanFanoutConcurrency"] == 0);
+        ExpectEq("unrelated field preserved", out["ServerName"].get<std::string>(), "probe");
+    }
+
+    {
+        const nlohmann::json out = normalizeServerConfiguration(nullptr);
+        ExpectTrue("null config becomes defaults",
+                   out["EnableFolderView"] == false && out["LibraryMonitorDelay"] == 60);
+    }
+}
+
 } // namespace
 
 int main()
@@ -390,6 +431,7 @@ int main()
     TestNormalizeLibraryOptions();
     TestNormalizeVirtualFolders();
     TestNormalizeAvailableOptions();
+    TestNormalizeServerConfiguration();
 
     if (gFailures != 0) {
         std::cerr << gFailures << " failure(s)\n";

@@ -2678,6 +2678,38 @@ napi_value LibraryScanFolder(napi_env env, napi_callback_info info)
     });
 }
 
+napi_value LibraryServerConfig(napi_env env, napi_callback_info /*info*/)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    return RunAsync(env, []() {
+        jellyfin::ApiResult result =
+            jellyfin::api::execute(Api(), jellyfin::api::buildServerConfigurationRequest());
+        if (result.ok()) {
+            result.data = jellyfin::api::normalizeServerConfiguration(result.data);
+        }
+        return FromApi(result).dump();
+    });
+}
+
+napi_value LibraryUpdateServerConfig(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    nlohmann::json configuration;
+    if (!ReadJsonArg(env, info, 0, configuration) || !configuration.is_object()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Server configuration JSON is required"));
+    }
+    return RunAsync(env, [configuration]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildUpdateServerConfigurationRequest(configuration));
+    });
+}
+
 napi_value SetPreference(napi_env env, napi_callback_info info)
 {
     std::string key;
@@ -2976,6 +3008,10 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"libraryScanAll", nullptr, LibraryScanAll, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"libraryScanFolder", nullptr, LibraryScanFolder, nullptr, nullptr, nullptr, napi_default,
          nullptr},
+        {"libraryServerConfig", nullptr, LibraryServerConfig, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryUpdateServerConfig", nullptr, LibraryUpdateServerConfig, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
         {"setPreference", nullptr, SetPreference, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPreferences", nullptr, GetPreferences, nullptr, nullptr, nullptr, napi_default,
          nullptr},
