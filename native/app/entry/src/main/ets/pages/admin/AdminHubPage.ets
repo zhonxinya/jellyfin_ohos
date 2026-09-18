@@ -67,7 +67,8 @@ struct AdminHubPage {
         { title: '流媒体', subtitle: '查看流媒体和连接状态', icon: 'video', url: 'pages/admin/StreamingPage' },
         { title: '转码', subtitle: '配置视频转码参数', icon: 'video', url: 'pages/admin/TranscodingPage' },
         { title: '播放设置', subtitle: '配置播放和媒体能力', icon: 'play_circle', url: 'pages/admin/PlaybackSettingsPage' },
-        { title: '继续观看', subtitle: '配置继续观看行为', icon: 'arrow_2_circlepath', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration', titleParam: '继续观看' },
+        // 原来指向 `/System/Configuration`：标题写着"继续观看"，内容却是整份服务器配置的键值表
+        { title: '继续观看', subtitle: '续播/已看的百分比与时长阈值、有声书续播', icon: 'arrow_2_circlepath', url: 'pages/admin/ResumeSettingsPage' },
         { title: 'Trickplay', subtitle: '配置预览缩略图选项', icon: 'video', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/trickplay', titleParam: 'Trickplay' }
       ]
     },
