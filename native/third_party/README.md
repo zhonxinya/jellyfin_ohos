@@ -56,11 +56,11 @@ FFMPEG_FORCE_REBUILD=1 bash scripts/build_ffmpeg_ohos.sh all     # 无条件重�
 
 ### Prebuilt shared libraries are committed
 
-Both ABIs ship in git (`native/app/entry/libs/x86_64/` + `arm64-v8a/`, 5 libraries × 3 names
-each). Git stores one object per unique content, and the three names of a library are
-byte-identical copies — so the committed payload is the 10 unique libraries: **27.3 MB** of
-unique content, ≈14.5 MB in the object store (shared libraries compress to about half), not
-the 83 MB the working tree appears to hold.
+Both ABIs ship in git (`native/app/entry/libs/x86_64/` + `arm64-v8a/`, 5 libraries × 2 names
+each: `libX.so` for linking and `libX.so.<major>`, the SONAME the loader looks up). The two
+names of a library are byte-identical copies — so the payload is the 10 unique libraries:
+**28.9 MB** of unique content, ≈14.5 MB in the object store (shared libraries compress to about
+half), not the 57.8 MB the working tree appears to hold.
 
 Consequences worth knowing:
 
@@ -80,6 +80,12 @@ Consequences worth knowing:
   `git status` shows the changed `.so` files plus the updated stamp. Commit them together if
   the refresh was intended; otherwise `git checkout -- native/app/entry/libs
   native/third_party/ffmpeg/build-stamp-*.txt`.
+- **`abiFilters` decides what gets *compiled*, not what gets *packaged*.** Verified on
+  2026-09-18 with a scratch build: a module target configured for `abiFilters: ["arm64-v8a"]`
+  only built that ABI, but hvigor still packaged every `libs/<abi>/` directory that existed on
+  disk — so the emulator libs would have ridden along into a "phone-only" package. The release
+  workflow therefore moves `libs/x86_64` aside before building the arm64 product, and
+  `scripts/verify_hap_ffmpeg.sh` fails the release if an unexpected ABI payload is present.
 - **LGPL-2.1+ compliance is unchanged and now more auditable.** The binaries are committed
   next to the *complete corresponding source* they were built from, and the stamp pins the
   exact source tree and build script — so the "how was this binary produced" question is
@@ -128,9 +134,10 @@ So both `libavcodec.so` (for `-lavcodec`) and `libavcodec.so.61` (for the loader
 files: **HAP packaging does not preserve symlinks**, and a symlink would be dropped or
 dereferenced, breaking the load at runtime.
 
-The third copy, `libavcodec.so.61.19.100` (full version), is **not** referenced by any
-`DT_NEEDED` and is dead weight in the HAP. Keep it only if you want the exact build version
-visible in the package; otherwise it can be dropped to save roughly 28 MB across both ABIs.
+The third copy FFmpeg installs — the full version, `libavcodec.so.61.19.100` — is **not**
+referenced by any `DT_NEEDED`, so the build script deliberately does not deploy it: shipping it
+would put a second, identical-size copy of every library into every HAP (28.9 MB across both
+ABIs). If you find such files in `libs/<abi>/` from an older build, they can be deleted safely.
 
 Since these libraries are linked **dynamically** (LGPL-2.1+ compliance), update
 `NOTICE` in this directory whenever the FFmpeg version changes.
