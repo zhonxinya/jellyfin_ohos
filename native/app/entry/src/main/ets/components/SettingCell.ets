@@ -9,6 +9,10 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
  * - 行高由内容决定：四边 16vp 内边距；标题 16fp `text_primary`，副标题 12fp `text_secondary`；
  * - 行本身透明，由调用方把若干 `SettingCell` 装进一张卡片，并用 0.5vp `Divider` 分隔；
  * - 带开关的行不响应整行点击（避免重复触发）；按下态换 `surface_pressed`。
+ *
+ * 可选前置图标（`showIcon` + `icon`，默认关闭）：设置页的"进入某个子页"行一直带图标，
+ * 而各个设置子页的行没有，两块看起来不像同一套；给"点开选择器/进入子页"的行补上图标即可对齐，
+ * 纯开关行保持无图标（否则一列图标反而更吵）。
  */
 @Component
 export struct SettingCell {
@@ -19,6 +23,8 @@ export struct SettingCell {
   @Prop showChevron: boolean = false;
   @Prop showToggle: boolean = false;
   @Prop toggleOn: boolean = false;
+  @Prop showIcon: boolean = false;
+  icon: Resource | null = null;
   onToggle: (value: boolean) => void = () => {};
   onTap: () => void = () => {};
 
@@ -27,7 +33,12 @@ export struct SettingCell {
   }
 
   build() {
-    Row() {
+    Row({ space: 12 }) {
+      if (this.showIcon && this.icon !== null) {
+        SymbolGlyph(this.icon)
+          .fontSize(ThemeConstants.ICON_MEDIUM)
+          .fontColor([this.colors().brandPrimary])
+      }
       Column({ space: 4 }) {
         Text(this.title)
           .fontSize(ThemeConstants.TITLE_MEDIUM)

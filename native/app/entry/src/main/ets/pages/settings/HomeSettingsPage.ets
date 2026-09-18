@@ -449,6 +449,8 @@ struct HomeSettingsPage {
               title: '「最新添加」里隐藏',
               subtitle: '这些媒体库的新内容不出现在首页「最新添加」',
               valueText: this.selectionSummary(this.latestExcludes, '全部显示'),
+              showIcon: true,
+              icon: $r('sys.symbol.doc_text'),
               showChevron: true,
               onTap: () => {
                 this.sheet = SHEET_LATEST;
@@ -459,6 +461,8 @@ struct HomeSettingsPage {
               title: '「我的媒体」里隐藏',
               subtitle: '这些媒体库不出现在「我的媒体」区域',
               valueText: this.selectionSummary(this.myMediaExcludes, '全部显示'),
+              showIcon: true,
+              icon: $r('sys.symbol.square_grid_2x2'),
               showChevron: true,
               onTap: () => {
                 this.sheet = SHEET_MYMEDIA;
@@ -469,6 +473,8 @@ struct HomeSettingsPage {
               title: '合并显示的媒体库',
               subtitle: '把多个媒体库合并成一个入口（如"电影"与"4K 电影"）',
               valueText: this.selectionSummary(this.groupedFolders, '不合并'),
+              showIcon: true,
+              icon: $r('sys.symbol.circle_grid_2x2'),
               showChevron: true,
               onTap: () => {
                 this.sheet = SHEET_GROUPED;
