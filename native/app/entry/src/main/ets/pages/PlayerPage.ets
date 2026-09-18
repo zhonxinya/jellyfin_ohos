@@ -5,6 +5,7 @@ import window from '@ohos.window';
 import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
 import avSession from '@ohos.multimedia.avsession';
+import { PiPWindow } from '@kit.ArkUI';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -317,6 +318,18 @@ struct PlayerPage {
   private surfaceId: string = '';
   /** XComponent 控制器：surface 就绪后用它拿到 surfaceId（软解 EGL 渲染与 AVPlayer 共用） */
   private surfaceController: XComponentController = new XComponentController();
+
+  // ─────────────────────────── 画中画（PiP）───────────────────────────
+  /**
+   * PiP 控制器（`@ohos.PiPWindow`）。
+   *
+   * 为什么用系统画中画而不是自己画小窗：画中画的价值是"退到桌面/切到别的应用后还能看"，
+   * 这必须由窗口管理器提供小窗能力，应用侧只负责把视频画面挂上去。
+   * 用系统视频模板（`VIDEO_PLAY`）还能白拿小窗里的播放/暂停控件与"一键回全屏"。
+   */
+  private pipController: PiPWindow.PiPController | null = null;
+  /** 画中画是否已启动（按钮选中态、二次点击退出） */
+  @State private pipActive: boolean = false;
   /** XComponent 组件像素尺寸（vp → px），用于 EGL 缓冲几何 */
   private surfaceWidthPx: number = 0;
   private surfaceHeightPx: number = 0;
@@ -435,6 +448,9 @@ struct PlayerPage {
 
   onPageHide(): void {
     this.stopTouchPollTimer();
+    // 离开播放页（后台/切页）不主动退小窗：画中画的意义正是"离开页面还能看"；
+    // 但组件真正销毁时必须收掉，否则会留下一个孤儿小窗（见 aboutToDisappear）。
+
     // 页面切到后台：恢复系统亮度与常亮设置，避免把"播放页的窗口亮度"带到其它界面
     this.releaseWindowOverrides();
     // 同时退出沉浸式全屏并还原方向：用户已经在看别的界面（甚至别的应用），
@@ -460,6 +476,9 @@ struct PlayerPage {
   }
 
   aboutToDisappear(): void {
+    // 页面销毁必须退出画中画：小窗与页面共用同一个 XComponent surface，
+    // 页面没了小窗就成了孤儿（系统也会因此报错）
+    this.stopPiP();
     // 离开播放页必须停掉软解会话（解码线程 + 取流都要释放）
     this.stopSoftPlay();
     if (this.timerId >= 0) {
@@ -519,6 +538,92 @@ struct PlayerPage {
   private revealControls(): void {
     this.showControls = true;
     this.scheduleHideControls();
+  }
+
+  // ─────────────────────────── 画中画 ───────────────────────────
+
+  /**
+   * 进入/退出画中画。
+   *
+   * 系统契约（`@ohos.PiPWindow`）：
+   * 1. `isPiPEnabled()` 为 false 时**不要**尝试创建 —— 它表示系统里本应用的画中画开关没开
+   *    （设置 → 应用 → 画中画），此时 `create()` 会直接失败。这里先判定并告诉用户去哪打开，
+   *    而不是抛一个看不懂的错误码。
+   * 2. `create()` 需要**视频画面所在的那个 `XComponentController`**：系统会把该 XComponent 的
+   *    surface 搬进小窗继续渲染 —— 所以播放不会中断，也不需要重开播放器或重新取流。
+   * 3. 退出走 `stopPiP()`；`stateChange` 回调同步本地状态，避免按钮态与真实窗口不一致。
+   */
+  private async togglePiP(): Promise<void> {
+    if (this.pipActive) {
+      await this.stopPiP();
+      return;
+    }
+    if (!PiPWindow.isPiPEnabled()) {
+      this.setSoftNotice('系统未开启画中画：请到「设置 → 应用 → 本应用 → 画中画」打开后重试', true);
+      return;
+    }
+    if (this.surfaceId.length === 0) {
+      this.setSoftNotice('视频画面尚未就绪，暂时无法进入画中画', false);
+      return;
+    }
+    try {
+      const config: PiPWindow.PiPConfiguration = {
+        context: getContext(this) as common.UIAbilityContext,
+        componentController: this.surfaceController,
+        templateType: PiPWindow.PiPTemplateType.VIDEO_PLAY
+      };
+      this.pipController = await PiPWindow.create(config);
+      this.pipController.on('stateChange', (state: PiPWindow.PiPState, reason: string) => {
+        if (state === PiPWindow.PiPState.STARTED) {
+          this.pipActive = true;
+          this.syncPiPControls();
+        } else if (state === PiPWindow.PiPState.STOPPED) {
+          this.pipActive = false;
+        } else if (state === PiPWindow.PiPState.ERROR) {
+          this.pipActive = false;
+          this.setSoftNotice(`画中画出错：${reason}`, false);
+        }
+      });
+      await this.pipController.startPiP();
+      this.pipActive = true;
+      // 小窗里的系统控件要反映"当前在播还是暂停"，否则图标与实际状态相反
+      this.syncPiPControls();
+    } catch (err) {
+      const e: BusinessError = err as BusinessError;
+      this.pipActive = false;
+      this.pipController = null;
+      this.setSoftNotice(`进入画中画失败（code=${e.code}）`, false);
+    }
+  }
+
+  /** 退出画中画：离开播放页/退出应用前也要调（避免留下一个孤儿小窗） */
+  private async stopPiP(): Promise<void> {
+    const controller: PiPWindow.PiPController | null = this.pipController;
+    this.pipController = null;
+    this.pipActive = false;
+    if (controller === null) {
+      return;
+    }
+    try {
+      controller.off('stateChange');
+      await controller.stopPiP();
+    } catch (err) {
+      // 小窗可能已被系统关闭：忽略
+    }
+  }
+
+  /** 把播放/暂停状态同步给小窗控件 */
+  private syncPiPControls(): void {
+    if (this.pipController === null) {
+      return;
+    }
+    try {
+      this.pipController.updatePiPControlStatus(
+        PiPWindow.PiPControlType.VIDEO_PLAY_PAUSE,
+        this.isPlaying ? PiPWindow.PiPControlStatus.PLAY : PiPWindow.PiPControlStatus.PAUSE);
+    } catch (err) {
+      // 同步失败不影响播放
+    }
   }
 
   // ─────────────────────────── 画面比例 ───────────────────────────
@@ -2831,6 +2936,16 @@ struct PlayerPage {
           selected: this.playbackSpeed !== 1,
           onTap: () => {
             this.cycleSpeed();
+          }
+        })
+          .margin({ left: 4, right: 4, top: 4 })
+        // 画中画：退到桌面/切应用后继续看（系统小窗 + 系统播放控件）
+        PlayerToolButton({
+          icon: $r('sys.symbol.circle_grid_2x2'),
+          label: this.pipActive ? '退出小窗' : '画中画',
+          selected: this.pipActive,
+          onTap: () => {
+            this.togglePiP();
           }
         })
           .margin({ left: 4, right: 4, top: 4 })
