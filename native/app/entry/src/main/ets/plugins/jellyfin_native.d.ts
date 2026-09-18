@@ -142,6 +142,22 @@ declare module 'libjellyfin_native.so' {
     librarySetCoverFromUrl(itemId: string, imageType: string, imageUrl: string): string;
     /** 删除封面；`imageIndex` 传 -1 表示按类型整组删除 */
     libraryDeleteCover(itemId: string, imageType: string, imageIndex: number): string;
+    /**
+     * 服务器级元数据设置模型：
+     * `data = { config: <整份 ServerConfiguration>, savers: [{name,enabled,partial}],
+     *           itemTypes: [{type, configured, metadataFetchers:[{name,enabled}], imageFetchers:[…]}] }`
+     *
+     * `config` 用 `libraryUpdateServerConfig()` 回传：元数据抓取器存在
+     * `ServerConfiguration.MetadataOptions` 里，keyed 路由对该段是 404。
+     */
+    libraryMetadataSettings(): string;
+    /**
+     * 读某一段命名配置（`GET /System/Configuration/{key}`）。
+     * key 由调用方写死（例如 NFO 用 `xbmcmetadata`）；`/System/Configuration/nfo` 实测 404。
+     */
+    libraryNamedConfig(key: string): string;
+    /** 整体替换某一段命名配置（只替换这一段，不动整份 ServerConfiguration） */
+    libraryUpdateNamedConfig(key: string, configJson: string): string;
     setPreference(key: string, value: string): string;
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;

@@ -80,3 +80,52 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 `/Library/VirtualFolders` 那个管理员端点不同）。`OrderedViews` 允许只列一部分视图
 （没列到的按默认顺序排在后面），所以界面会先把它与当前视图列表对齐再显示；
 "有未保存的修改"也以对齐后的顺序为基线判断，避免一进页面就报脏。
+
+## 服务器级的三页：媒体库显示 / 媒体库元数据 / NFO 设置
+
+「设置 → 控制台 → 媒体库」下面这三页改的都是**服务器级**配置（影响所有用户与所有客户端）：
+
+| 页面 | 服务端存储 | 读写端点 | 语义 |
+| --- | --- | --- | --- |
+| 媒体库显示 | `ServerConfiguration`（显示方式 / 图片落盘 / 扫描并发 / 监控延迟） | `GET/POST /System/Configuration` | 整份替换 |
+| 媒体库元数据 | `ServerConfiguration.MetadataOptions[]` | 同左（整份） | 整份替换，但只有这一段会变 |
+| NFO 设置 | `XbmcMetadataOptions`（key = `xbmcmetadata`） | `GET/POST /System/Configuration/xbmcmetadata` | 只替换这一段 |
+
+### 命名配置的 key 别猜，实测为准
+
+`/System/Configuration/{key}` 只认 `ServerConfiguration` 上**带配置键的那几个属性**，
+名字与属性名并不总是一致：
+
+```
+GET /System/Configuration/metadata          -> 200 {"UseFileCreationTimeForDateAdded":true}
+                                               （这是 MetadataConfiguration，不是抓取器配置）
+GET /System/Configuration/metadataoptions   -> 404
+GET /System/Configuration/nfo               -> 404
+GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"SaveImagePathsInNfo":…}
+```
+
+所以：
+
+- **元数据抓取器**（`ServerConfiguration.MetadataOptions`）**没有**可用的 keyed 路由，
+  只能整份读写 `GET/POST /System/Configuration`；好在整份 GET → 原样 POST 的往返实测逐字节相同
+  （45 个字段），只改一段是安全的；
+- **NFO 设置**用 `xbmcmetadata`。本工程原来把它写成 `/System/Configuration/nfo`，点进去只有一句
+  "此管理页面未开放该配置路径"（key 既不在 NAPI/页面的白名单里，服务端也不认）。
+
+### 元数据页的两个细节
+
+- 服务端**没有**"一次拿到所有条目类型可选项"的端点：`GetRepresentativeItemTypes(null)`
+  只返回 `Series/Season/Episode/Movie`。所以这一页按内容类型各查一次
+  `GET /Libraries/AvailableOptions`（8 次，在原生侧同一个后台线程里串行做完）再合并；
+  合并逻辑是纯函数 `buildMetadataSettingsModel`，有主机单测；
+- `MetadataOptions` 存的是**禁用列表**（+ 顺序列表）；某个条目类型**没有条目**时，
+  服务端的"当前启用"要用 `AvailableOptions` 给的 `DefaultEnabled`（它正是服务端按全局配置算出的值）。
+  界面两种来源按同一口径显示，所以"还没写过配置"不会被显示成"全都没启用"。
+
+### 设备实测
+
+| 项目 | 证据 |
+| --- | --- |
+| 媒体库元数据页 | 恒等保存后整份 `/System/Configuration` 逐字节相同；取消「电影」的一个元数据下载器并保存 → 整份配置里**只有 `MetadataOptions`** 段变化，该类型的 `DisabledMetadataFetchers` 恰好多一项；复原后零差异 |
+| NFO 设置页 | 页面读到真实值（`ReleaseDateFormat=yyyy-MM-dd` 等）而不是 404；恒等保存后这一段逐字节相同；切「生成额外缩略图副本」→ 服务端 `EnableExtraThumbsDuplication` 翻转，整份配置里只有 `xbmcmetadata` 段、段内只有这一个字段变化；复原后零差异 |
+

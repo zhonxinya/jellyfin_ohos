@@ -104,6 +104,16 @@ LibraryRequest buildServerConfigurationRequest();
 LibraryRequest buildUpdateServerConfigurationRequest(const nlohmann::json &configuration);
 
 /**
+ * `GET /System/Configuration/{key}` / `POST /System/Configuration/{key}`：按 key 读写某一段配置。
+ *
+ * 比 `POST /System/Configuration`（整体替换整份 ServerConfiguration）安全得多：
+ * 只替换这一段。`key = "metadata"` 就是 `MetadataOptions[]`，`key = "nfo"` 是 NFO 相关选项。
+ */
+LibraryRequest buildNamedConfigurationRequest(const std::string &key);
+LibraryRequest buildUpdateNamedConfigurationRequest(const std::string &key,
+                                                    const nlohmann::json &configuration);
+
+/**
  * `POST /Items/{itemId}/Refresh`：只扫描单个媒体库（媒体库本身就是一个 CollectionFolder 条目）。
  * `metadataRefreshMode` / `imageRefreshMode` 取 `None` / `ValidationOnly` / `FullRefresh`。
  */
@@ -172,6 +182,36 @@ nlohmann::json normalizeServerConfiguration(const nlohmann::json &serverConfig);
  */
 nlohmann::json normalizeAvailableOptions(const nlohmann::json &serverJson);
 
+/**
+ * 服务器级「元数据设置」页的 UI 模型（纯函数，便于主机单测）。
+ *
+ * @param serverConfig `GET /System/Configuration` 的响应（**整份** ServerConfiguration）
+ * @param availableOptionsList 多个 `GET /Libraries/AvailableOptions` 响应的**原始 JSON**：
+ *        10.8 没有"一次拿到全部条目类型"的端点（`GetRepresentativeItemTypes(null)` 只给
+ *        Series/Season/Episode/Movie），所以客户端按内容类型各查一次再合并
+ *        （见 `metadataContentTypes()`）。
+ *
+ * ⚠️ 为什么读写都走整份 ServerConfiguration 而不是 `/System/Configuration/{key}`：
+ * 实测 `GET /System/Configuration/metadataoptions` 是 **404**（keyed 路由只认
+ * `ServerConfiguration` 上带配置键的那几个属性，`metadata` 这个键返回的是
+ * `MetadataConfiguration`，也就是只有 `UseFileCreationTimeForDateAdded` 的那个对象）。
+ * 元数据抓取器配置存在 `ServerConfiguration.MetadataOptions` 里，只能用整份配置读写；
+ * 好在整份 GET → 原样 POST 的往返实测逐字节相同（45 个字段），只改一段是安全的。
+ *
+ * 返回：
+ * - `config`：补齐 `MetadataOptions[]` 各条目数组字段后的**整份 ServerConfiguration**（可原样回传）；
+ * - `savers`：`[{ name, enabled, partial }]` —— 保存器是"按条目类型禁用"的，
+ *   某个类型禁用了就 `partial`（界面据此提示，而不是假装没有中间状态）；
+ * - `itemTypes`：`[{ type, metadataFetchers: [{name, enabled}], imageFetchers: [...] }]`，
+ *   `enabled` 的算法与服务端一致：**该类型有条目**看 `Disabled*Fetchers`，
+ *   **没有条目**就用 `AvailableOptions` 给的 `defaultEnabled`（它正是服务端按全局配置算出的当前值）。
+ */
+nlohmann::json buildMetadataSettingsModel(const nlohmann::json &serverConfig,
+                                          const nlohmann::json &availableOptionsList);
+
+/** 为上面那个模型要查询的内容类型（顺序即界面顺序）。 */
+const std::vector<std::string> &metadataContentTypes();
+
 /// @}
 /// @name 执行（实现在 `library_admin_client.cpp`，因为依赖 `JellyfinApiClient`）
 /// @{
@@ -191,6 +231,13 @@ ApiResult getVirtualFolders(JellyfinApiClient &client);
  * （服务端 `LocalizationManager` 就是按三字母码匹配的，见 `GetCultures` 的消费点）。
  */
 ApiResult getLocalization(JellyfinApiClient &client);
+
+/**
+ * 服务器级「元数据设置」：`GET /System/Configuration/metadata` +
+ * 按 `metadataContentTypes()` 各查一次 `AvailableOptions` 再合并成 UI 模型
+ * （形状见 `buildMetadataSettingsModel`）。这一层放在 core 里，页面就只负责展示。
+ */
+ApiResult getMetadataSettings(JellyfinApiClient &client);
 
 /// @}
 

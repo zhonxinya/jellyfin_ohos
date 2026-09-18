@@ -632,6 +632,41 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * 服务器级元数据设置：`{ config, savers, itemTypes }`。
+   * `config` 是**整份** ServerConfiguration（可原样交给 `libraryUpdateServerConfig`）——
+   * 元数据抓取器配置存在 `ServerConfiguration.MetadataOptions` 里，而 keyed 路由
+   * `/System/Configuration/metadataoptions` 实测 404，所以只能整份读写。
+   */
+  static async libraryMetadataSettings(): Promise<string> {
+    try {
+      return await jellyfinNative.libraryMetadataSettings();
+    } catch (error) {
+      return JellyfinNative.fail('libraryMetadataSettings', error);
+    }
+  }
+
+  /**
+   * 读某一段命名配置（`GET /System/Configuration/{key}`）。
+   * key 用写死的常量（NFO 段是 `xbmcmetadata`；`nfo` 这个 key 实测 404）。
+   */
+  static async libraryNamedConfig(key: string): Promise<string> {
+    try {
+      return await jellyfinNative.libraryNamedConfig(key);
+    } catch (error) {
+      return JellyfinNative.fail('libraryNamedConfig', error);
+    }
+  }
+
+  /** 整体替换某一段命名配置（`POST /System/Configuration/{key}`，只替换这一段） */
+  static async libraryUpdateNamedConfig(key: string, configJson: string): Promise<string> {
+    try {
+      return await jellyfinNative.libraryUpdateNamedConfig(key, configJson);
+    } catch (error) {
+      return JellyfinNative.fail('libraryUpdateNamedConfig', error);
+    }
+  }
+
   static setPreference(key: string, value: string): string {
     try {
       return jellyfinNative.setPreference(key, value);

@@ -2782,6 +2782,59 @@ napi_value LibraryServerConfig(napi_env env, napi_callback_info /*info*/)
     });
 }
 
+napi_value LibraryMetadataSettings(napi_env env, napi_callback_info /*info*/)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    return RunAsync(env, []() {
+        return FromApi(jellyfin::api::getMetadataSettings(Api())).dump();
+    });
+}
+
+napi_value LibraryNamedConfig(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string key;
+    ReadStringArg(env, info, 0, key);
+    if (key.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "configuration key is required"));
+    }
+    // key 由本工程自己写死（`xbmcmetadata` 等），不接受页面传入任意字符串：
+    // 走的是 `/System/Configuration/{key}`，key 会拼进路径
+    if (key.find('/') != std::string::npos || key.find("..") != std::string::npos) {
+        return ToNapiJson(env, MakeResult(false, 400, "invalid configuration key"));
+    }
+    return RunAsync(env, [key]() {
+        return RunLibraryRequest(jellyfin::api::buildNamedConfigurationRequest(key));
+    });
+}
+
+napi_value LibraryUpdateNamedConfig(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string key;
+    nlohmann::json configuration;
+    ReadStringArg(env, info, 0, key);
+    if (key.empty() || key.find('/') != std::string::npos || key.find("..") != std::string::npos) {
+        return ToNapiJson(env, MakeResult(false, 400, "invalid configuration key"));
+    }
+    if (!ReadJsonArg(env, info, 1, configuration) || !configuration.is_object()) {
+        return ToNapiJson(env, MakeResult(false, 400, "configuration JSON is required"));
+    }
+    return RunAsync(env, [key, configuration]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildUpdateNamedConfigurationRequest(key, configuration));
+    });
+}
+
 napi_value LibraryUpdateServerConfig(napi_env env, napi_callback_info info)
 {
     const nlohmann::json guard = RequireAdmin();
@@ -3106,6 +3159,12 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"libraryServerConfig", nullptr, LibraryServerConfig, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"libraryUpdateServerConfig", nullptr, LibraryUpdateServerConfig, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryMetadataSettings", nullptr, LibraryMetadataSettings, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryNamedConfig", nullptr, LibraryNamedConfig, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"libraryUpdateNamedConfig", nullptr, LibraryUpdateNamedConfig, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"setPreference", nullptr, SetPreference, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPreferences", nullptr, GetPreferences, nullptr, nullptr, nullptr, napi_default,
