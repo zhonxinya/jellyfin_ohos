@@ -81,12 +81,15 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 （没列到的按默认顺序排在后面），所以界面会先把它与当前视图列表对齐再显示；
 "有未保存的修改"也以对齐后的顺序为基线判断，避免一进页面就报脏。
 
-## 服务器级的几页：媒体库显示 / 媒体库元数据 / NFO 设置 / 继续观看
+## 服务器级的几页
 
 「设置 → 控制台」下面这几页改的都是**服务器级**配置（影响所有用户与所有客户端）：
 
 | 页面 | 服务端存储 | 读写端点 | 语义 |
 | --- | --- | --- | --- |
+| 常规设置 | `ServerConfiguration` 顶层（服务器名 / 语言 / 元数据目录 / 日志保留 / 慢响应告警 …） | `GET/POST /System/Configuration` | 整份替换，只改列出的字段 |
+| 网络 | `NetworkConfiguration`（key = `network`） | `GET/POST /System/Configuration/network` | 只替换这一段 |
+| 转码 | `EncodingOptions`（key = `encoding`） | `GET/POST /System/Configuration/encoding` | 只替换这一段 |
 | 媒体库显示 | `ServerConfiguration`（显示方式 / 图片落盘 / 扫描并发 / 监控延迟） | `GET/POST /System/Configuration` | 整份替换 |
 | 媒体库元数据 | `ServerConfiguration.MetadataOptions[]` | 同左（整份） | 整份替换，但只有这一段会变 |
 | NFO 设置 | `XbmcMetadataOptions`（key = `xbmcmetadata`） | `GET/POST /System/Configuration/xbmcmetadata` | 只替换这一段 |
@@ -103,6 +106,25 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 > 原来还有一条「Trickplay」指向 `/System/Configuration/trickplay` —— 实测 `trickplay` 与
 > `trickplayoptions` **都是 404**，点进去只有一句报错；而 Trickplay（拖动预览缩略图）是 Web 特性，
 > 本应用播放器不使用。与其留一条打不开的入口，不如去掉（要改在 Web 控制台的播放页里配）。
+
+### 被删掉的三个页面：字段名写错 = 改了没效果
+
+这三页都是"看起来能改、实际写不进去"的形态，已连同入口/页面一起删掉：
+
+| 页面 | 问题 |
+| --- | --- |
+| `StreamingPage`（标题「流媒体」） | 读的其实是 `/System/Configuration/network`，而且 **4 个字段名在 10.8 里不存在**：`EnableRemoteControl` / `PublicHttpPort` / `InternalHttpPort` / `InternalHttpsPort`（真实字段是 `PublicPort` / `HttpServerPortNumber` / `HttpsPortNumber`，且没有 EnableRemoteControl）。服务端反序列化时静默忽略未知属性，所以界面上改了等于没改。这些内容现在都在「网络」页里，字段名逐个对着 `NetworkConfiguration.cs` 核过 |
+| `TranscodingPage` | 也是 `/System/Configuration/encoding` 的字段编辑器，但只有 7 个字段、含一个不存在的 `AllowAv1Encoding`，而且**缺了最关键的硬件加速类型**。已被「转码」页取代（37 个字段里覆盖 32 个，字段名对着 `EncodingOptions.cs` 核过） |
+| `UsersMetadataPage` | `/System/Configuration/metadata` 的原始键值表（只有 `UseFileCreationTimeForDateAdded` 一个字段），与新的「媒体库元数据」页重复，入口也不再有页面指向它 |
+
+### 写这类页面时的两个坑（都是本轮设备实测踩到的）
+
+1. **`InputType.Number` 会吞掉负号**：`EncodingThreadCount` 的 `-1` 表示"自动"，
+   用数字键盘的输入框显示/回写成 `1`，一保存服务端就从 -1 变成 1（实测）。
+   需要负数或小数的字段（线程数、立体声增益、色调映射的几个 double）必须用 `InputType.Normal` 再自己解析；
+2. **只在服务端确实下发过该字段时才写回**（转码页的 `setIfPresent`）：
+   这样旧/新版本里不存在的字段不会被客户端凭空补一个默认值写回去。
+
 
 ### 命名配置的 key 别猜，实测为准
 
@@ -143,4 +165,7 @@ GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"Sav
 | NFO 设置页 | 页面读到真实值（`ReleaseDateFormat=yyyy-MM-dd` 等）而不是 404；恒等保存后这一段逐字节相同；切「生成额外缩略图副本」→ 服务端 `EnableExtraThumbsDuplication` 翻转，整份配置里只有 `xbmcmetadata` 段、段内只有这一个字段变化；复原后零差异 |
 | 继续观看页 | 页面显示 `MinResumeDurationSeconds=300` 换算成的 5 分钟；恒等保存后整份配置逐字节相同；把最短时长填成 6 分钟 → 服务端 `MinResumeDurationSeconds=360`，整份配置里只有这一个字段变化；复原后零差异 |
 | 品牌页 | 页面读到真实值并显示「与服务器一致」；恒等保存后这一段逐字节相同；切「显示启动画面」→ 服务端 `SplashscreenEnabled` 翻转、这一段里只有这一个字段变化、整份 ServerConfiguration 未被触碰；复原后零差异 |
+| 网络页 | 恒等保存后 `network` 段逐字节相同；切「自动发现」→ 只有 `AutoDiscovery` 变化、整份 ServerConfiguration 未被触碰；「局域网子网」按行填两条 → 服务端数组正好两条；填 99999 端口 → 界面自己拦下（服务端端口仍是 8097）；复原后零差异 |
+| 转码页 | 恒等保存后 `encoding` 段逐字节相同；切「启用限速」→ 只有 `EnableThrottling` 变化；用选择器把硬件加速改成「不启用」→ 服务端 `HardwareAccelerationType` 由 `nvenc` 变成空串、只有这一个字段变化；复原后 37 个字段与原值一致 |
+| 常规设置页 | 14 个字段全部渲染出来且值来自服务端（`UICulture=zh-CN`、`QuickConnectAvailable=true` 等）；恒等保存后整份配置逐字节相同（差异为空） |
 

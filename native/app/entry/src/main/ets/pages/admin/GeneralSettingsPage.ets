@@ -10,12 +10,34 @@ import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
 
 const GENERAL_FIELDS: AdminConfigField[] = [
-  new AdminConfigField('ServerName', '服务器名称', 'text'),
-  new AdminConfigField('UICulture', '界面语言', 'text'),
-  new AdminConfigField('MetadataCountryCode', '元数据国家/地区', 'text'),
-  new AdminConfigField('PreferredMetadataLanguage', '首选元数据语言', 'text'),
-  new AdminConfigField('EnableMetrics', '允许遥测', 'toggle'),
-  new AdminConfigField('EnableExternalContentInSuggestions', '允许推荐中的外部内容', 'toggle')
+  new AdminConfigField('ServerName', '服务器名称', 'text',
+    '客户端登录后看到的服务器名；留空则显示为 "Jellyfin"'),
+  new AdminConfigField('UICulture', '界面语言', 'text',
+    '服务端下发给 Web 客户端的界面语言（例如 zh-CN）；本应用的界面是中文，不受它影响'),
+  new AdminConfigField('PreferredMetadataLanguage', '首选元数据语言', 'text',
+    '全局默认的元数据语言（三字母码，例如 zh / eng）；单个媒体库可以在自己的选项里覆盖'),
+  new AdminConfigField('MetadataCountryCode', '元数据国家/地区', 'text',
+    '全局默认的国家代码（两字母，例如 CN）；影响分级与发行日期等地区字段'),
+  new AdminConfigField('QuickConnectAvailable', '允许快速连接', 'toggle',
+    '让新设备用「快速连接」配对，不必在这台设备上输入密码'),
+  new AdminConfigField('MetadataPath', '元数据目录', 'text',
+    '服务器存放元数据与图片的目录；改动后建议重启服务器'),
+  new AdminConfigField('EnableMetrics', '允许遥测', 'toggle',
+    '是否上报匿名使用数据'),
+  new AdminConfigField('AllowClientLogUpload', '允许客户端上传日志', 'toggle',
+    '允许客户端把本机日志发到服务器，便于排障'),
+  new AdminConfigField('EnableSlowResponseWarning', '慢响应告警', 'toggle',
+    '服务端响应过慢时写一条警告日志'),
+  new AdminConfigField('SlowResponseThresholdMs', '慢响应阈值（毫秒）', 'number',
+    '超过这个耗时才算"慢响应"'),
+  new AdminConfigField('ActivityLogRetentionDays', '活动日志保留（天）', 'number',
+    '超过天数的活动日志会被清理'),
+  new AdminConfigField('LogFileRetentionDays', '日志文件保留（天）', 'number',
+    '超过天数的日志文件会被删除'),
+  new AdminConfigField('EnableExternalContentInSuggestions', '推荐里包含外部内容', 'toggle',
+    '首页推荐里可以出现本服务器之外的内容'),
+  new AdminConfigField('RemoveOldPlugins', '自动删除旧插件', 'toggle',
+    '插件升级后自动删掉旧版本目录')
 ];
 
 @Entry

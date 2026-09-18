@@ -42,7 +42,7 @@ struct AdminHubPage {
         { title: '日志', subtitle: '查看服务器运行日志', icon: 'doc_text', url: 'pages/admin/LogsPage' },
         { title: '活动', subtitle: '查看服务器活动记录', icon: 'clock', url: 'pages/admin/ActivityPage' },
         { title: '常规设置', subtitle: '配置服务器基础选项', icon: 'gearshape', url: 'pages/admin/GeneralSettingsPage' },
-        { title: '网络', subtitle: '配置网络和连接选项', icon: 'wifi', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/network', titleParam: '网络' },
+        { title: '网络', subtitle: '远程访问、端口、HTTPS、局域网与代理', icon: 'wifi', url: 'pages/admin/NetworkSettingsPage' },
         { title: '品牌', subtitle: '启动画面、登录免责声明与自定义 CSS', icon: 'paintpalette', url: 'pages/admin/BrandingSettingsPage' }
       ]
     },
@@ -64,8 +64,15 @@ struct AdminHubPage {
       title: '播放与转码',
       icon: 'play_circle',
       links: [
-        { title: '流媒体', subtitle: '查看流媒体和连接状态', icon: 'video', url: 'pages/admin/StreamingPage' },
-        { title: '转码', subtitle: '配置视频转码参数', icon: 'video', url: 'pages/admin/TranscodingPage' },
+        /*
+         * 原来这里有一条「流媒体」指向 `StreamingPage`，而那个页面读的其实是
+         * `/System/Configuration/network`，字段名还有四个是错的（`EnableRemoteControl` /
+         * `PublicHttpPort` / `InternalHttpPort` / `InternalHttpsPort` —— 10.8 的真实字段是
+         * `PublicPort` / `HttpServerPortNumber` / `HttpsPortNumber`，另外没有 EnableRemoteControl）。
+         * 错的字段名会被服务端静默忽略，等于界面上改了没效果；这些内容现在都在「网络」页里，
+         * 所以那条入口连同页面一起去掉了。
+         */
+        { title: '转码', subtitle: '硬件加速、编码质量、限速、HDR→SDR 与转码路径', icon: 'video', url: 'pages/admin/TranscodingSettingsPage' },
         { title: '播放设置', subtitle: '配置播放和媒体能力', icon: 'play_circle', url: 'pages/admin/PlaybackSettingsPage' },
         // 原来指向 `/System/Configuration`：标题写着"继续观看"，内容却是整份服务器配置的键值表
         { title: '继续观看', subtitle: '续播/已看的百分比与时长阈值、有声书续播', icon: 'arrow_2_circlepath', url: 'pages/admin/ResumeSettingsPage' }

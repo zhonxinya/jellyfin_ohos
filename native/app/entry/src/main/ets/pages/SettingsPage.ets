@@ -658,8 +658,8 @@ export struct SettingsPage {
             this.SectionCard('服务器设置', 'gearshape', [
             { icon: 'display', title: '控制台', subtitle: '服务器信息、数据统计与操作', route: 'pages/admin/AdminHubPage' },
             { icon: 'gearshape', title: '常规', subtitle: '服务器名称、语言、路径与性能限制', route: 'pages/admin/GeneralSettingsPage' },
-            { icon: 'wifi', title: '网络', subtitle: '端口、HTTPS、远程访问与网络发现', route: 'pages/admin/AdminGenericPage', titleParam: '网络', pathParam: '/System/Configuration/Network' },
-            { icon: 'paintpalette', title: '品牌', subtitle: '启动画面、登录声明与自定义 CSS', route: 'pages/admin/AdminGenericPage', titleParam: '品牌', pathParam: '/System/Configuration/Branding' },
+            { icon: 'wifi', title: '网络', subtitle: '远程访问、端口、HTTPS、局域网与代理', route: 'pages/admin/NetworkSettingsPage' },
+            { icon: 'paintpalette', title: '品牌', subtitle: '启动画面、登录免责声明与自定义 CSS', route: 'pages/admin/BrandingSettingsPage' },
             { icon: 'key', title: 'API 密钥', subtitle: '管理 API 访问密钥', route: 'pages/admin/ApiKeysPage' },
             ])
             this.SectionCard('运行状态', 'timer', [
