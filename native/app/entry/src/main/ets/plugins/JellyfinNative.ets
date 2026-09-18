@@ -564,6 +564,24 @@ export class JellyfinNative {
     }
   }
 
+  /** 服务器级媒体库设置：返回已补齐默认值的完整 ServerConfiguration（可原样回传） */
+  static async libraryServerConfig(): Promise<string> {
+    try {
+      return await jellyfinNative.libraryServerConfig();
+    } catch (error) {
+      return JellyfinNative.fail('libraryServerConfig', error);
+    }
+  }
+
+  /** 整体替换服务器配置：`configJson` 必须是 `libraryServerConfig()` 的完整对象 */
+  static async libraryUpdateServerConfig(configJson: string): Promise<string> {
+    try {
+      return await jellyfinNative.libraryUpdateServerConfig(configJson);
+    } catch (error) {
+      return JellyfinNative.fail('libraryUpdateServerConfig', error);
+    }
+  }
+
   static setPreference(key: string, value: string): string {
     try {
       return jellyfinNative.setPreference(key, value);

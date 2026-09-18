@@ -51,7 +51,7 @@ struct AdminHubPage {
       icon: 'video',
       links: [
         { title: '媒体库管理', subtitle: '新建/重命名/删除媒体库，管理媒体路径、扫描与选项', icon: 'folder', url: 'pages/admin/LibrariesAdminPage' },
-        { title: '媒体库显示', subtitle: '设置媒体库显示方式', icon: 'display', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/library', titleParam: '媒体库显示' },
+        { title: '媒体库显示', subtitle: '服务器级：显示方式、图片落盘约定、扫描并发与监控', icon: 'display', url: 'pages/admin/LibraryDisplaySettingsPage' },
         { title: '媒体库原始配置', subtitle: '查看 /Library/VirtualFolders 的原始返回（排障用）', icon: 'folder', url: 'pages/admin/AdminGenericPage', path: '/Library/VirtualFolders', titleParam: '媒体库原始配置' },
         { title: '用户元数据', subtitle: '管理用户媒体元数据', icon: 'doc_text', url: 'pages/admin/UsersMetadataPage' },
         { title: '媒体库元数据', subtitle: '管理媒体库元数据', icon: 'doc_text', url: 'pages/admin/LibrariesMetadataPage' },

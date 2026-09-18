@@ -24,6 +24,7 @@
     "pages/admin/LibrariesAdminPage",
     "pages/admin/LibraryPathsPage",
     "pages/admin/LibraryOptionsPage",
+    "pages/admin/LibraryDisplaySettingsPage",
     "pages/admin/StreamingPage",
     "pages/admin/TranscodingPage",
     "pages/admin/PlaybackSettingsPage",

@@ -19,6 +19,13 @@
 | 扫描单个媒体库 | `POST /Items/{itemId}/Refresh?metadataRefreshMode&imageRefreshMode&replaceAllMetadata&replaceAllImages` | `Jellyfin.Api/Controllers/ItemRefreshController.cs` |
 | 元数据选项数据源 | `GET /Libraries/AvailableOptions?libraryContentType&isNewLibrary` | `LibraryController.GetLibraryOptionsInfo` |
 | 语言/国家数据源 | `GET /Localization/Cultures`、`GET /Localization/Countries` | `LocalizationController.cs` |
+| 服务器级媒体库设置 | `GET /System/Configuration`、`POST /System/Configuration` | `SystemConfigurationController.cs` |
+
+服务器级设置（媒体库显示方式、图片落盘约定、扫描并发与文件监控延迟）在
+「设置 → 控制台 → 媒体库 → 媒体库显示」页（`LibraryDisplaySettingsPage.ets`）。
+它和单个媒体库自己的选项是两回事：前者影响所有库与所有客户端，后者只影响一个库。
+`POST /System/Configuration` 同样是**整体替换**（`ReplaceConfiguration`），
+所以那一页也用"GET 全量 → 只改动过的字段 → POST 全量"的写法。
 
 ## 几个必须按服务端语义来做的点
 
@@ -138,6 +145,7 @@ core/api/library_admin_client.cpp      薄封装：execute() / getVirtualFolders
 | 缺少 ItemId 的库 | 未建过索引的库没有 `ItemId`，界面明确提示"该媒体库缺少 ItemId，无法单独扫描；请用「扫描全部」"，不发无效请求 |
 | 删除 | 临时库删除后服务端列表与界面都不再出现，**原有三个媒体库（含 ItemId 与路径）完好** |
 | 元数据保存器的默认值 | 把某库的 `MetadataSavers` 置空（=沿用全局）后在界面打开开关并保存 → 服务端得到 `["Nfo"]`（服务器默认启用的那项），而不是 `[]` |
+| 服务器级设置页 | 恒等保存后 `/System/Configuration` 的 45 个字段逐字节相同；把 `DisplaySpecialsWithinSeasons` 改成 false 再改回 true，两次都只有这一个字段变化（其它字段零改动） |
 
 > ⚠️ 验收期间这台服务器被跑过一次 `POST /Library/Refresh`（用于让新建的库被索引），
 > 大媒体库的完整扫描会持续较久，属于服务端正常行为。

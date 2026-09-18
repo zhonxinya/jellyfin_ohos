@@ -92,6 +92,18 @@ LibraryRequest buildUpdateLibraryOptionsRequest(const std::string &itemId,
 LibraryRequest buildRefreshLibraryRequest();
 
 /**
+ * `GET /System/Configuration` / `POST /System/Configuration`：**服务器级**的媒体库设置
+ * （媒体库显示方式、图片落盘约定、扫描并发与监控延迟）。
+ *
+ * 与媒体库选项一样是**整体替换**（`SystemConfigurationController.UpdateConfiguration`
+ * → `ReplaceConfiguration`），所以客户端必须 GET 全量、改完再 POST 全量。
+ * 实测这台服务器上 GET → 原样 POST 的往返逐字节相同（45 个字段），
+ * 因此"只改一个字段"的提交不会顺带改坏别的字段。
+ */
+LibraryRequest buildServerConfigurationRequest();
+LibraryRequest buildUpdateServerConfigurationRequest(const nlohmann::json &configuration);
+
+/**
  * `POST /Items/{itemId}/Refresh`：只扫描单个媒体库（媒体库本身就是一个 CollectionFolder 条目）。
  * `metadataRefreshMode` / `imageRefreshMode` 取 `None` / `ValidationOnly` / `FullRefresh`。
  */
@@ -115,6 +127,13 @@ nlohmann::json normalizeVirtualFolder(const nlohmann::json &serverFolder);
 
 /** `GET /Library/VirtualFolders` 的响应 → `VirtualFolderInfo` 数组。 */
 nlohmann::json normalizeVirtualFolders(const nlohmann::json &serverJson);
+
+/**
+ * 服务器级媒体库设置：补齐 UI 会用到的字段的 C# 默认值
+ * （`MediaBrowser.Model/Configuration/ServerConfiguration.cs`），其余字段原样保留 ——
+ * 返回的对象是**可原样回传**的（整体替换语义）。
+ */
+nlohmann::json normalizeServerConfiguration(const nlohmann::json &serverConfig);
 
 /**
  * `GET /Libraries/AvailableOptions` 的响应 → UI 模型
