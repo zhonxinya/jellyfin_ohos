@@ -57,6 +57,12 @@ public void UpdateLibraryOptions(LibraryOptions options) => SaveLibraryOptions(P
 `LibraryOptionSet.isExplicit()` 用来区分"未显式配置"与"显式空列表"，
 界面上对应两个开关：`限制字幕下载语言`、`元数据保存器`。
 
+> 服务端的 `options.xml` 往返有个已知特性：`string[]?` 为 null 时写进 XML 再读回来可能变成空数组
+> （实测这台服务器上几个历史媒体库读出来就是 `MetadataSavers: []`）。
+> 这不是客户端能修的：本客户端按 null 回传，之后服务端重读配置文件时是否物化成 `[]`
+> 由服务端决定；界面在那种情况下会显示"未勾选任何保存器"，用户重新勾选即可。
+> 客户端侧保证的是：**没动过的字段不会被本次保存改写**（见上面的恒等保存验收）。
+
 ### 4. 路径走请求体，不走 query
 
 `AddVirtualFolder` 的 `paths` 是 `[FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))]`——
