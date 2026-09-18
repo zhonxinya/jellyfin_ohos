@@ -95,6 +95,12 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 | NFO 设置 | `XbmcMetadataOptions`（key = `xbmcmetadata`） | `GET/POST /System/Configuration/xbmcmetadata` | 只替换这一段 |
 | 继续观看 | `ServerConfiguration` 顶层五个字段（`MinResumePct` / `MaxResumePct` / `MinResumeDurationSeconds` / `MinAudiobookResume` / `MaxAudiobookResume`） | `GET/POST /System/Configuration` | 整份替换，但只有这几个字段会变 |
 | 品牌 | `BrandingOptions`（key = `branding`） | `GET/POST /System/Configuration/branding` | 只替换这一段 |
+| 播放（服务器） | `ServerConfiguration.RemoteClientBitrateLimit` | `GET/POST /System/Configuration` | 整份替换，只改这一个字段 |
+
+> 「播放」原来是一个 10 字段的通用编辑器，其中 8 个（续播阈值、特别篇显示、合集分组、
+> 文件夹视图、慢响应告警）**已经在各自专页里**：同一个值能在两处改，单位还不一致
+> （这边按秒、「继续观看」页按分钟）。现在只留服务器级的「远程码率上限」，
+> 其余给页面入口指过去，标题也改成如实描述。
 
 > 「继续观看」原来指向 `/System/Configuration`（整份配置的原始键值表），标题写着"继续观看"、
 > 内容是服务器全部配置 —— 既看不懂也改不了。现在按上面五个字段做成表单（最短时长界面按**分钟**填，
@@ -168,4 +174,5 @@ GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"Sav
 | 网络页 | 恒等保存后 `network` 段逐字节相同；切「自动发现」→ 只有 `AutoDiscovery` 变化、整份 ServerConfiguration 未被触碰；「局域网子网」按行填两条 → 服务端数组正好两条；填 99999 端口 → 界面自己拦下（服务端端口仍是 8097）；复原后零差异 |
 | 转码页 | 恒等保存后 `encoding` 段逐字节相同；切「启用限速」→ 只有 `EnableThrottling` 变化；用选择器把硬件加速改成「不启用」→ 服务端 `HardwareAccelerationType` 由 `nvenc` 变成空串、只有这一个字段变化；复原后 37 个字段与原值一致 |
 | 常规设置页 | 14 个字段全部渲染出来且值来自服务端（`UICulture=zh-CN`、`QuickConnectAvailable=true` 等）；恒等保存后整份配置逐字节相同（差异为空） |
+| 播放（服务器）页 | 新页面渲染出「远程播放码率上限」与相关设置入口；恒等保存后整份配置逐字节相同；填 12 → 服务端 `RemoteClientBitrateLimit=12000000`，整份配置只有这一个字段变化；复原后零差异 |
 

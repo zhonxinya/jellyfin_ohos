@@ -73,7 +73,7 @@ struct AdminHubPage {
          * 所以那条入口连同页面一起去掉了。
          */
         { title: '转码', subtitle: '硬件加速、编码质量、限速、HDR→SDR 与转码路径', icon: 'video', url: 'pages/admin/TranscodingSettingsPage' },
-        { title: '播放设置', subtitle: '配置播放和媒体能力', icon: 'play_circle', url: 'pages/admin/PlaybackSettingsPage' },
+        { title: '播放设置', subtitle: '服务器级播放：远程码率上限与相关设置入口', icon: 'play_circle', url: 'pages/admin/PlaybackSettingsPage' },
         // 原来指向 `/System/Configuration`：标题写着"继续观看"，内容却是整份服务器配置的键值表
         { title: '继续观看', subtitle: '续播/已看的百分比与时长阈值、有声书续播', icon: 'arrow_2_circlepath', url: 'pages/admin/ResumeSettingsPage' }
         /*

@@ -652,7 +652,7 @@ export struct SettingsPage {
             this.SectionCard('内容管理', 'folder', [
             { icon: 'folder', title: '媒体库', subtitle: '媒体库管理、显示、元数据与 NFO 设置', route: 'pages/admin/LibrariesAdminPage' },
             { icon: 'person_2', title: '用户', subtitle: '添加和管理服务器用户', route: 'pages/admin/UsersPage' },
-            { icon: 'play_circle', title: '播放', subtitle: '转码、恢复播放、流媒体传输与进度条预览图', route: 'pages/admin/PlaybackSettingsPage' },
+            { icon: 'play_circle', title: '播放', subtitle: '服务器级播放：远程码率上限与相关设置入口', route: 'pages/admin/PlaybackSettingsPage' },
             { icon: 'puzzle', title: '插件', subtitle: '已安装的服务器插件', route: 'pages/admin/PluginsPage' },
             ])
             this.SectionCard('服务器设置', 'gearshape', [
