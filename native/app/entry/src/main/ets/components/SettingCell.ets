@@ -24,6 +24,8 @@ export struct SettingCell {
   @Prop showToggle: boolean = false;
   @Prop toggleOn: boolean = false;
   @Prop showIcon: boolean = false;
+  /** 副标题颜色（空 = 用默认的 text_secondary）；活动记录用它按重要级别着色 */
+  @Prop subtitleColor: string = '';
   icon: Resource | null = null;
   onToggle: (value: boolean) => void = () => {};
   onTap: () => void = () => {};
@@ -46,7 +48,8 @@ export struct SettingCell {
         if (this.subtitle.length > 0) {
           Text(this.subtitle)
             .fontSize(ThemeConstants.META_SMALL)
-            .fontColor(this.colors().textSecondary)
+            .fontColor(this.subtitleColor.length > 0
+              ? this.subtitleColor : this.colors().textSecondary)
             .maxLines(2)
         }
       }

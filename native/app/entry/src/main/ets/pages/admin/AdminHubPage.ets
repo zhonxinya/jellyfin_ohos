@@ -54,7 +54,7 @@ struct AdminHubPage {
         { title: '媒体库显示', subtitle: '服务器级：显示方式、图片落盘约定、扫描并发与监控', icon: 'display', url: 'pages/admin/LibraryDisplaySettingsPage' },
         { title: '媒体库原始配置', subtitle: '查看 /Library/VirtualFolders 的原始返回（排障用）', icon: 'folder', url: 'pages/admin/AdminGenericPage', path: '/Library/VirtualFolders', titleParam: '媒体库原始配置' },
         { title: '媒体库元数据', subtitle: '服务器默认用哪些元数据/图片抓取器与顺序', icon: 'doc_text', url: 'pages/admin/MetadataSettingsPage' },
-        { title: '本地媒体文件夹', subtitle: '查看服务器上有哪些本地媒体目录', icon: 'folder', url: 'pages/admin/LibrariesMetadataPage' },
+        { title: '本地媒体文件夹', subtitle: '看服务器上有哪些本地目录、分别属于哪个媒体库', icon: 'folder', url: 'pages/admin/LibrariesMetadataPage' },
         { title: '元数据原始配置', subtitle: '查看 /System/Configuration/metadata 的原始返回（排障用）', icon: 'doc_text', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/metadata', titleParam: '元数据原始配置' },
         // key 是 `xbmcmetadata`：`/System/Configuration/nfo` 实测 404（曾经写错，点进去只有报错）
         { title: 'NFO 设置', subtitle: 'nfo 的日期格式、图片路径与路径替换', icon: 'doc_text', url: 'pages/admin/NfoSettingsPage' }
