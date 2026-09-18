@@ -89,6 +89,8 @@ export struct ShortVideoPage {
   /** 是否已滑到列表末尾（末尾不再自动循环，给"换一批"入口） */
   @State private reachedEnd: boolean = false;
   private progressTimerId: number = -1;
+  /** 当前这次暂停是否由"切走页签"造成（决定切回时是否自动续播） */
+  private pausedByTabSwitch: boolean = false;
   private skipTimerId: number = -1;
   private lastReportAt: number = 0;
 
@@ -110,9 +112,21 @@ export struct ShortVideoPage {
    */
   onTabIndexChanged(): void {
     if (this.activeTab !== kVideoTabIndex) {
-      this.pausePlayback();
-    } else if (this.avPlayer !== null && this.paused && !this.videoReady) {
-      this.playCurrent();
+      // 只对"因切页签而暂停"做标记：用户自己按暂停的，切回来不该被自动续播
+      if (this.avPlayer !== null && !this.paused) {
+        this.pausePlayback();
+        this.pausedByTabSwitch = true;
+      }
+      return;
+    }
+    // 切回本页：续播（`play()`，**不是** `playCurrent()` —— 后者会从头重开这一条）
+    if (this.pausedByTabSwitch && this.avPlayer !== null) {
+      this.pausedByTabSwitch = false;
+      try {
+        this.avPlayer.play();
+      } catch (err) {
+        // 播放器可能已不可用：下一次滑动会重建
+      }
     }
   }
 
@@ -350,7 +364,9 @@ export struct ShortVideoPage {
         // 播完自动下一条 —— 这是"连续刷"的关键
         this.advance(1);
       } else if (state === 'error') {
-        this.onItemFailed('播放出错');
+        // 实测顺序：`stateChange='error'` 常常先于 `error` 事件到达，此时还拿不到错误码。
+        // 文案因此给"人话 + 下一步"，而不是一个光秃秃的"播放出错"。
+        this.onItemFailed('本机无法播放该内容（可能是硬解不支持）');
       }
     });
     player.on('error', (err: BusinessError) => {
@@ -688,6 +704,18 @@ export struct ShortVideoPage {
     }
     .width('100%')
     .height('100%')
+    // 单击 = 暂停/继续。
+    //
+    // 为什么挂在**页面根节点**而不是"覆盖在 Swiper 之上的整屏透明层"：
+    // 设备实测（模拟器）覆盖层方案只在第一次点击生效，暂停之后点击再也不到回调
+    // （同一 Stack 里条件分支一增删，覆盖层的命中测试就不稳定了）；
+    // 挂在页面根节点上则与页面同生命周期，且**仍在 Swiper 内部** ——
+    // 纵向滑动仍由 Swiper 接管，不会出现"点得着但滑不动"。
+    .onClick(() => {
+      if (index === this.currentIndex) {
+        this.togglePause();
+      }
+    })
   }
 
   build() {
@@ -757,15 +785,6 @@ export struct ShortVideoPage {
           })
           .width('100%')
           .height('100%')
-
-          // 单击画面 = 暂停/继续（与主流短视频一致：单击不切条，滑动才切）
-          Column()
-            .width('100%')
-            .height('100%')
-            .backgroundColor(Color.Transparent)
-            .onClick(() => {
-              this.togglePause();
-            })
 
           // 暂停时的中央提示
           if (this.paused && this.playbackError.length === 0) {
