@@ -116,6 +116,26 @@ core/api/library_admin_client.cpp      薄封装：execute() / getVirtualFolders
 主机单测：`native/core/tests/test_library_admin_api.cpp`
 （已在 `.github/workflows/build.yml` 的 `core-tests` 与 `scripts/force-build.ps1` 中登记）。
 
+## 设备验收记录（模拟器 + 真实 Jellyfin 10.8.12）
+
+| 项目 | 观测到的证据 |
+| --- | --- |
+| 列表显示真实路径 | 卡片刻出 `/vol3/1000/Public/Media/…` 三条，与 `/Library/VirtualFolders` 的 `Locations` 逐条一致（修复前恒为"0 个路径"） |
+| 列表显示封面 | 三个媒体库卡片各渲染出一个 64vp 的 `Image` 节点（该组件只在原生缓存拿到本地文件后才渲染，因此同时证明封面已下载落盘） |
+| 恒等保存 | 打开「媒体库选项」不做任何修改直接保存 → 服务端 `LibraryOptions` 逐字节相同（27 个字段全保留） |
+| 开关往返 | `EnableChapterImageExtraction` false→true→false，服务端两次读数与界面一致，**其它字段零改动** |
+| 网络路径映射 | 在「路径」页写入 `smb://probe/nas-movies` → 服务端 `PathInfos[].NetworkPath` 随之变化，其它字段零改动；清空动作由主机单测覆盖（传空串 → 请求体里 `NetworkPath: null`） |
+| 新建媒体库 | 临时库 `_验收库`（电影 / 一个路径）出现在服务端，`CollectionType=movies`、`Locations` 正确 |
+| 加入 / 移除路径 | 服务端 `Locations` 由 1 条变 2 条再变回 1 条，界面同步显示 |
+| 重命名 | `_验收库` → `_验收库B` → 改回，服务端列表随之变化 |
+| 单库扫描 | 点「扫描 → 扫描新增与变更」后卡片显示「扫描中 N%」，服务端该库 `RefreshStatus=Active`、`RefreshProgress` 有值 |
+| 缺少 ItemId 的库 | 未建过索引的库没有 `ItemId`，界面明确提示"该媒体库缺少 ItemId，无法单独扫描；请用「扫描全部」"，不发无效请求 |
+| 删除 | 临时库删除后服务端列表与界面都不再出现，**原有三个媒体库（含 ItemId 与路径）完好** |
+| 元数据保存器的默认值 | 把某库的 `MetadataSavers` 置空（=沿用全局）后在界面打开开关并保存 → 服务端得到 `["Nfo"]`（服务器默认启用的那项），而不是 `[]` |
+
+> ⚠️ 验收期间这台服务器被跑过一次 `POST /Library/Refresh`（用于让新建的库被索引），
+> 大媒体库的完整扫描会持续较久，属于服务端正常行为。
+
 ## UI 模型
 
 归一化后的 JSON（`data`）形状：
