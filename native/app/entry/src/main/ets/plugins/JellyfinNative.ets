@@ -453,6 +453,21 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * 日志文件正文的结尾一段。
+   *
+   * 服务端 `/System/Logs/Log` 返回**整份文件**且没有 range/tail 支持，
+   * 而一天的文件实测有 15.5 MB —— 所以原生侧只把结尾 `keepTailBytes` 字节交过来
+   * （`data = { text, truncated, totalBytes }`）。
+   */
+  static async adminGetLogText(name: string, keepTailBytes: number): Promise<string> {
+    try {
+      return await jellyfinNative.adminGetLogText(name, keepTailBytes);
+    } catch (error) {
+      return JellyfinNative.fail('adminGetLogText', error);
+    }
+  }
+
   static async adminGenericPost(path: string, bodyJson: string): Promise<string> {
     try {
       return await jellyfinNative.adminGenericPost(path, bodyJson);

@@ -105,6 +105,12 @@ declare module 'libjellyfin_native.so' {
     adminListTasks(): string;
     adminGetSystemInfo(): string;
     adminGenericGet(path: string): string;
+    /**
+     * 日志文件正文的**结尾**一段（服务端返回整份文件、没有 range/tail 支持，
+     * 见 `native/core/text_util.h`；一天的文件实测 15.5 MB）。
+     * `data = { text, truncated, totalBytes }`。
+     */
+    adminGetLogText(name: string, keepTailBytes: number): string;
     adminGenericPost(path: string, bodyJson: string): string;
     adminGenericPostNoBody(path: string): string;
     adminGenericDelete(path: string): string;

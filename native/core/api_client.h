@@ -6,6 +6,7 @@
 
 #include "app_version.h"
 
+#include <cstddef>
 #include <string>
 #include <utility>
 
@@ -36,6 +37,16 @@ public:
 
     /** Returns Items array when present, otherwise the root array, else empty array. */
     ApiResult getJsonList(const std::string &path) const;
+
+    /**
+     * 取纯文本响应（`text/plain`，例如日志文件），并只保留**结尾** `keepTailBytes` 字节。
+     *
+     * `data` 的形状：`{ "text": <末尾文本>, "truncated": <是否截断>, "totalBytes": <原始字节数> }`。
+     * 为什么要截尾巴：服务端日志端点返回整份文件且没有 range/tail 支持
+     * （`SystemController.GetLogFile`），一天的文件实测 15.5 MB，
+     * 而看日志只需要最新的那几屏 —— 整份丢给 ArkTS 会白白占内存。
+     */
+    ApiResult getTextTail(const std::string &path, std::size_t keepTailBytes) const;
 
     HttpClient &http() { return http_; }
     const HttpClient &http() const { return http_; }

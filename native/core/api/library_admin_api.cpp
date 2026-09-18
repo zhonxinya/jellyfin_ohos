@@ -342,6 +342,13 @@ LibraryRequest buildUpdateNamedConfigurationRequest(const std::string &key,
                           configuration};
 }
 
+LibraryRequest buildLogFileRequest(const std::string &logFileName)
+{
+    // `?name=` 要编码：日志文件名里有 `.`，也可能有空格甚至中文（服务端按文件名精确匹配）
+    return LibraryRequest{"GET", "/System/Logs/Log?name=" + EncodeQueryComponent(logFileName),
+                          nullptr};
+}
+
 LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::string &metadataRefreshMode,
                                        const std::string &imageRefreshMode, bool replaceAllMetadata,
                                        bool replaceAllImages)

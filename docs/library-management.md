@@ -82,6 +82,17 @@ public void UpdateLibraryOptions(LibraryOptions options) => SaveLibraryOptions(P
 `RemoveMediaPath` 只能走 query，`EncodeQueryComponent` 会把 `/` 编成 `%2F`——
 ASP.NET Core 的 query 解析会把它解码回 `/`，实测可用（见主机单测里的字面量断言）。
 
+### 5b. 空格要编成 `%20`，不要编成 `+`
+
+`EncodeQueryComponent` 原来把空格编成 `+`（表单编码的习惯）。但 Jellyfin 跑在 ASP.NET Core 上，
+它的 **query** 解析（`QueryStringEnumerable` → `Uri.UnescapeDataString`）**不**把 `+` 当空格 ——
+那是 `application/x-www-form-urlencoded` 请求体的规则。也就是说 `?name=a+b` 到服务端就是字面量
+`a+b`，带空格的名字/路径/搜索词永远匹配不上。
+
+改成 `%20` 之后两种解释下都对（会把 `+` 当空格的解码器同样认 `%20`），所以这是**严格更安全**的写法。
+影响面：媒体库名与路径、搜索词、日志文件名，以及路径里的 userId 等一切走 query 的入参；
+主机单测里对应的字面量断言（`我的 电影&剧` → `%20`、`/media/a b` → `%20`、`u ser/1` → `u%20ser%2F1`）一并更新。
+
 ### 5. 只有 `Paths/Update` 能改网络路径
 
 `LibraryManager.UpdateMediaPath` 是按 `PathInfo.Path` 去匹配已有条目、**只赋值 `NetworkPath`**，

@@ -121,6 +121,23 @@ LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::str
                                        const std::string &imageRefreshMode, bool replaceAllMetadata,
                                        bool replaceAllImages);
 
+/// @name 服务器日志（`SystemController`）
+/// @{
+
+/**
+ * `GET /System/Logs/Log?name=<日志文件名>`：某个日志文件的**全文**
+ * （`SystemController.GetLogFile`，`text/plain`）。
+ *
+ * 三个服务端事实决定了这一块怎么做：
+ * - 返回的是**整份文件**，而且服务端**没有** range/tail 端点
+ *   （`File(stream, "text/plain")` 不带 `enableRangeProcessing`，响应里也没有 `Accept-Ranges`）；
+ * - 文件不小：本机实测 `log_YYYYMMDD.log` 一天就有 15.5 MB；
+ * - 所以客户端只把**结尾**一段（`TailBytes`）交给界面，看日志本来就是看最新的那几屏。
+ */
+LibraryRequest buildLogFileRequest(const std::string &logFileName);
+
+/// @}
+
 /// @name 媒体库封面（`ImageController` / `RemoteImageController`）
 /// @{
 
