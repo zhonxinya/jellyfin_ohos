@@ -14,6 +14,7 @@ import {
 import { PageHeader } from '../../components/PageHeader';
 import { LoadingState } from '../../components/LoadingState';
 import { EmptyState } from '../../components/EmptyState';
+import { JellyfinImage } from '../../components/JellyfinImage';
 
 /** 每个媒体库卡片上的操作（对应服务端 LibraryStructureController 的各个端点） */
 class LibraryAction {
@@ -356,28 +357,59 @@ struct LibrariesAdminPage {
   @Builder
   LibraryCard(folder: LibraryEntry) {
     Column({ space: 8 }) {
-      Row() {
-        Text(collectionTypeLabel(folder.collectionType))
-          .fontSize(ThemeConstants.LABEL_SMALL)
-          .fontColor(this.colors().onBrand)
-          .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-          .backgroundColor(collectionTypeColor(folder.collectionType, this.colors().brandPrimary,
-            this.colors().onSurfaceVariant))
-          .borderRadius(6)
-          .maxLines(1)
-        Text(folder.name)
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().textPrimary)
-          .layoutWeight(1)
-          .margin({ left: 8 })
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(`${folder.locations.length} 个路径`)
-          .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().textSecondary)
+      Row({ space: 10 }) {
+        // 封面：媒体库自己设过图才有（PrimaryImageItemId），没有就渲染首字占位块
+        if (folder.coverUrl.length > 0) {
+          JellyfinImage({
+            url: folder.coverUrl,
+            imgWidth: 64,
+            imgHeight: 64,
+            cornerRadius: 8,
+            placeholderIcon: 'folder'
+          })
+        } else {
+          Text(folder.name.length > 0 ? folder.name.substring(0, 1) : '库')
+            .fontSize(ThemeConstants.TITLE_LARGE)
+            .fontColor(this.colors().onBrand)
+            .width(64)
+            .height(64)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(collectionTypeColor(folder.collectionType, this.colors().brandPrimary,
+              this.colors().onSurfaceVariant))
+            .borderRadius(8)
+        }
+
+        Column({ space: 4 }) {
+          Row() {
+            Text(collectionTypeLabel(folder.collectionType))
+              .fontSize(ThemeConstants.LABEL_SMALL)
+              .fontColor(this.colors().onBrand)
+              .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+              .backgroundColor(collectionTypeColor(folder.collectionType, this.colors().brandPrimary,
+                this.colors().onSurfaceVariant))
+              .borderRadius(6)
+              .maxLines(1)
+            Text(folder.name)
+              .fontSize(ThemeConstants.BODY_MEDIUM)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.colors().textPrimary)
+              .layoutWeight(1)
+              .margin({ left: 8 })
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+
+          Text(`${folder.locations.length} 个路径`)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
+            .width('100%')
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
       }
       .width('100%')
+      .alignItems(VerticalAlign.Center)
 
       if (folder.locations.length > 0) {
         Column({ space: 4 }) {

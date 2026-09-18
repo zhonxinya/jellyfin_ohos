@@ -1,4 +1,5 @@
 import { JsonUtil } from './JsonUtil';
+import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 
 /**
  * 媒体库管理（设置 → 媒体库）的 UI 模型。
@@ -383,12 +384,36 @@ export class LibraryEntry {
   refreshProgress: number = 0;
   hasPrimaryImage: boolean = false;
   primaryImageItemId: string = '';
+  /** 封面图地址（解析时算一次；拿不到就是空串，卡片退回字母占位块） */
+  coverUrl: string = '';
   options: LibraryOptionSet = new LibraryOptionSet(null);
 
   /** 列表 key：优先 ItemId，缺失时退回库名（虚拟文件夹名在服务器上唯一） */
   key(): string {
     return this.itemId.length > 0 ? this.itemId : this.name;
   }
+}
+
+/**
+ * 媒体库封面地址。
+ *
+ * 服务端的 `VirtualFolderInfo.PrimaryImageItemId` 只在**该媒体库自己设置过图片**时才有值，
+ * 所以这里用它而不用 `ItemId`：没有封面时返回空串，卡片渲染字母占位块，
+ * 而不是发一个必然 404 的请求（JellyfinImage 对失败会显示占位图标，但白跑一次网络不好）。
+ *
+ * 返回的 `getImageUrl` 是 JSON（`{ ok, data: { url } }`），必须解出来 ——
+ * 直接把 JSON 串当 URL 传下去会让取图失败（`DetailPage.personImageUrl` 就是这个问题，另案处理）。
+ */
+function buildCoverUrl(primaryImageItemId: string): string {
+  if (primaryImageItemId.length === 0) {
+    return '';
+  }
+  const raw: string = JellyfinNative.getImageUrl(primaryImageItemId, 'Primary', 160, '');
+  const result: NativeResult = JellyfinNative.parseResult(raw);
+  if (!result.ok || result.data === null) {
+    return '';
+  }
+  return JsonUtil.getString(result.data, 'url', '');
 }
 
 function readStringArray(obj: ESObject, key: string): string[] {
@@ -414,6 +439,7 @@ export function parseLibraryEntry(obj: Object): LibraryEntry {
   entry.refreshProgress = JsonUtil.getNumber(src, 'refreshProgress', 0);
   entry.hasPrimaryImage = JsonUtil.getBoolean(src, 'hasPrimaryImage', false);
   entry.primaryImageItemId = JsonUtil.getString(src, 'primaryImageItemId', '');
+  entry.coverUrl = buildCoverUrl(entry.primaryImageItemId);
 
   const infos: Object[] = JsonUtil.getArray(src, 'pathInfos');
   for (let i = 0; i < infos.length; i++) {
