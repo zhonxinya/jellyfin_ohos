@@ -7,6 +7,7 @@ import { LibraryEntry, collectionTypeLabel, parseLibraryEntries } from '../../co
 import { PageHeader } from '../../components/PageHeader';
 import { LoadingState } from '../../components/LoadingState';
 import { EmptyState } from '../../components/EmptyState';
+import { ChipButton } from '../../components/ChipButton';
 
 /** 一行媒体路径：本机路径 + 它的网络路径映射（`MediaPathInfo.NetworkPath`） */
 class PathRow {
@@ -247,24 +248,21 @@ struct LibraryPathsPage {
 
       Row({ space: 8 }) {
         Blank()
-        Text('网络路径')
-          .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().textPrimary)
-          .backgroundColor(this.colors().surfacePressed)
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .borderRadius(ThemeConstants.BADGE_RADIUS)
-          .onClick(() => {
+        ChipButton({
+          label: '网络路径',
+          icon: $r('sys.symbol.externaldrive'),
+          onTap: () => {
             this.requestEdit(row);
-          })
-        Text('移除')
-          .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().onBrand)
-          .backgroundColor(this.colors().errorLight)
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-          .borderRadius(ThemeConstants.BADGE_RADIUS)
-          .onClick(() => {
+          }
+        })
+        ChipButton({
+          label: '移除',
+          icon: $r('sys.symbol.xmark_circle_fill'),
+          tone: 'danger',
+          onTap: () => {
             this.requestRemove(row);
-          })
+          }
+        })
       }
       .width('100%')
     }
