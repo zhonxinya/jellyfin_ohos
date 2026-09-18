@@ -4,7 +4,7 @@
 #
 # 源码位置：native/third_party/ffmpeg/source/ （随仓库提交的 FFmpeg 7.1 原始源码）
 # 产物位置（均随仓库提交，克隆后无需重新编译即可构建）：
-#   native/app/entry/libs/<abi>/*.so            共享库（x86_64 + arm64-v8a，各 5 个库 × 3 个名字）
+#   native/app/entry/libs/<abi>/*.so            共享库（x86_64 + arm64-v8a，各 5 个库 × 2 个名字）
 #   native/third_party/ffmpeg/include/          公开头文件
 #   native/third_party/ffmpeg/build-stamp-<abi>.txt   本次编译的指纹（源码树 + 本脚本），用于跳过无谓重编译
 #
@@ -248,19 +248,20 @@ hls,concat,image2,srt,ass,webvtt_raw,sup,pgs"
     #   third_party/ffmpeg/build-stamp-<abi>.txt → 指纹（随仓库提交；下次构建据此跳过重编译）
     if [ "${FFMPEG_SKIP_DEPLOY:-0}" != "1" ]; then
         mkdir -p "$libs_dir" "$inc_dir"
-        # -L 跟随符号链接，落盘为真实文件；必须同时保留三种名字：
-        #   libX.so（链接用）、libX.so.<major>（**运行时 SONAME**，动态链接器按它查找）、libX.so.<full>
+        # -L 跟随符号链接，落盘为真实文件；只部署**两个**名字：
+        #   libX.so        → 构建期链接用（CMake 的 IMPORTED_LOCATION 指向它）
+        #   libX.so.<major> → **运行时 SONAME**，动态链接器按 DT_NEEDED 里的这个名字查找
+        # 刻意**不**部署 libX.so.<full>（如 libavcodec.so.61.19.100）：它不被任何 DT_NEEDED
+        # 引用，只会在 HAP 里再占一份同样大小的副本（两个 ABI 合计约 29 MB），
+        # 属于纯粹冗余（依据见 native/third_party/README.md 的 readelf 表）。
         for f in libavformat libavcodec libavutil libswscale libswresample; do
             cp -Lf "$prefix/lib/$f.so" "$libs_dir/$f.so"
             local soname
             soname="$(readelf -d "$prefix/lib/$f.so" 2>/dev/null | sed -n 's/.*SONAME.*\[\(.*\)\]/\1/p')"
             if [ -n "$soname" ]; then
                 cp -Lf "$prefix/lib/$soname" "$libs_dir/$soname"
-            fi
-            local ver
-            ver="$(readlink -f "$prefix/lib/$f.so" | xargs -r basename)"
-            if [ -n "$ver" ] && [ "$ver" != "$f.so" ]; then
-                cp -Lf "$prefix/lib/$ver" "$libs_dir/$ver"
+            else
+                echo "警告：$f.so 没有 SONAME，动态链接器将无法按名字找到它" >&2
             fi
         done
         cp -Rf "$prefix/include/." "$inc_dir/"
