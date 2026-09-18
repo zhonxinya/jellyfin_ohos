@@ -2,16 +2,31 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
 #include <native_image/native_image.h>
 #include <native_window/external_window.h>
+#include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 namespace jellyfin {
 namespace player {
 namespace {
+
+/** 当前线程 id（与 hilog 打印的 tid 一致，便于与设备日志对齐排查） */
+uint64_t CurrentThreadId()
+{
+#if defined(__linux__) && defined(SYS_gettid)
+    return static_cast<uint64_t>(syscall(SYS_gettid));
+#else
+    return 0;
+#endif
+}
 
 const char *kVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -117,6 +132,8 @@ bool EglRenderer::init(uint64_t surfaceId, std::string &error, int requestedWidt
         return false;
     }
     nativeWindow_ = window;
+    // 这个 window 是**我们自己**创建的，归我们销毁（区别于 framework 回调交来的 window）
+    windowOwned_ = true;
     // 与官方 XComponent 路径共用同一套初始化，避免两条序列各自演化（本会话踩过这类坑）
     return initWithWindow(window, requestedWidth, requestedHeight, error);
 }
@@ -243,8 +260,34 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
         error = "渲染器未就绪或帧无效";
         return false;
     }
-    eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
-                   static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
+    // ── 线程一致性检查（软解黑屏的根因防线）───────────────────────────────
+    // EGL/DGLES 的"当前上下文/当前 surface"是**线程私有**状态。初始化在某线程、
+    // 渲染在另一线程时：
+    //   · `eglMakeCurrent` 拿不到上下文（上下文仍被初始化线程持有），
+    //   · `eglSwapBuffers` 报 `EGL_BAD_SURFACE`（驱动日志 `g_handle is null`），
+    //   · 帧缓冲里其实什么都没画，屏幕上**全黑**，而 GL 调用本身不返回错误。
+    // 设备实测（DevEco x86_64 模拟器，HEVC 源自动回退软解）：EGL 在 `RunAsync`
+    // 工作线程初始化（tid=31744），逐帧 swap 发生在 UI 线程（tid=31628），
+    // 每 70ms 一条 `EGL_BAD_SURFACE, g_handle is null`，画面全黑且没有任何上层提示。
+    // 因此这里必须显式拒绝跨线程渲染，把"静默黑屏"变成可定位的错误。
+    const uint64_t tid = CurrentThreadId();
+    if (renderThreadId_ != 0 && tid != 0 && tid != renderThreadId_) {
+        error = "EGL 上下文在其它线程初始化（初始化 tid=" + std::to_string(renderThreadId_)
+                + "，当前 tid=" + std::to_string(tid)
+                + "）：GL 调用必须与初始化同线程（请在 UI 线程初始化渲染器）";
+        return false;
+    }
+    const EGLBoolean madeCurrent =
+        eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
+                       static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
+    if (madeCurrent != EGL_TRUE) {
+        const EGLint makeErr = eglGetError();
+        // 返回值**必须检查**：此前忽略它，于是"上下文没绑上"被当成"绘制成功"，
+        // 最终表现为画面全黑但没有任何报错。
+        error = "eglMakeCurrent 失败（EGL 0x" + std::to_string(makeErr) + "，初始化 tid="
+                + std::to_string(renderThreadId_) + "，当前 tid=" + std::to_string(tid) + "）";
+        return false;
+    }
 
     // 每帧都重新查询 surface 几何（仅 TEXTURE 路径需要）。
     //
@@ -268,9 +311,6 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
             surfaceHeight_ = qh;
         }
     }
-    // 上下文可能在 surface 重建后失效：每次渲染前确保 current
-    eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
-                   static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
     glViewport(0, 0, surfaceWidth_, surfaceHeight_);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -381,6 +421,8 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
         return false;
     }
     nativeWindow_ = window;
+    // 该 window 由 OH_NativeImage 持有：销毁 NativeImage 即可，**不能**自己销毁 window
+    windowOwned_ = false;
 
     return initWithWindow(window, requestedWidth, requestedHeight, error);
 }
@@ -389,7 +431,8 @@ bool EglRenderer::initFromTexture(uint32_t textureId, std::string &error, int re
  * 官方路径入口：window 由 ArkUI 经 `OH_NativeXComponent` 回调给出（见 xcomponent_bridge.h），
  * 尺寸取 `OH_NativeXComponent_GetXComponentSize()`。与 surfaceId 路径共用同一套初始化。
  */
-bool EglRenderer::initFromWindow(void *nativeWindow, int width, int height, std::string &error)
+bool EglRenderer::initFromWindow(void *nativeWindow, int width, int height, std::string &error,
+                                 uint64_t surfaceGeneration)
 {
     destroy();
     if (nativeWindow == nullptr) {
@@ -399,6 +442,9 @@ bool EglRenderer::initFromWindow(void *nativeWindow, int width, int height, std:
     requestedWidth_ = width;
     requestedHeight_ = height;
     nativeWindow_ = nativeWindow;
+    // framework（ArkUI）持有的 window：我们只借用，**绝不销毁**
+    windowOwned_ = false;
+    surfaceGeneration_ = surfaceGeneration;
     return initWithWindow(nativeWindow, width, height, error);
 }
 
@@ -407,6 +453,8 @@ bool EglRenderer::initWithWindow(void *windowPtr, int requestedWidth, int reques
                                  std::string &error)
 {
     OHNativeWindow *window = static_cast<OHNativeWindow *>(windowPtr);
+    // 记下初始化线程：GL 调用必须与之相同（见类注释的线程约束与 drawFrame 的检查）
+    renderThreadId_ = CurrentThreadId();
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     EGLint major = 0;
     EGLint minor = 0;
@@ -493,6 +541,13 @@ bool EglRenderer::selfTest(std::string &report)
 {
     if (!ready_) {
         report = "渲染器未就绪";
+        return false;
+    }
+    // 自检也是 GL 调用：必须与初始化同线程，否则读数会失真（swap 报 EGL_BAD_SURFACE）
+    const uint64_t tid = CurrentThreadId();
+    if (renderThreadId_ != 0 && tid != 0 && tid != renderThreadId_) {
+        report = "线程不符：渲染器在 tid=" + std::to_string(renderThreadId_) + " 初始化，当前 tid="
+                 + std::to_string(tid) + "（EGL 上下文是线程私有状态）";
         return false;
     }
     eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
@@ -599,10 +654,26 @@ void EglRenderer::destroy()
         OH_NativeImage *image = static_cast<OH_NativeImage *>(nativeImage_);
         OH_NativeImage_Destroy(&image);
         nativeImage_ = nullptr;
+        nativeWindow_ = nullptr;   // window 归属 NativeImage，已随它释放
     } else if (nativeWindow_ != nullptr) {
-        OH_NativeWindow_DestroyNativeWindow(static_cast<OHNativeWindow *>(nativeWindow_));
+        // ── window 归属：只能销毁自己创建的 ──────────────────────────────
+        // `init(surfaceId)` 路径的 window 由 `OH_NativeWindow_CreateNativeWindowFromSurfaceId`
+        // 创建，归我们销毁；而 `initFromWindow()` 的 window 是 ArkUI 经
+        // `OH_NativeXComponent` 回调交来的、`initFromTexture()` 的 window 属于
+        // `OH_NativeImage` —— 这两种都**不能**由我们销毁。
+        //
+        // 实测教训（本项目踩过）：早期实现无条件 `OH_NativeWindow_DestroyNativeWindow()`，
+        // 于是任何一次 `destroy()`（打开失败、重建渲染器）都会毁掉 XComponent 的显示面；
+        // 之后在同一 XComponent 上重建 EGL surface 时 `eglSwapBuffers` 报 `0x12301`，
+        // 画面再也不上屏 —— 表现出来同样是"软解黑屏"。
+        if (windowOwned_) {
+            OH_NativeWindow_DestroyNativeWindow(static_cast<OHNativeWindow *>(nativeWindow_));
+        }
         nativeWindow_ = nullptr;
     }
+    windowOwned_ = false;
+    surfaceGeneration_ = 0;
+    renderThreadId_ = 0;
     ready_ = false;
     surfaceWidth_ = 0;
     surfaceHeight_ = 0;

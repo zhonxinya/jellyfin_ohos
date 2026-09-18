@@ -58,8 +58,11 @@ void OnSurfaceChanged(OH_NativeXComponent *component, void *window)
     }
     g_surfaceReady.store(true);
     g_generation.fetch_add(1);
+    // window 指针一并记录：渲染器按"是否仍是同一块 window"决定复用还是重建，
+    // 排查"旋转/切比例后画面异常"时需要它来区分"只是换尺寸"与"换了一块显示面"。
     OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag,
-                 "OnSurfaceChanged size=%{public}dx%{public}d", g_width, g_height);
+                 "OnSurfaceChanged window=%{public}p size=%{public}dx%{public}d", window, g_width,
+                 g_height);
 }
 
 void OnSurfaceDestroyed(OH_NativeXComponent * /*component*/, void * /*window*/)

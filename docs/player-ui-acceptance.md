@@ -88,6 +88,47 @@
 
 ---
 
+### 本轮（修复「软解黑屏」）：设备实测证据
+
+**现象**：硬解不支持的编码（如 HEVC）自动回退 FFmpeg 软解后，画面**全黑**；界面上只有
+「已自动切换软解播放」，没有报错，进度还在走 —— 看起来"在播，但什么都看不见"。
+
+**根因**：EGL 上下文是在**原生工作线程**上初始化的（`softPlayOpen` 走 `RunAsync`），
+而逐帧渲染发生在 **ArkTS UI 线程**（`softPlayRenderLast` 是同步接口）。
+EGL/DGLES 把"当前上下文 / 当前 surface"记在**线程私有**状态里，于是 UI 线程
+每一次 `eglSwapBuffers` 都失败 —— 帧解出来了、帧号在涨，但一个像素都上不了屏。
+
+实测环境：模拟器 `127.0.0.1:5555`，条目「山中传奇」（1920×816 HEVC，硬解报
+`5400106 VID_DEC_ERR-video/hevc-unsupport … unsupport video decoder type` → 自动回退软解）。
+
+| 项 | 证据 |
+|---|---|
+| 修复前：EGL 在**工作线程**初始化 | `DGLES: Initialize display` 所在 tid = **31744**（`RunAsync` 工作线程） |
+| 修复前：逐帧 swap **全部失败** | tid = **31628**（UI 线程）每约 70ms 一条 `DGLES: EGL_BAD_SURFACE, g_handle is null`（0x300d）；单次播放累计 **17126 条** |
+| 修复前：上层毫无察觉 | 帧号正常增长、进度正常上报；屏幕上只有「已自动切换软解播放」（上屏错误被这条提示**盖掉**） |
+| 修复后：同线程初始化 | `SoftPlay: softPlayInitRenderer ready=1 reused=0 mode=xcomponent geo=1259x537 tid=12720`（该 tid = UI 线程） |
+| 修复后：swap 不再失败 | 整场 `EGL_BAD_SURFACE` 计数 **0**（修复前 17126） |
+| 修复后：首帧即刻上屏 | `softPlayNextFrame #1 pts=2021.603 decodeMs=256` → `softPlayRenderLast ok #1`（起播后约 **0.5s**） |
+| 修复后：画面确实在动（像素实测） | 视频条带逐次采样：平均亮度 **22–48**、亮像素占比 **70–86%**、**帧间差 8–40**（静止/黑屏时该值为 0，修复前恒为 0.00） |
+| 修复后：重进播放页（surface 重建）也能出画面 | `OnSurfaceDestroyed` → 新 `OnSurfaceCreated window=…2B20D30` → `softPlayInitRenderer … reused=0`：**按新 window 重新初始化**，不再画到已销毁的显示面 |
+| 修复后：续播跳转生效 | `softPlaySeek queued target=2054.844s` → `seek applied to=2054.844s frame=#1`，首帧 pts=2045.96（跳到目标前一个关键帧） |
+
+同轮一并修掉的三处"静默失败"（都属于同一类缺陷：异常没有到达用户/日志）：
+
+1. `EglRenderer::destroy()` 不再销毁 **framework 持有的 XComponent window**（只销毁自己用
+   `OH_NativeWindow_CreateNativeWindowFromSurfaceId` 创建的）；误销毁会毁掉显示面，
+   之后在同一 XComponent 上重建 EGL surface 便再也不上屏。
+2. 渲染器↔surface 的绑定按 **window 指针**校验（`boundToWindow()`），并在帧循环里就地重建 ——
+   杜绝"复用了已销毁 surface 的渲染器"（同样是黑屏，且不报错）。
+3. `drawFrame()` 显式检查**线程一致性**与 `eglMakeCurrent` 的返回值（此前返回值被忽略，
+   于是"上下文没绑上"被当成"绘制成功"）。上屏失败不再被吞：连续 3 帧失败即停止软解、
+   进入错误态并给出「重试」入口。
+
+> 模拟器性能提示（非缺陷）：x86 模拟器软件 HEVC 解码约 **5–6 fps**（片源 24fps），
+> 因此软解在模拟器上是"慢放"；真机（HUAWEI HBN-AL00）此前实测约 10fps（4K HEVC）。
+
+---
+
 ## 二、需要人工确认（我做不了，自动化手段在此失效）
 
 ### 1. 音轨切换的"听感"

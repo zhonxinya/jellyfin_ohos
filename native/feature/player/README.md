@@ -63,6 +63,12 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
 ```
 `surfaceId` 在 ArkTS 侧由 `XComponentController.getXComponentSurfaceId()` 取得。
 
+> ⚠️ 上面这段是最小可运行示例（**单线程**：open/decode/render 在同一线程，天然满足 EGL 的
+> 同线程约束）。一旦把 `openUrl()`（网络/解析）挪到工作线程以避免阻塞 UI，**必须同时把
+> `renderer.init*()` 留在渲染线程**，否则会得到"帧在解、屏幕全黑、无任何报错"的结果
+> （见下方"EGL 的'同线程'约束"）。本工程的做法：`softPlayOpen` 异步打开会话，
+> 渲染器由一个**同步**接口在 UI 线程初始化，`softPlayRenderLast` 同样在 UI 线程逐帧渲染。
+
 ## 注意事项（踩过的坑）
 
 - **线程**：`SoftDecodeSession` 与 `EglRenderer` 都不是线程安全的，且 EGL 调用必须与创建上下文的线程一致；
@@ -103,8 +109,14 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   | pbuffer + **FBO（以 XComponent 纹理为颜色附件）** + 绘制 + `UpdateSurfaceImage` | ❌ 同样 `40601000`；且自检读数会失真（pbuffer 尺寸 ≠ surface 尺寸） |
 
   本模块当前保留**第一种**（唯一能成功发布的配置）。同环境下 SURFACE 类型则连 swap 都失败（`0x12301`）。
-  **结论：该模拟器无法完成"软解帧 → XComponent 显示"这一段**；解码与绘制本身已通过自检证明正常
-  （见上一条）。移植到真机时建议先跑 `selfTest()` 与 `renderTargetProbe`，再决定采用哪种配置。
+  **结论：TEXTURE（`OH_NativeImage`）这条路径在该模拟器上发布不出内容**；解码与绘制本身已通过自检
+  证明正常（见上一条）。移植到真机时建议先跑 `selfTest()` 与 `renderTargetProbe`，再决定采用哪种配置。
+
+  > **补记（后续排查结论，见"EGL 必须与渲染同线程"那条）**：本工程实际用的是
+  > **SURFACE + `OH_NativeXComponent` 回调的 window**（`initFromWindow()`），它在该模拟器上
+  > 是**可以**把软解帧显示出来的 —— 早先"软解黑屏"的真正原因是 EGL 在**工作线程**初始化、
+  > 渲染却在 UI 线程（`EGL_BAD_SURFACE`），而不是"模拟器显示不出软解帧"。
+  > 该表述此前容易误导移植者，故在此更正。
 - **EOF 的判定（`RangeCache`）**：HTTP `416` 与"2xx 且响应体为空"都应视为**读到末尾**而非错误，
   否则 libavformat 会在末尾收到 `EIO`；而"status=0 / 带 error"必须报错，不能静默当 EOF。
   另注意：服务器支持 Range 且每次返回整块时**无法**推断总长度（响应经回调返回、不含响应头），
@@ -135,6 +147,27 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   1. `RangeCache::startPrefetch()` 后台线程预取（默认领先 8 块 = 8 MiB），把取流移出读取路径；
   2. 宿主侧**帧拉取必须异步**（本项目 `softPlayNextFrame` 用 `napi_create_async_work`），
      UI 线程只等 Promise —— 预取只覆盖"顺序向前读"，容器解析到处 seek 与网络跟不上时仍会 miss。
+- **EGL 的"同线程"约束是硬约束：初始化必须由"将来渲染的那个线程"发起**（本项目是 UI 线程）。
+  踩过的坑（"软解黑屏"的根因）：`softPlayOpen` 是 `RunAsync`（工作线程），早期实现顺手在那里
+  `eglInitialize` + 建 surface；而逐帧渲染走的是**同步**接口 `softPlayRenderLast()`（UI 线程）。
+  EGL/DGLES 把"当前上下文 / 当前 surface"记在**线程私有**状态里，于是 UI 线程的每一次
+  `eglSwapBuffers` 都失败 —— 设备实测驱动日志每 70ms 一条
+  `DGLES: EGL_BAD_SURFACE, g_handle is null`（0x300d，单次播放累计 17126 条），
+  而**帧号照涨、进度照走、上层拿不到任何错误**，用户看到的是一块纯黑。
+  正确拆法：
+  1. 会话/取流可以放工作线程（`softPlayOpen`/`softPlayNextFrame`）；
+  2. **EGL 初始化必须由渲染线程发起** —— 本项目加了一个同步接口 `softPlayInitRenderer()`
+     （宿主在 UI 线程调用，只做一次，实测约 35ms）；
+  3. `drawFrame()` 内部再兜一层：校验调用线程 == 初始化线程，并**检查 `eglMakeCurrent`
+     的返回值**（忽略它就等于把"上下文没绑上"当成"绘制成功"）。
+  另外注意：渲染器是进程级单例，而 XComponent 的 surface 会随页面进出被销毁重建 ——
+  只按 `isReady()` 复用会把帧画到**已经死掉的显示面**上（同样不报错、画面不动）。
+  复用的判据是 `boundToWindow(当前 window)`，不一致就重新 `init*()`。
+- **不要销毁 framework 持有的 native window**：`initFromWindow()` 的 window 来自
+  `OH_NativeXComponent` 回调（属于 ArkUI），`initFromTexture()` 的 window 属于 `OH_NativeImage`
+  （销毁 NativeImage 即可）。只有自己用 `OH_NativeWindow_CreateNativeWindowFromSurfaceId`
+  创建的 window 才能 `OH_NativeWindow_DestroyNativeWindow()`。误销毁的实测后果：显示面被毁，
+  之后在同一 XComponent 上重建 EGL surface 时 `eglSwapBuffers` 报 `0x12301`，画面再也不上屏。
 - **EGL 渲染必须留在初始化/上次渲染所在线程（本项目是 UI 线程）**：把 `renderRgba()` 放到
   线程池线程后，`eglSwapBuffers` 返回 **`0x12301`**、帧解出来了但**上不了屏**
   （诊断行显示"未渲染"）。正确拆法是"工作线程只解码 + UI 线程渲染"：
