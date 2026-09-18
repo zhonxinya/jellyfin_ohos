@@ -325,7 +325,18 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    // ── 上传：尺寸没变就用 `glTexSubImage2D` 复用纹理存储 ──────────────────
+    // 每帧 `glTexImage2D` 会**重新分配**纹理存储并丢弃旧内容；在软件 GL（模拟器）上这一步
+    // 是逐帧上传之外的另一笔可观开销（真机 GPU 上也很浪费）。尺寸不变时改为
+    // `glTexSubImage2D` 只写入像素，纹理对象与存储都复用。
+    // 尺寸变化（切比例/分辨率变化）时才重新分配，并记下当前尺寸。
+    if (textureWidth_ != width || textureHeight_ != height) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        textureWidth_ = width;
+        textureHeight_ = height;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
     GLenum glErr = glGetError();
     if (glErr != GL_NO_ERROR) {
         // 不检查 GL 错误会让"上传失败 → 整幅黑"看起来像"渲染成功"
@@ -634,6 +645,8 @@ void EglRenderer::destroy()
         glDeleteTextures(1, &texture_);
         texture_ = 0;
     }
+    textureWidth_ = 0;
+    textureHeight_ = 0;
     if (vbo_ != 0) {
         glDeleteBuffers(1, &vbo_);
         vbo_ = 0;

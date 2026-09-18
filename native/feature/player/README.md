@@ -217,6 +217,8 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   | `sws_getContext(..., SWS_FAST_BILINEAR, ...)` | 每帧 YUV→RGBA + 缩放是仅次于解码的开销 | ✅（与上一条同批实测） |
   | `AV_CODEC_FLAG2_FAST`（"Allow non spec compliant speedup tricks"，`libavcodec/avcodec.h:355`） | FFmpeg 文档明确是"非严格符合规范换速度" | ❌ **无收益**：fps 8→8、单帧 29–37ms vs 31–38ms（噪声内），已回退 —— 本内容/本设备上瓶颈不在"严格性检查" |
   | `skip_loop_filter/skip_idct`（`AVDiscard`） | 跳过去块/变换可提速 | 未采用：会引入可见块效应，播放场景不值得 |
-  | 拉帧循环接续方式 | 宿主是 `setInterval(70ms)` + 在途互斥，实测 **115ms/帧**（8.7fps）而解码只占 ~35ms —— 说明还有 ~45ms 花在 swscale/纹理上传/NAPI 往返与定时器等待上 | ⏳ **下一步的真瓶颈**：把"定时器驱动"改成"上一次拉帧完成即调度下一次"（保留一个下限间隔），目标是逼近 decode+上传的实际上限 |
+  | 拉帧循环接续方式：**自调度**（上一帧完成即排下一帧，下限 8ms；卡死判定独立成 5s 看门狗） | 原先 `setInterval(70ms)` + 在途互斥 ⇒ 实际周期 = max(70ms, 工作量)，实测 **115ms/帧（8.7fps）** | ✅ 小幅有效：**108ms/帧 → fps 8→9**（同条目、同口径）。说明"定时器空等"只占约 7ms，**大头仍在每帧的上传/渲染/NAPI 往返**（≈100ms − 解码 ~35ms）|
+  | 纹理存储复用：尺寸不变时用 `glTexSubImage2D` 替代每帧 `glTexImage2D` | `glTexImage2D` 每帧**重新分配**一块 1259×535 RGBA（约 2.7MB）纹理存储 | ⚪ **本模拟器未测出差异**（fps 9→9，108ms→104ms/帧，噪声内）。保留理由：不重新分配是通用正确做法（真机 GPU 上省一次显存分配/丢弃），且不改变行为 —— 但**不宣称它是本轮的提速来源** |
+  | （下一步）每帧其余开销 | 每帧总耗时仍约 100ms，解码只占 31–41ms，其余在 swscale、纹理上传、异步 NAPI 往返与渲染上 | ⏳ 未做：可选方向是减少每帧跨语言调用次数（把"拉帧+渲染"合并成一次调用）、或按渲染缓冲协商更小的上传尺寸 |
 
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。

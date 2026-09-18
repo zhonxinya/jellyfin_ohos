@@ -89,6 +89,20 @@ const kTouchPollBackoffLimit: number = 120;
 const kSoftPullStallMs: number = 20000;
 
 /**
+ * 软解拉帧的**下限间隔**（毫秒）与看门狗周期。
+ *
+ * 为什么不再用 `setInterval(70ms)` 驱动（本轮实测的瓶颈）：
+ * 设备实测同一 HEVC 条目，软解 **115ms/帧（8.7fps）**，而日志里单帧解码只占 ~35ms ——
+ * 也就是说每帧有约 45ms 花在 swscale/纹理上传/NAPI 往返，**外加定时器固定空等 70ms**
+ * （`setInterval(70)` + 在途互斥 ⇒ 实际周期 = max(70ms, 工作量)）。
+ * 现改为**自调度**：上一帧处理完立刻排下一帧，只留 8ms 下限避免空转；
+ * 卡死判定从"每帧顺带检查"改成独立的低频看门狗（自调度下没有"每帧 tick"可依附）。
+ */
+const kSoftPullMinGapMs: number = 8;
+/** 软解卡死看门狗的检查周期（毫秒） */
+const kSoftWatchdogMs: number = 5000;
+
+/**
  * 软解**打开会话**阶段的最长容忍时间（毫秒）。超过即判定挂起并进入终态。
  *
  * 依据：正常打开（取流探测 + 解容器 + 找流信息）在设备上是秒级；
@@ -188,6 +202,8 @@ struct PlayerPage {
    */
   @State private softStatus: string = '';
   private softTimerId: number = -1;
+  /** 软解卡死看门狗定时器（与帧调度分离，见 startSoftTimer 的说明） */
+  private softWatchdogId: number = -1;
   /**
    * 软解解码目标宽度（px）：由原生侧协商出的渲染缓冲宽度决定（见 startSoftPlay）。
    * 0 表示按源分辨率解码，不做缩放。
@@ -1401,18 +1417,64 @@ struct PlayerPage {
   }
 
   /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + 纹理上传的开销决定上限） */
+  /**
+   * 启动软解帧循环（自调度）与卡死看门狗。
+   *
+   * 帧循环不再固定 70ms 打点：每帧处理完由 `scheduleSoftPull()` 立刻排下一帧
+   * （下限 `kSoftPullMinGapMs`），把"定时器空等"从每帧 70ms 降到 8ms。
+   */
   private startSoftTimer(): void {
     this.stopSoftTimer();
-    this.softTimerId = setInterval(() => {
+    this.scheduleSoftPull(0);
+    this.softWatchdogId = setInterval(() => {
+      this.checkSoftPullStall();
+    }, kSoftWatchdogMs);
+  }
+
+  /** 排下一帧（自调度：上一帧完成即调用；delay 只用于下限间隔） */
+  private scheduleSoftPull(delayMs: number): void {
+    if (this.softTimerId !== -1) {
+      clearTimeout(this.softTimerId);
+      this.softTimerId = -1;
+    }
+    this.softTimerId = setTimeout(() => {
+      this.softTimerId = -1;
       this.pullSoftFrame();
-    }, 70);
+    }, delayMs);
   }
 
   private stopSoftTimer(): void {
     if (this.softTimerId !== -1) {
-      clearInterval(this.softTimerId);
+      // setTimeout/setInterval 的 id 在本平台同一命名空间，clearTimeout 两者都能清
+      clearTimeout(this.softTimerId);
       this.softTimerId = -1;
     }
+    if (this.softWatchdogId !== -1) {
+      clearInterval(this.softWatchdogId);
+      this.softWatchdogId = -1;
+    }
+  }
+
+  /**
+   * 卡死看门狗：软解某次拉帧长时间不返回时给出**终态**。
+   *
+   * 设备实测（4K 8-bit HEVC「流浪地球2」）：原生侧那次拉帧永不返回，
+   * 界面会永远停在最后一帧、既不报错也没有重试入口 —— 违反项目"异常与超时都必须到达终态"的约定。
+   * 自调度改造后没有"每帧 tick"可顺带检查，因此独立成低频定时器。
+   */
+  private checkSoftPullStall(): void {
+    if (!this.softPlaying || !this.softPulling || this.softPullStartedAt <= 0) {
+      return;
+    }
+    if (Date.now() - this.softPullStartedAt <= kSoftPullStallMs) {
+      return;
+    }
+    const stalledMs: number = Date.now() - this.softPullStartedAt;
+    this.setSoftNotice(`软解无响应已 ${Math.round(stalledMs / 1000)} 秒（解到第 `
+      + `${this.softLastFrameIndex} 帧），已停止；可点「软解」重试或改看其它条目`, true);
+    this.softPulling = false;
+    this.softPullStartedAt = 0;
+    this.stopSoftPlay();
   }
 
   private async pullSoftFrame(): Promise<void> {
@@ -1420,21 +1482,7 @@ struct PlayerPage {
       return;
     }
     if (this.softPulling) {
-      // ── 卡死看门狗 ─────────────────────────────────────────────────────────
-      // 设备实测（4K 8-bit HEVC「流浪地球2」）：原生侧某次拉帧**永不返回**
-      // （解码器卡在某一帧 / 取流挂起），此前 `softPulling` 会一直是 true，
-      // 于是定时器每次都直接 return —— 界面永远停在最后一帧，既不报错也没有重试入口。
-      // 项目约定是"异常与超时都必然到达终态"，这个永久挂起正好违反了它。
-      // 这里补上终态：超时即判卡死 → 明确报错 + 停掉软解（用户可点「软解」重试）。
-      if (this.softPullStartedAt > 0
-        && Date.now() - this.softPullStartedAt > kSoftPullStallMs) {
-        const stalledMs: number = Date.now() - this.softPullStartedAt;
-        this.setSoftNotice(`软解无响应已 ${Math.round(stalledMs / 1000)} 秒（解到第 `
-          + `${this.softLastFrameIndex} 帧），已停止；可点「软解」重试或改看其它条目`, true);
-        this.softPulling = false;
-        this.softPullStartedAt = 0;
-        this.stopSoftPlay();
-      }
+      // 已有在途帧：不重入（卡死由 checkSoftPullStall 的看门狗收口）
       return;
     }
     this.softPulling = true;
@@ -1520,6 +1568,10 @@ struct PlayerPage {
     } finally {
       this.softPulling = false;
       this.softPullStartedAt = 0;
+      // 自调度：本帧处理完立刻排下一帧（不再靠定时器空等到下一个 tick）
+      if (this.softPlaying && !this.softPaused) {
+        this.scheduleSoftPull(kSoftPullMinGapMs);
+      }
     }
   }
 
