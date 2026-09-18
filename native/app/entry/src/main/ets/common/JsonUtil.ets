@@ -20,6 +20,46 @@ export class JsonUtil {
     }
   }
 
+  /**
+   * 对象的所有键（按字典序）。
+   *
+   * 通用排障页要如实显示"服务端到底下发了什么"，不能只看一张硬编码的键名单 ——
+   * 名单外的字段以前会退化成"一整块 JSON"。这里用 `Object.keys`，
+   * 只对 `Record<string, Object>` 用，不碰 `any`。
+   */
+  static keysOf(obj: ESObject | null): string[] {
+    if (obj === null || obj === undefined) {
+      return [];
+    }
+    const map: Record<string, Object> = obj as Record<string, Object>;
+    const out: string[] = [];
+    const keys: string[] = Object.keys(map);
+    for (let i = 0; i < keys.length; i++) {
+      out.push(keys[i]);
+    }
+    out.sort((a: string, b: string) => a < b ? -1 : (a > b ? 1 : 0));
+    return out;
+  }
+
+  /** 取原始值并按"给人看"的方式转成字符串（对象/数组转 JSON） */
+  static valueText(obj: ESObject | null, key: string): string {
+    if (obj === null || obj === undefined) {
+      return '';
+    }
+    const map: Record<string, Object> = obj as Record<string, Object>;
+    const value: Object | undefined = map[key];
+    if (value === undefined || value === null) {
+      return '';
+    }
+    if (typeof value === 'boolean') {
+      return value ? '是' : '否';
+    }
+    if (typeof value === 'object') {
+      return JsonUtil.toPretty(value as ESObject);
+    }
+    return `${value}`;
+  }
+
   static getString(obj: ESObject | null, key: string, fallback: string = ''): string {
     if (obj === null || obj === undefined) {
       return fallback;

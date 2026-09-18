@@ -60,7 +60,7 @@ export struct AdminPageShell {
           }
           .width('100%')
           .constraintSize({ maxWidth: ThemeConstants.SETTINGS_MAX_WIDTH })
-          .padding({ bottom: 24 })
+          .padding({ left: 16, right: 16, top: 8, bottom: 24 })
         }
         .layoutWeight(1)
         .width('100%')

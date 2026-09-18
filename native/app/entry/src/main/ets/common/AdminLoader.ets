@@ -77,29 +77,37 @@ export class AdminLoader {
     if (data === null) {
       return rows;
     }
-    // Prefer known flat keys; avoid Object.keys for ArkTS compatibility.
+    // 先按"常见字段优先"的顺序列出，再把剩下的键按字典序补齐 ——
+    // 以前只显示这张硬编码名单里的键，名单外的内容（例如 `/System/Configuration/metadata`
+    // 的 `UseFileCreationTimeForDateAdded`）会退化成"一整块 JSON"，排障时看不到字段名。
     const known: string[] = [
-      'ServerName', 'Version', 'Id', 'OperatingSystem', 'ProductName', 'LocalAddress',
-      'StartupWizardCompleted', 'HasPendingRestart', 'CanSelfRestart', 'WebSocketPortNumber',
-      'CompletedInstallations', 'CanLaunchWebBrowser', 'ProgramDataPath', 'CachePath',
-      'LogPath', 'InternalMetadataPath', 'TranscodingTempPath', 'EncoderLocation',
-      'Name', 'AppName', 'DeviceName', 'UserName', 'Client', 'ApplicationVersion'
+      'ServerName', 'Version', 'Id', 'OperatingSystem', 'OperatingSystemDisplayName',
+      'ProductName', 'SystemArchitecture', 'LocalAddress',
+      'StartupWizardCompleted', 'HasPendingRestart', 'IsShuttingDown', 'CanSelfRestart',
+      'HasUpdateAvailable', 'SupportsLibraryMonitor', 'CanLaunchWebBrowser',
+      'WebSocketPortNumber', 'CompletedInstallations', 'ProgramDataPath', 'CachePath',
+      'LogPath', 'InternalMetadataPath', 'MetadataPath', 'TranscodingTempPath',
+      'EncoderLocation', 'WebPath', 'ItemsByNamePath',
+      'Name', 'AppName', 'DeviceName', 'UserName', 'Client', 'ApplicationVersion',
+      'DuplicateUsers', 'PathSubstitutions', 'Type', 'Severity', 'Date'
     ];
-    for (let i = 0; i < known.length; i++) {
-      const key: string = known[i];
-      const full: string = prefix.length > 0 ? `${prefix}.${key}` : key;
-      const map: Record<string, Object> = data as Record<string, Object>;
+    const map: Record<string, Object> = data as Record<string, Object>;
+    const seen: string[] = [];
+    const push = (key: string): void => {
       const value: Object | undefined = map[key];
-      if (value === undefined) {
-        continue;
+      if (value === undefined || seen.indexOf(key) >= 0) {
+        return;
       }
-      if (value === null) {
-        rows.push(new KeyValueRow(full, 'null'));
-      } else if (typeof value === 'object') {
-        rows.push(new KeyValueRow(full, JsonUtil.toPretty(value as ESObject)));
-      } else {
-        rows.push(new KeyValueRow(full, `${value}`));
-      }
+      seen.push(key);
+      const full: string = prefix.length > 0 ? `${prefix}.${key}` : key;
+      rows.push(new KeyValueRow(full, JsonUtil.valueText(data, key)));
+    };
+    for (let i = 0; i < known.length; i++) {
+      push(known[i]);
+    }
+    const all: string[] = JsonUtil.keysOf(data);
+    for (let i = 0; i < all.length; i++) {
+      push(all[i]);
     }
     if (rows.length === 0) {
       const pretty: string = JsonUtil.toPretty(data);
