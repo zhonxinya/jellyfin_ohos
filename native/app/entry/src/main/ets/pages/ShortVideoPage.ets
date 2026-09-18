@@ -1,11 +1,14 @@
 import router from '@ohos.router';
 import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
+import window from '@ohos.window';
+import common from '@ohos.app.ability.common';
 import { BusinessError } from '@ohos.base';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { PlaybackState } from '../common/PlaybackState';
-import { kScaleTypeFitCrop } from '../common/PlayerAspect';
+import { PlayerAspect, kScaleTypeFit, kScaleTypeFitCrop } from '../common/PlayerAspect';
+import { WindowFullscreen, PlayerOrientation } from '../common/WindowFullscreen';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -103,6 +106,17 @@ export struct ShortVideoPage {
   /** 当前这次暂停是否由"切走页签"造成（决定切回时是否自动续播） */
   private pausedByTabSwitch: boolean = false;
 
+  // ─────────────────────── 横屏观看 ───────────────────────
+  //
+  // 短视频内容横竖皆有；横屏时同一个"适应"盒子计算会给出**更大的画面**
+  // （可用区域从 20:9 的窄长变成宽屏），因此除了跟随传感器，还要给一个显式锁定入口
+  // （躺卧观看时传感器会被机身姿态反复打断）。窗口实例与方向都复用播放页那套
+  // `WindowFullscreen`，不另起一套平台调用。
+  /** 窗口实例（方向控制需要） */
+  private windowRef: window.Window | null = null;
+  /** 方向选择：跟随系统 / 横屏 / 竖屏 */
+  @State private orientation: PlayerOrientation = 'auto';
+
   // ───────────────── 页内软解回退（硬解不支持时不再跳过）─────────────────
   //
   // 为什么能在本页做软解：软解需要一块 EGL 可渲染的显示面，本页的 XComponent 就有
@@ -117,6 +131,23 @@ export struct ShortVideoPage {
   /** XComponent 的像素尺寸（软解渲染缓冲几何按它协商） */
   private surfaceW: number = 0;
   private surfaceH: number = 0;
+
+  // ───────────────── 画面比例（竖屏比例不对的修复）─────────────────
+  //
+  // 此前的做法是"XComponent 铺满整屏 + `videoScaleType = FIT_CROP`"：
+  // 竖屏是 20:9 的窄长屏，而内容多为 16:9 / 2.35:1 的横片 —— 等比铺满意味着**横向被裁掉大半**
+  // （观感就是"比例不对/画面被切"）；而一旦设备不支持该属性（setter 抛错被兜住），
+  // AVPlayer 默认的 `VIDEO_SCALE_TYPE_FIT` 是**拉伸铺满**，直接变形。
+  // 现在改成播放页那套已经验证过的做法：**把视频面的宽高比算成与画面一致**，
+  // 再把 scaleType 设为 FIT —— 同比例的 FIT 没有可拉伸/可裁剪的余地，比例必然正确。
+  /** 画面原始像素尺寸（硬解来自 AVPlayer.width/height，软解来自 softPlayOpen 返回值） */
+  @State private videoW: number = 0;
+  @State private videoH: number = 0;
+  /** 可用区域（vp，来自根容器实测）：横竖屏切换后会变，画面盒子随之重算 */
+  @State private areaW: number = 0;
+  @State private areaH: number = 0;
+  /** 当前是否横屏（宽 > 高）：控件布局与画面盒子都按它走 */
+  @State private landscape: boolean = false;
   /** 页内软解的解码目标宽度（对齐协商出的渲染缓冲） */
   private softDecodeMaxWidth: number = 0;
   private skipTimerId: number = -1;
@@ -388,11 +419,18 @@ export struct ShortVideoPage {
         if (player.duration > 0) {
           this.durationMs = player.duration;
         }
+        // 画面真实尺寸：视频面按它重算宽高比（这是比例正确的前提）
+        if (player.width > 0 && player.height > 0) {
+          this.videoW = player.width;
+          this.videoH = player.height;
+        }
         try {
-          // 短视频要"铺满屏幕"：等比放大 + 裁剪（与设置里"填充"同一套语义）
-          player.videoScaleType = kScaleTypeFitCrop;
+          // 视频面已按画面比例设过尺寸 ⇒ 同比例的 FIT 不会拉伸；
+          // 若拿不到画面尺寸（videoW/H 仍为 0，面暂时铺满），FIT_CROP 至少保证不出现黑边。
+          player.videoScaleType = (this.videoW > 0 && this.videoH > 0)
+            ? kScaleTypeFit : kScaleTypeFitCrop;
         } catch (err) {
-          // 部分设备不支持该属性：退回默认拉伸即可，不影响播放
+          // 部分设备不支持该属性：此时靠"视频面与画面同比例"兜底，比例仍然正确
         }
         player.play();
       } else if (state === 'playing') {
@@ -551,6 +589,11 @@ export struct ShortVideoPage {
     // 顺带把解码目标宽度对齐到该几何 —— 既省 swscale 又不浪费解码算力。
     const videoW: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
     const videoH: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
+    if (videoW > 0 && videoH > 0) {
+      // 软解路径同样要让视频面与画面同比例（否则 2.35:1 的片子会被拉进 16:9 的盒子）
+      this.videoW = videoW;
+      this.videoH = videoH;
+    }
     let renderW: number = this.surfaceW;
     let renderH: number = this.surfaceH;
     if (videoW > 0 && videoH > 0 && this.surfaceW > 0 && this.surfaceH > 0) {
@@ -671,9 +714,42 @@ export struct ShortVideoPage {
     }
   }
 
+  /**
+   * 方向按钮的文案：跟随系统 / 横屏 / 竖屏。
+   *
+   * 为什么短视频也要有方向控制：短视频内容横竖皆有，而**横屏时同一个"适应"盒子计算
+   * 会给出更大的画面**（可用区域从 20:9 的窄长变成宽屏）；只靠传感器自动旋转，
+   * 躺卧观看时会被机身姿态反复打断，所以和播放页一样给一个显式锁定入口。
+   */
+  private orientationLabel(): string {
+    if (this.orientation === 'landscape') {
+      return '横屏';
+    }
+    if (this.orientation === 'portrait') {
+      return '竖屏';
+    }
+    return '跟随系统';
+  }
+
+  /** 循环切换方向（跟随系统 → 横屏 → 竖屏 → 跟随系统） */
+  private cycleOrientation(): void {
+    const next: PlayerOrientation = this.orientation === 'auto'
+      ? 'landscape' : (this.orientation === 'landscape' ? 'portrait' : 'auto');
+    this.orientation = next;
+    if (this.windowRef === null) {
+      window.getLastWindow(getContext(this) as common.UIAbilityContext).then((win: window.Window) => {
+        this.windowRef = win;
+        WindowFullscreen.setOrientation(this.windowRef, next);
+      }).catch(() => {
+        // 取不到窗口：方向设置失败，但短视频页仍可用（跟随系统）
+      });
+      return;
+    }
+    WindowFullscreen.setOrientation(this.windowRef, next);
+  }
+
   /** 失败浮层的「软解播放」：转到播放页（那里有 FFmpeg 软解回退） */
-  private openInPlayer(item: MediaItem): void {
-    this.cancelAutoSkip();
+  private openInPlayer(item: MediaItem): void {    this.cancelAutoSkip();
     if (item.id.length === 0) {
       return;
     }
@@ -752,6 +828,40 @@ export struct ShortVideoPage {
     this.lastReportAt = 0;
   }
 
+  /** 屏幕像素密度（px / vp）—— 「原始」比例换算用（与播放页同一口径） */
+  private density(): number {
+    try {
+      const d: number = display.getDefaultDisplaySync().densityPixels;
+      return d > 0 ? d : 1;
+    } catch (err) {
+      return 1;
+    }
+  }
+
+  /**
+   * 视频面（XComponent）的尺寸：**按画面比例**适配可用区域（vp）。
+   *
+   * 与播放页共用 `PlayerAspect.box(..., 'contain', ...)`：等比、完整可见、多余留黑边。
+   * 画面尺寸未知（尚未 prepared）时铺满可用区域，拿到尺寸后本函数会被重新调用。
+   * 横屏不做特殊分支 —— 可用区域横向变长，同一个"适应"计算自然给出更大的画面。
+   */
+  private videoBoxWidth(): Length {
+    if (this.videoW <= 0 || this.videoH <= 0) {
+      // 画面尺寸未知：先铺满（拿到尺寸后本函数会被重新求值）
+      return this.areaW > 0 ? this.areaW : '100%';
+    }
+    return PlayerAspect.box('contain', this.videoW, this.videoH, this.areaW, this.areaH,
+                            this.density()).width;
+  }
+
+  private videoBoxHeight(): Length {
+    if (this.videoW <= 0 || this.videoH <= 0) {
+      return this.areaH > 0 ? this.areaH : '100%';
+    }
+    return PlayerAspect.box('contain', this.videoW, this.videoH, this.areaW, this.areaH,
+                            this.density()).height;
+  }
+
   /** 进度百分比（0..1）；时长未知时为 0 */
   private progressRatio(): number {
     if (this.durationMs <= 0) {
@@ -811,6 +921,17 @@ export struct ShortVideoPage {
         .padding({ left: 12, right: 12 })
         .enabled(!this.refreshing)
         .onClick(() => { this.loadFeed(); })
+
+      // 方向：跟随系统 / 横屏 / 竖屏 —— 短视频同样需要横屏全屏观看
+      // （横屏下同一个"适应"盒子计算会给出更大的画面，见 videoBoxWidth/Height）
+      Button(this.orientationLabel(), { type: ButtonType.Normal, stateEffect: false })
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().textPrimary)
+        .backgroundColor(this.colors().surfacePressed)
+        .borderRadius(ThemeConstants.BADGE_RADIUS)
+        .height(32)
+        .padding({ left: 12, right: 12 })
+        .onClick(() => { this.cycleOrientation(); })
 
       Button('设置', { type: ButtonType.Normal, stateEffect: false })
         .fontSize(ThemeConstants.META_SMALL)
@@ -976,8 +1097,10 @@ export struct ShortVideoPage {
             type: XComponentType.SURFACE,
             controller: this.surfaceController
           })
-            .width('100%')
-            .height('100%')
+            // 按画面比例设尺寸（Stack 居中）—— 这是"比例正确"的根本：
+            // 不再让等比/裁剪逻辑去猜，而是让视频面的宽高比与画面一致。
+            .width(this.videoBoxWidth())
+            .height(this.videoBoxHeight())
             .onAreaChange((_oldArea: Area, newArea: Area) => {
               // 软解渲染缓冲几何按组件像素尺寸协商（与播放页同一口径）
               const density: number = display.getDefaultDisplaySync().densityPixels;
@@ -1110,5 +1233,15 @@ export struct ShortVideoPage {
     .width('100%')
     .height('100%')
     .backgroundColor(this.colors().pageBackground)
+    // 可用区域实测（vp）：横竖屏切换/窗口变化后画面盒子与控件布局都要重算
+    .onAreaChange((_oldArea: Area, newArea: Area) => {
+      const w: number = Number(newArea.width);
+      const h: number = Number(newArea.height);
+      if (w > 0 && h > 0) {
+        this.areaW = w;
+        this.areaH = h;
+        this.landscape = w > h;
+      }
+    })
   }
 }
