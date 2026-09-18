@@ -28,6 +28,7 @@
     "pages/admin/MetadataSettingsPage",
     "pages/admin/NfoSettingsPage",
     "pages/admin/ResumeSettingsPage",
+    "pages/admin/BrandingSettingsPage",
     "pages/admin/StreamingPage",
     "pages/admin/TranscodingPage",
     "pages/admin/PlaybackSettingsPage",

@@ -43,7 +43,7 @@ struct AdminHubPage {
         { title: '活动', subtitle: '查看服务器活动记录', icon: 'clock', url: 'pages/admin/ActivityPage' },
         { title: '常规设置', subtitle: '配置服务器基础选项', icon: 'gearshape', url: 'pages/admin/GeneralSettingsPage' },
         { title: '网络', subtitle: '配置网络和连接选项', icon: 'wifi', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/network', titleParam: '网络' },
-        { title: '品牌', subtitle: '配置服务器品牌信息', icon: 'paintpalette', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/branding', titleParam: '品牌' }
+        { title: '品牌', subtitle: '启动画面、登录免责声明与自定义 CSS', icon: 'paintpalette', url: 'pages/admin/BrandingSettingsPage' }
       ]
     },
     {
@@ -68,8 +68,13 @@ struct AdminHubPage {
         { title: '转码', subtitle: '配置视频转码参数', icon: 'video', url: 'pages/admin/TranscodingPage' },
         { title: '播放设置', subtitle: '配置播放和媒体能力', icon: 'play_circle', url: 'pages/admin/PlaybackSettingsPage' },
         // 原来指向 `/System/Configuration`：标题写着"继续观看"，内容却是整份服务器配置的键值表
-        { title: '继续观看', subtitle: '续播/已看的百分比与时长阈值、有声书续播', icon: 'arrow_2_circlepath', url: 'pages/admin/ResumeSettingsPage' },
-        { title: 'Trickplay', subtitle: '配置预览缩略图选项', icon: 'video', url: 'pages/admin/AdminGenericPage', path: '/System/Configuration/trickplay', titleParam: 'Trickplay' }
+        { title: '继续观看', subtitle: '续播/已看的百分比与时长阈值、有声书续播', icon: 'arrow_2_circlepath', url: 'pages/admin/ResumeSettingsPage' }
+        /*
+         * 原来还有一条「Trickplay」指向 `/System/Configuration/trickplay` —— 实测那个 key
+         * 不存在（`trickplay` / `trickplayoptions` 都是 404），点进去只有一句报错；
+         * 而 Trickplay（拖动预览缩略图）是 Web 客户端的特性，本应用的播放器不使用它。
+         * 与其留一条打不开的入口，不如去掉；需要改的话在 Web 控制台的「播放」页里配。
+         */
       ]
     },
     {

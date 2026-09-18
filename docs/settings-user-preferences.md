@@ -91,10 +91,18 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 | 媒体库元数据 | `ServerConfiguration.MetadataOptions[]` | 同左（整份） | 整份替换，但只有这一段会变 |
 | NFO 设置 | `XbmcMetadataOptions`（key = `xbmcmetadata`） | `GET/POST /System/Configuration/xbmcmetadata` | 只替换这一段 |
 | 继续观看 | `ServerConfiguration` 顶层五个字段（`MinResumePct` / `MaxResumePct` / `MinResumeDurationSeconds` / `MinAudiobookResume` / `MaxAudiobookResume`） | `GET/POST /System/Configuration` | 整份替换，但只有这几个字段会变 |
+| 品牌 | `BrandingOptions`（key = `branding`） | `GET/POST /System/Configuration/branding` | 只替换这一段 |
 
 > 「继续观看」原来指向 `/System/Configuration`（整份配置的原始键值表），标题写着"继续观看"、
 > 内容是服务器全部配置 —— 既看不懂也改不了。现在按上面五个字段做成表单（最短时长界面按**分钟**填，
 > 服务端存秒）。
+>
+> 「品牌」原来也是原始键值表。它只有三个字段（`SplashscreenEnabled` / `LoginDisclaimer` /
+> `CustomCss`），其中后两个只被 **Web 客户端**消费，页面上如实标注，避免用户以为改了手机会变样。
+>
+> 原来还有一条「Trickplay」指向 `/System/Configuration/trickplay` —— 实测 `trickplay` 与
+> `trickplayoptions` **都是 404**，点进去只有一句报错；而 Trickplay（拖动预览缩略图）是 Web 特性，
+> 本应用播放器不使用。与其留一条打不开的入口，不如去掉（要改在 Web 控制台的播放页里配）。
 
 ### 命名配置的 key 别猜，实测为准
 
@@ -134,4 +142,5 @@ GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"Sav
 | 媒体库元数据页 | 恒等保存后整份 `/System/Configuration` 逐字节相同；取消「电影」的一个元数据下载器并保存 → 整份配置里**只有 `MetadataOptions`** 段变化，该类型的 `DisabledMetadataFetchers` 恰好多一项；复原后零差异 |
 | NFO 设置页 | 页面读到真实值（`ReleaseDateFormat=yyyy-MM-dd` 等）而不是 404；恒等保存后这一段逐字节相同；切「生成额外缩略图副本」→ 服务端 `EnableExtraThumbsDuplication` 翻转，整份配置里只有 `xbmcmetadata` 段、段内只有这一个字段变化；复原后零差异 |
 | 继续观看页 | 页面显示 `MinResumeDurationSeconds=300` 换算成的 5 分钟；恒等保存后整份配置逐字节相同；把最短时长填成 6 分钟 → 服务端 `MinResumeDurationSeconds=360`，整份配置里只有这一个字段变化；复原后零差异 |
+| 品牌页 | 页面读到真实值并显示「与服务器一致」；恒等保存后这一段逐字节相同；切「显示启动画面」→ 服务端 `SplashscreenEnabled` 翻转、这一段里只有这一个字段变化、整份 ServerConfiguration 未被触碰；复原后零差异 |
 
