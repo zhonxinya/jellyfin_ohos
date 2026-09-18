@@ -2785,64 +2785,71 @@ struct PlayerPage {
 
       // 工具行：图标 + 文字（Infuse 底部工具行的形态）。
       // 主操作（播放/暂停、±10s）已经搬到画面正中的中央控制簇，这里只放"非播放性质"的开关，
-      // 主次分明；横向可滚动，窄屏/多按钮时不会挤成一条。
-      Scroll() {
-        Row({ space: 10 }) {
-          // 画面比例：适应 / 填充 / 拉伸 / 原始（见 common/PlayerAspect.ets）
-          PlayerToolButton({
-            icon: $r('sys.symbol.aspectratio'),
-            label: PlayerAspect.label(this.aspectMode),
-            selected: this.aspectMode !== 'contain',
-            onTap: () => {
-              this.cycleAspect();
+      // 主次分明。
+      //
+      // 布局为什么改成"居中 + 自动换行"（本轮优化）：
+      // 竖屏可用宽度只有约 340vp（屏宽 371vp − 左右各 16vp 内边距），而这 5 个按钮横排
+      // 实测约需 390vp。原来放在 `Scroll` 里，结果是「倍速」被裁掉一半、「软解」整块落到
+      // 屏幕外 —— 用户既看不出还有按钮，也无法手动切软解（排查软解黑屏时正是被这一点卡住）。
+      // 现在用 `Flex` 自动换行：一行放不下就换到第二行（仍然居中），按钮**始终完整可见**；
+      // 横屏宽度足够时自然仍是一行。
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center, alignItems: ItemAlign.Center }) {
+        // 画面比例：适应 / 填充 / 拉伸 / 原始（见 common/PlayerAspect.ets）
+        PlayerToolButton({
+          icon: $r('sys.symbol.aspectratio'),
+          label: PlayerAspect.label(this.aspectMode),
+          selected: this.aspectMode !== 'contain',
+          onTap: () => {
+            this.cycleAspect();
+          }
+        })
+          .margin({ left: 4, right: 4, top: 4 })
+        // 屏幕方向：跟随系统 / 横屏 / 竖屏 —— 全屏观看的方向控制入口。
+        // 光靠传感器自动旋转不够：躺卧观看时需要锁死横屏，否则机身一偏画面就转回竖屏。
+        PlayerToolButton({
+          icon: this.orientationIcon(),
+          label: this.orientationLabel(),
+          selected: this.orientation !== 'auto',
+          onTap: () => {
+            this.cycleOrientation();
+          }
+        })
+          .margin({ left: 4, right: 4, top: 4 })
+        // 播放中切换音频/字幕：播放页自己的覆盖层面板（不依赖详情页的 bindSheet）
+        PlayerToolButton({
+          icon: $r('sys.symbol.speaker_wave_2'),
+          label: '音频/字幕',
+          selected: this.showTrackSheet,
+          onTap: () => {
+            this.openTrackSheet();
+          }
+        })
+          .margin({ left: 4, right: 4, top: 4 })
+        PlayerToolButton({
+          icon: $r('sys.symbol.video_speed'),
+          label: `${this.playbackSpeed}x`,
+          selected: this.playbackSpeed !== 1,
+          onTap: () => {
+            this.cycleSpeed();
+          }
+        })
+          .margin({ left: 4, right: 4, top: 4 })
+        // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
+        PlayerToolButton({
+          showIcon: false,
+          label: '软解',
+          selected: this.softPlaying,
+          onTap: () => {
+            if (this.softPlaying) {
+              this.stopSoftPlay();
+              this.setSoftNotice('已停止软解', false);
+            } else {
+              this.startSoftPlay();
             }
-          })
-          // 屏幕方向：跟随系统 / 横屏 / 竖屏 —— 全屏观看的方向控制入口。
-          // 光靠传感器自动旋转不够：躺卧观看时需要锁死横屏，否则机身一偏画面就转回竖屏。
-          PlayerToolButton({
-            icon: this.orientationIcon(),
-            label: this.orientationLabel(),
-            selected: this.orientation !== 'auto',
-            onTap: () => {
-              this.cycleOrientation();
-            }
-          })
-          // 播放中切换音频/字幕：播放页自己的覆盖层面板（不依赖详情页的 bindSheet）
-          PlayerToolButton({
-            icon: $r('sys.symbol.speaker_wave_2'),
-            label: '音频/字幕',
-            selected: this.showTrackSheet,
-            onTap: () => {
-              this.openTrackSheet();
-            }
-          })
-          PlayerToolButton({
-            icon: $r('sys.symbol.video_speed'),
-            label: `${this.playbackSpeed}x`,
-            selected: this.playbackSpeed !== 1,
-            onTap: () => {
-              this.cycleSpeed();
-            }
-          })
-          // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
-          PlayerToolButton({
-            showIcon: false,
-            label: '软解',
-            selected: this.softPlaying,
-            onTap: () => {
-              if (this.softPlaying) {
-                this.stopSoftPlay();
-                this.setSoftNotice('已停止软解', false);
-              } else {
-                this.startSoftPlay();
-              }
-            }
-          })
-        }
-        .padding({ left: 2, right: 2 })
+          }
+        })
+          .margin({ left: 4, right: 4, top: 4 })
       }
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
       .width('100%')
     }
     .width('100%')
