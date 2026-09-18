@@ -20,6 +20,9 @@
 | 元数据选项数据源 | `GET /Libraries/AvailableOptions?libraryContentType&isNewLibrary` | `LibraryController.GetLibraryOptionsInfo` |
 | 语言/国家数据源 | `GET /Localization/Cultures`、`GET /Localization/Countries` | `LocalizationController.cs` |
 | 服务器级媒体库设置 | `GET /System/Configuration`、`POST /System/Configuration` | `SystemConfigurationController.cs` |
+| 封面信息 | `GET /Items/{itemId}/Images` | `ImageController.GetItemImageInfos` |
+| 封面设为 URL 图片 | `POST /Items/{itemId}/RemoteImages/Download?type&imageUrl` | `RemoteImageController.DownloadRemoteImage` |
+| 删除封面 | `DELETE /Items/{itemId}/Images/{imageType}?imageIndex` | `ImageController.DeleteItemImage` |
 
 服务器级设置（媒体库显示方式、图片落盘约定、扫描并发与文件监控延迟）在
 「设置 → 控制台 → 媒体库 → 媒体库显示」页（`LibraryDisplaySettingsPage.ets`）。
@@ -146,9 +149,12 @@ core/api/library_admin_client.cpp      薄封装：execute() / getVirtualFolders
 | 删除 | 临时库删除后服务端列表与界面都不再出现，**原有三个媒体库（含 ItemId 与路径）完好** |
 | 元数据保存器的默认值 | 把某库的 `MetadataSavers` 置空（=沿用全局）后在界面打开开关并保存 → 服务端得到 `["Nfo"]`（服务器默认启用的那项），而不是 `[]` |
 | 服务器级设置页 | 恒等保存后 `/System/Configuration` 的 45 个字段逐字节相同；把 `DisplaySpecialsWithinSeasons` 改成 false 再改回 true，两次都只有这一个字段变化（其它字段零改动） |
+| 封面（从 URL 设置 / 删除 / 复原） | 打开浮层显示 `Primary 960×540`；设为本地 HTTP 上的 400×300 图 → 服务端 `GET /Items/{id}/Images` 报 400×300、卡片重绘封面；删除 → 该库不再有 Primary、卡片显示首字占位块；再用同一机制把**原图**设回 → 960×540 且字节数与最初完全一致（669985） |
 
 > ⚠️ 验收期间这台服务器被跑过一次 `POST /Library/Refresh`（用于让新建的库被索引），
 > 大媒体库的完整扫描会持续较久，属于服务端正常行为。
+> 封面验收用的是一台**只监听本机**的临时 HTTP 服务（`python3 -m http.server`）与本地生成的图片，
+> 验收结束已停掉并清理；验收用的临时目录 `/tmp/dsh-probe-*` 也已删除。
 
 ## UI 模型
 
@@ -175,10 +181,28 @@ core/api/library_admin_client.cpp      薄封装：execute() / getVirtualFolders
 - 外层是 camelCase 的 UI 模型；
 - `options` 保持服务端的 PascalCase 键名，因为它要被**原样回传**，改键名会让回传丢字段。
 
+## 封面（图片）
+
+媒体库卡片上的「封面」会打开一个浮层（`LibrariesAdminPage.CoverSheet`）：
+
+- 打开时先 `GET /Items/{itemId}/Images`，如实显示服务器上**当前有哪些图片、多大**
+  （例如 `Primary 960×540`），而不是只知道"有没有"；
+- 「从该地址设置封面」：把 URL 交给 `POST /Items/{itemId}/RemoteImages/Download`，
+  **由服务器去抓取并保存**，客户端只发送地址 —— 图片不经过手机中转，
+  也不需要客户端实现二进制上传；
+- 「删除现有封面」：`DELETE /Items/{itemId}/Images/Primary`，删掉后卡片显示首字占位块。
+
+**未实现：从手机本地图片文件设置封面。** Jellyfin Web 的"编辑图片"对话框里有本地上传
+（`POST /Items/{itemId}/Images/{imageType}`，请求体是图片二进制），本应用没做，原因是：
+本机的模拟器上没有可供选择器挑选的图片源，做出来是一条**无法验收**的链路。
+要补的话需要三件事一起做：系统图片选择器接入、把选择结果拷进应用沙箱、
+原生按二进制体 POST（现在的 HttpClient 只发 JSON 字符串体），并处理图片格式与体积上限。
+
 ## 已知限制
 
-- 媒体库的**封面图**（`PrimaryImageItemId`）只在列表里暴露了是否存在，本页未做上传/更换；
-  Jellyfin Web 也没有在"媒体库"页做这件事（它走条目图片管理），因此这里不做。
 - 「路径」改动会让服务端重启目录监控（`AddMediaPath` / `RemoveMediaPath` 里的 `_libraryMonitor.Stop()`），
   所以对话框里给了「添加/移除后立即扫描」开关，默认开启以便新内容马上可见。
 - 服务端要求路径在**服务器本机**真实存在，客户端无法预检，因此不做本地校验，直接让服务端报错。
+- 从 URL 设置封面要求**服务器能访问该地址**（内网地址、需要鉴权的图床都可能失败），
+  失败信息由服务端返回、界面原样展示。
+

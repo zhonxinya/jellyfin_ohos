@@ -339,6 +339,35 @@ LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::str
     return LibraryRequest{"POST", path, nullptr};
 }
 
+// ── 媒体库封面 ──────────────────────────────────────────────────────────────
+
+LibraryRequest buildItemImagesRequest(const std::string &itemId)
+{
+    return LibraryRequest{"GET", "/Items/" + EncodeQueryComponent(itemId) + "/Images", nullptr};
+}
+
+LibraryRequest buildRemoteImageDownloadRequest(const std::string &itemId, const std::string &imageType,
+                                               const std::string &imageUrl)
+{
+    std::string path = "/Items/" + EncodeQueryComponent(itemId) + "/RemoteImages/Download?";
+    AppendParam(path, "type",
+                EncodeQueryComponent(imageType.empty() ? std::string("Primary") : imageType));
+    AppendEncoded(path, "imageUrl", imageUrl);
+    return LibraryRequest{"POST", path, nullptr};
+}
+
+LibraryRequest buildDeleteItemImageRequest(const std::string &itemId, const std::string &imageType,
+                                           int imageIndex)
+{
+    std::string path = "/Items/" + EncodeQueryComponent(itemId) + "/Images/" +
+        EncodeQueryComponent(imageType.empty() ? std::string("Primary") : imageType);
+    if (imageIndex >= 0) {
+        path += "?";
+        AppendParam(path, "imageIndex", std::to_string(imageIndex));
+    }
+    return LibraryRequest{"DELETE", path, nullptr};
+}
+
 // ── 响应归一化 ──────────────────────────────────────────────────────────────
 
 nlohmann::json normalizeServerConfiguration(const nlohmann::json &serverConfig)

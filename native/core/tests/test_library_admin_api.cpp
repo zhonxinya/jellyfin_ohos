@@ -204,6 +204,29 @@ void TestRequestBuilders()
     }
 
     {
+        // 媒体库封面：URL 里的 query 是常见误用点（带 & 的图床地址不编码会把 query 拆坏）
+        ExpectEq("item images route", buildItemImagesRequest("id-2").path, "/Items/id-2/Images");
+
+        const LibraryRequest dl =
+            buildRemoteImageDownloadRequest("id-2", "", "https://cdn.example/a.png?w=100&h=50");
+        ExpectEq("cover download method", dl.method, "POST");
+        ExpectEq("cover download route", dl.path,
+                 "/Items/id-2/RemoteImages/Download?type=Primary"
+                 "&imageUrl=https%3A%2F%2Fcdn.example%2Fa.png%3Fw%3D100%26h%3D50");
+        ExpectTrue("cover download has no body", dl.body.is_null());
+
+        const LibraryRequest del0 = buildDeleteItemImageRequest("id-2", "Primary", -1);
+        ExpectEq("delete image method", del0.method, "DELETE");
+        ExpectEq("delete image without index", del0.path, "/Items/id-2/Images/Primary");
+        ExpectEq("delete image with index",
+                 buildDeleteItemImageRequest("id-2", "Primary", 1).path,
+                 "/Items/id-2/Images/Primary?imageIndex=1");
+        // 类型为空时兜底成 Primary，避免拼出 /Images/ 这种无效路由
+        ExpectEq("delete image default type",
+                 buildDeleteItemImageRequest("id-2", "", -1).path, "/Items/id-2/Images/Primary");
+    }
+
+    {
         // 服务器级媒体库设置：整体替换，POST 的体就是完整配置对象本身
         const LibraryRequest get = buildServerConfigurationRequest();
         ExpectEq("server config method", get.method, "GET");

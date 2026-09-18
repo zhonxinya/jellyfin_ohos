@@ -2704,6 +2704,68 @@ napi_value LibraryScanFolder(napi_env env, napi_callback_info info)
     });
 }
 
+// ── 媒体库封面（图片）───────────────────────────────────────────────────────
+// 与其它 library* 一样：这里只接线，路径与 query 的构造在 core 的 library_admin_api，
+// 由主机单测逐字断言（尤其是 imageUrl 里带 & 的图床地址必须被编码）。
+
+napi_value LibraryCoverInfo(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    ReadStringArg(env, info, 0, itemId);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library item id is required"));
+    }
+    return RunAsync(env, [itemId]() {
+        return RunLibraryRequest(jellyfin::api::buildItemImagesRequest(itemId));
+    });
+}
+
+napi_value LibrarySetCoverFromUrl(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string imageType;
+    std::string imageUrl;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, imageType);
+    ReadStringArg(env, info, 2, imageUrl);
+    if (itemId.empty() || imageUrl.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library item id and image url are required"));
+    }
+    return RunAsync(env, [itemId, imageType, imageUrl]() {
+        return RunLibraryRequest(jellyfin::api::buildRemoteImageDownloadRequest(
+            itemId, imageType, imageUrl));
+    });
+}
+
+napi_value LibraryDeleteCover(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string imageType;
+    int64_t imageIndex = -1;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, imageType);
+    ReadIntArg(env, info, 2, imageIndex);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library item id is required"));
+    }
+    return RunAsync(env, [itemId, imageType, imageIndex]() {
+        return RunLibraryRequest(jellyfin::api::buildDeleteItemImageRequest(
+            itemId, imageType, static_cast<int>(imageIndex)));
+    });
+}
+
 napi_value LibraryServerConfig(napi_env env, napi_callback_info /*info*/)
 {
     const nlohmann::json guard = RequireAdmin();
@@ -3034,6 +3096,12 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          napi_default, nullptr},
         {"libraryScanAll", nullptr, LibraryScanAll, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"libraryScanFolder", nullptr, LibraryScanFolder, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"libraryCoverInfo", nullptr, LibraryCoverInfo, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"librarySetCoverFromUrl", nullptr, LibrarySetCoverFromUrl, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryDeleteCover", nullptr, LibraryDeleteCover, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"libraryServerConfig", nullptr, LibraryServerConfig, nullptr, nullptr, nullptr,
          napi_default, nullptr},

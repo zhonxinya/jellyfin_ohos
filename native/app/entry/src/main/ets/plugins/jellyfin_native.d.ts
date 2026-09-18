@@ -136,6 +136,12 @@ declare module 'libjellyfin_native.so' {
     libraryServerConfig(): string;
     /** 整体替换服务器配置：必须回传 `libraryServerConfig()` 拿到的完整对象 */
     libraryUpdateServerConfig(configJson: string): string;
+    /** 条目已有图片列表（ImageInfo[]：ImageType/ImageIndex/Width/Height），用来如实显示封面尺寸 */
+    libraryCoverInfo(itemId: string): string;
+    /** 由**服务器**去抓取给定 URL 的图片作为封面（`POST /Items/{id}/RemoteImages/Download`） */
+    librarySetCoverFromUrl(itemId: string, imageType: string, imageUrl: string): string;
+    /** 删除封面；`imageIndex` 传 -1 表示按类型整组删除 */
+    libraryDeleteCover(itemId: string, imageType: string, imageIndex: number): string;
     setPreference(key: string, value: string): string;
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;
