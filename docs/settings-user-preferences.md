@@ -81,15 +81,20 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 （没列到的按默认顺序排在后面），所以界面会先把它与当前视图列表对齐再显示；
 "有未保存的修改"也以对齐后的顺序为基线判断，避免一进页面就报脏。
 
-## 服务器级的三页：媒体库显示 / 媒体库元数据 / NFO 设置
+## 服务器级的几页：媒体库显示 / 媒体库元数据 / NFO 设置 / 继续观看
 
-「设置 → 控制台 → 媒体库」下面这三页改的都是**服务器级**配置（影响所有用户与所有客户端）：
+「设置 → 控制台」下面这几页改的都是**服务器级**配置（影响所有用户与所有客户端）：
 
 | 页面 | 服务端存储 | 读写端点 | 语义 |
 | --- | --- | --- | --- |
 | 媒体库显示 | `ServerConfiguration`（显示方式 / 图片落盘 / 扫描并发 / 监控延迟） | `GET/POST /System/Configuration` | 整份替换 |
 | 媒体库元数据 | `ServerConfiguration.MetadataOptions[]` | 同左（整份） | 整份替换，但只有这一段会变 |
 | NFO 设置 | `XbmcMetadataOptions`（key = `xbmcmetadata`） | `GET/POST /System/Configuration/xbmcmetadata` | 只替换这一段 |
+| 继续观看 | `ServerConfiguration` 顶层五个字段（`MinResumePct` / `MaxResumePct` / `MinResumeDurationSeconds` / `MinAudiobookResume` / `MaxAudiobookResume`） | `GET/POST /System/Configuration` | 整份替换，但只有这几个字段会变 |
+
+> 「继续观看」原来指向 `/System/Configuration`（整份配置的原始键值表），标题写着"继续观看"、
+> 内容是服务器全部配置 —— 既看不懂也改不了。现在按上面五个字段做成表单（最短时长界面按**分钟**填，
+> 服务端存秒）。
 
 ### 命名配置的 key 别猜，实测为准
 
@@ -128,4 +133,5 @@ GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"Sav
 | --- | --- |
 | 媒体库元数据页 | 恒等保存后整份 `/System/Configuration` 逐字节相同；取消「电影」的一个元数据下载器并保存 → 整份配置里**只有 `MetadataOptions`** 段变化，该类型的 `DisabledMetadataFetchers` 恰好多一项；复原后零差异 |
 | NFO 设置页 | 页面读到真实值（`ReleaseDateFormat=yyyy-MM-dd` 等）而不是 404；恒等保存后这一段逐字节相同；切「生成额外缩略图副本」→ 服务端 `EnableExtraThumbsDuplication` 翻转，整份配置里只有 `xbmcmetadata` 段、段内只有这一个字段变化；复原后零差异 |
+| 继续观看页 | 页面显示 `MinResumeDurationSeconds=300` 换算成的 5 分钟；恒等保存后整份配置逐字节相同；把最短时长填成 6 分钟 → 服务端 `MinResumeDurationSeconds=360`，整份配置里只有这一个字段变化；复原后零差异 |
 
