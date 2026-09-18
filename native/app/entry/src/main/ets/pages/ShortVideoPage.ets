@@ -56,6 +56,13 @@ export struct ShortVideoPage {
   @Prop embedded: boolean = true;
   /** 外壳当前页签下标：非「视频」页时暂停播放（见 onTabIndexChanged） */
   @Prop @Watch('onTabIndexChanged') activeTab: number = kVideoTabIndex;
+  /**
+   * 沉浸式全屏下工具层要避让的顶部像素（vp）。
+   *
+   * 「视频」页默认全屏沉浸式：**画面铺满整屏**，但工具栏/标题不能被挖孔或状态栏压住，
+   * 因此只有叠在画面上的那一层按这个值内缩。
+   */
+  @Prop topInsetVp: number = 0;
 
   @State private status: string = UiState.INITIAL;
   @State private errorMsg: string = '';
@@ -604,7 +611,7 @@ export struct ShortVideoPage {
     .padding({
       left: ThemeConstants.PAGE_PADDING,
       right: ThemeConstants.PAGE_PADDING,
-      top: 8,
+      top: 8 + this.topInsetVp,
       bottom: 8
     })
     .alignItems(VerticalAlign.Center)

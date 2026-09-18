@@ -1,4 +1,7 @@
 import router from '@ohos.router';
+import window from '@ohos.window';
+import common from '@ohos.app.ability.common';
+import { WindowFullscreen } from '../common/WindowFullscreen';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { AppIconButton } from '../components/AppIconButton';
@@ -17,6 +20,9 @@ import { SettingsPage } from './SettingsPage';
  * - 图标全部用 `SymbolGlyph` 系统符号，不再用 `☰ / △ / ×` 之类文本字符；
  * - 抽屉行 52vp、标题 16fp，按下态 `surface_pressed`，分隔线 0.5vp，遮罩用 `scrimHeavy` 令牌。
  */
+/** 「视频」页在底部页签中的下标（与 ShortVideoPage.kVideoTabIndex 对应） */
+const kVideoTabIndex: number = 1;
+
 @Entry
 @Component
 struct MainShell {
@@ -31,12 +37,60 @@ struct MainShell {
    * 回到「视频」页却仍是空态 —— 必须由一个外部信号告诉它"配置可能变了"。
    */
   @State private videoTabTick: number = 0;
+  /** 窗口实例：沉浸式全屏（「视频」页）需要它，进入/退出必须成对 */
+  private windowRef: window.Window | null = null;
+  /** 当前是否为「视频」页应用了沉浸式全屏（避免重复进入/退出） */
+  private immersiveForVideoTab: boolean = false;
+  /**
+   * 沉浸式下「视频」页顶部要避让的像素（vp，来自挖孔/状态栏）。
+   *
+   * 为什么由外壳算并下发：窗口实例在外壳手里，而**视频层铺满、工具层内缩**是同一套规则 ——
+   * 页面自己再取一次窗口既多一次异步、也可能拿到不同实例。
+   */
+  @State private videoTopInsetVp: number = 0;
 
   aboutToAppear(): void {
     AppViewModel.getInstance().onThemeChanged = () => {
       this.themeTick = this.themeTick + 1;
     };
     this.themeTick = AppViewModel.getInstance().themeVersion;
+    // 窗口实例提前取回：切到「视频」页要立刻隐藏系统栏，不能等到用户切页签时才开始异步取
+    window.getLastWindow(getContext(this) as common.UIAbilityContext).then((win: window.Window) => {
+      this.windowRef = win;
+      this.applyChromeForTab(this.shellTabIndex);
+    }).catch(() => {
+      // 取不到窗口时「视频」页仍可用，只是不沉浸（不做静默假设）
+    });
+  }
+
+  /**
+   * 返回本页（从播放页/详情页返回）时重新应用一次窗口外观。
+   *
+   * 为什么需要：播放页自己也会进出沉浸式（`WindowFullscreen`），它退出时会把系统栏还回来；
+   * 若用户本来就停在「视频」页签上，返回后不会触发页签变化，系统栏就会一直挂着。
+   */
+  onPageShow(): void {
+    this.applyChromeForTab(this.shellTabIndex);
+  }
+
+  /**
+   * 「视频」页默认**全屏沉浸式**（需求）：切到该页签即隐藏系统状态栏与导航栏并铺满整屏，
+   * 切走/离开必须还原（其它页面是普通布局，顶着"没有系统栏"会被当成系统级异常）。
+   */
+  private applyChromeForTab(index: number): void {
+    const wantImmersive: boolean = index === kVideoTabIndex;
+    if (wantImmersive === this.immersiveForVideoTab) {
+      return;
+    }
+    this.immersiveForVideoTab = wantImmersive;
+    if (wantImmersive) {
+      WindowFullscreen.enter(this.windowRef);
+      // 系统栏隐藏后仍要避让挖孔：insets 的 visible 判定在 WindowFullscreen 里统一处理
+      this.videoTopInsetVp = WindowFullscreen.insets(this.windowRef, false).top;
+    } else {
+      WindowFullscreen.exit(this.windowRef);
+      this.videoTopInsetVp = 0;
+    }
   }
 
   private colors(): ThemeColors {
@@ -64,10 +118,11 @@ struct MainShell {
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
       this.shellTabIndex = index;
-      if (index === 1) {
-        // 切到「视频」页：让页面重读一次短视频媒体库配置（设置页可能刚改过）
+      if (index === kVideoTabIndex) {
+        // 切到「视频」页：重读短视频媒体库配置（设置页可能刚改过）+ 进入全屏沉浸式
         this.videoTabTick = this.videoTabTick + 1;
       }
+      this.applyChromeForTab(index);
     })
   }
 
@@ -217,7 +272,9 @@ struct MainShell {
               refreshTick: this.videoTabTick,
               // 页签下标传进去：离开「视频」页时页面自己要暂停播放
               // （嵌入式组件不会销毁，否则会在"设置"页里继续放声音）
-              activeTab: this.shellTabIndex
+              activeTab: this.shellTabIndex,
+              // 沉浸式下工具层按挖孔内缩（视频层仍然铺满）
+              topInsetVp: this.videoTopInsetVp
             })
           }
           .tabBar('视频')
@@ -233,6 +290,7 @@ struct MainShell {
         .barHeight(0)
         .onChange((index: number) => {
           this.shellTabIndex = index;
+          this.applyChromeForTab(index);
         })
 
         Row() {
