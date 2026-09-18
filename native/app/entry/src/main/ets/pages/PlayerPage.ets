@@ -11,6 +11,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { WindowLayout } from '../common/WindowLayout';
 import { PlayerAspect, PlayerAspectMode, AspectBox, kScaleTypeFitCrop } from '../common/PlayerAspect';
+import { WindowFullscreen, WindowInsets, PlayerOrientation } from '../common/WindowFullscreen';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { formatSeconds } from '../common/format';
 import { AppIconButton } from '../components/AppIconButton';
@@ -183,9 +184,17 @@ struct PlayerPage {
   /** 视频原始像素尺寸（硬解来自 AVPlayer.width/height，软解来自 softPlayOpen 返回值） */
   @State private videoWidthPx: number = 0;
   @State private videoHeightPx: number = 0;
-  /** 播放区实测尺寸（vp，来自根 Stack 的 onAreaChange），用于按比例算视频面尺寸 */
-  private areaWidthVp: number = 0;
-  private areaHeightVp: number = 0;
+  /**
+   * 播放区实测尺寸（vp，来自根 Stack 的 onAreaChange），用于按比例算视频面尺寸。
+   *
+   * 为什么必须是 `@State` 而不能是普通字段：ArkUI 只重新执行"读到了变化状态"的那部分更新闭包。
+   * XComponent 的 `.width(this.videoAreaWidth())` 只读取 `aspectMode` / `videoWidthPx` / `videoHeightPx`
+   * 这几个 @State，**并不读 `landscape`**；若这里是普通字段，横竖屏切换时虽然 `landscape` 变了
+   * （底部工具行会重排），但 XComponent 那段闭包不会被重新执行 —— 视频面会一直停在竖屏算出的几何上，
+   * 表现为"横屏后画面缩在屏幕中间、两侧大片黑边"。设备实测确认过该缺陷（横屏 2844x1260 时视频面仍是竖屏的 371x209vp）。
+   */
+  @State private areaWidthVp: number = 0;
+  @State private areaHeightVp: number = 0;
   /** 单击/双击判定状态 */
   private lastTapUpAt: number = 0;
   private lastTapX: number = 0;
@@ -290,6 +299,41 @@ struct PlayerPage {
   private surfaceWidthPx: number = 0;
   private surfaceHeightPx: number = 0;
 
+  // ─────────────────────────── 全屏观看 ───────────────────────────
+  /**
+   * 是否已进入沉浸式全屏（系统栏已隐藏）。
+   *
+   * 用途有二：① 避免重复进入/退出造成无谓的平台调用；
+   * ② 告诉 `WindowFullscreen.insets()` 要不要避让系统栏 ——
+   *    系统栏已被我们隐藏时就不该再留出它的高度，否则横屏下会白丢一条可用区。
+   */
+  private immersive: boolean = false;
+  /** `setWindowLayoutFullScreen(true)` 是否成功（失败时页面仍可用，只是不铺满） */
+  private layoutFullscreenOk: boolean = false;
+  /** 播放页的屏幕方向选择：默认跟随传感器（横过来即横屏全屏，主流播放器行为） */
+  @State private orientation: PlayerOrientation = 'auto';
+  /**
+   * 进入播放页前的窗口首选方向，退出时还原。
+   *
+   * 为什么不统一还原成 `PORTRAIT`：本应用其它页面（首页/媒体库/详情）都是竖屏布局，
+   * 但用户在系统设置里的方向偏好未知（可能是"自动旋转"）。还原成进入前的实际值
+   * 才既保证其它页面回到竖屏形态、又不越权改用户自己的设定。-1 表示当时没读到。
+   */
+  private savedOrientation: number = -1;
+  /**
+   * 当前需要避让的安全区（vp）。
+   *
+   * 视频层不需要它（全屏观看的目的就是铺满），但**控件层必须**：
+   * 沉浸式布局之后系统不再替我们避让，若不内缩，返回按钮会被状态栏/挖孔压住。
+   */
+  @State private insets: WindowInsets = { top: 0, bottom: 0, left: 0, right: 0 };
+  /** 当前播放区是否为横向（宽 > 高）：控件布局按它切换紧凑/常规形态 */
+  @State private landscape: boolean = false;
+  /** 方向切换是否不受平台支持（如不支持传感器旋转的设备）：一次性告知用户 */
+  private orientationUnavailableNotified: boolean = false;
+  /** 是否已订阅窗口尺寸变化（旋转后需要重算避让区与视频面几何） */
+  private windowSizeSubscribed: boolean = false;
+
   // 支持倍速列表
   static readonly SPEEDS: number[] = [0.5, 1.0, 1.25, 1.5, 2.0];
 
@@ -349,14 +393,31 @@ struct PlayerPage {
     this.scheduleHideControls();
     // 启动视频区触摸事件轮询：从原生侧 DispatchTouchEvent 捕获的触摸事件中读取并处理手势
     this.startTouchPollTimer();
-    // 窗口实例（亮度手势 / 播放常亮都依赖它）：提前取一次，避免首次手势时才开始异步获取
-    this.ensureWindow();
+    // 窗口实例 + 进入沉浸式全屏：亮度手势 / 播放常亮 / 全屏都依赖窗口实例，
+    // 这里一次取回并立刻进入全屏，避免"先竖屏带系统栏看一会儿再进全屏"的跳变。
+    this.enterFullscreen();
+  }
+
+  /**
+   * 重新显示播放页（从详情页返回、或从后台切回）时再次进入全屏。
+   *
+   * 为什么必须在 onPageShow 而不是只在 aboutToAppear：
+   * 播放页切到后台时我们已经退出全屏（见 onPageHide），若不在这里恢复，
+   * "按 Home 再回来"之后播放页就变成带系统栏的普通页面了。
+   */
+  onPageShow(): void {
+    if (!this.immersive) {
+      this.enterFullscreen();
+    }
   }
 
   onPageHide(): void {
     this.stopTouchPollTimer();
     // 页面切到后台：恢复系统亮度与常亮设置，避免把"播放页的窗口亮度"带到其它界面
     this.releaseWindowOverrides();
+    // 同时退出沉浸式全屏并还原方向：用户已经在看别的界面（甚至别的应用），
+    // 此时若仍隐藏系统栏、仍锁着横屏，会被当成系统级异常。
+    this.exitFullscreen();
     this.flushStop();
   }
 
@@ -401,6 +462,9 @@ struct PlayerPage {
     }
     this.stopTouchPollTimer();
     this.releaseWindowOverrides();
+    // 离开播放页必须退出沉浸式全屏并还原方向：否则其它页面会顶着"没有系统栏 + 锁横屏"，
+    // 用户只能靠杀进程恢复。与 onPageHide 的退出是幂等的（见 exitFullscreen 的状态判断）。
+    this.exitFullscreen();
     this.flushStop();
   }
 
@@ -569,9 +633,188 @@ struct PlayerPage {
 
   // ─────────────────────── 窗口：亮度 / 常亮 ───────────────────────
 
+  // ─────────────────────── 全屏观看：进入 / 退出 / 方向 ───────────────────────
+
   /**
-   * 取当前窗口实例（亮度与"保持常亮"都要用它）。
-   * 失败不抛异常：亮度手势会退化成画面调暗，"常亮"则只是不生效。
+   * 进入沉浸式全屏（隐藏系统状态栏与导航栏 + 布局铺满）并恢复播放页的方向选择。
+   *
+   * 时序要点：窗口实例是异步取回的（`window.getLastWindow`）。此前 `aboutToAppear` 里
+   * 只是"顺手取一下"，取不到就永远没有窗口 —— 全屏会静默失效。
+   * 因此这里以"取到窗口"为前置条件，取到后立刻继续走全屏流程，并在之后订阅
+   * 尺寸变化（旋转会改窗口尺寸，控件避让区与视频面几何都要跟着重算）。
+   */
+  private enterFullscreen(): void {
+    if (this.windowRef === null) {
+      this.ensureWindow().then(() => {
+        if (this.windowRef !== null) {
+          this.enterFullscreen();
+        }
+      });
+      return;
+    }
+    if (!this.immersive) {
+      // 先记住进入前的方向设置，退出时原样还原
+      this.savedOrientation = WindowFullscreen.currentOrientation(this.windowRef);
+      this.immersive = true;
+      WindowFullscreen.enter(this.windowRef).then((result) => {
+        this.layoutFullscreenOk = result.layoutFullscreen;
+        // 系统栏隐藏失败时布局仍可用，但控件必须继续避让系统栏，故在此刷新一次避让区
+        this.refreshInsets();
+      });
+      this.subscribeWindowSizeChange();
+    }
+    this.applyOrientation();
+    // 首次进入就把避让区取准（旋转/系统栏变化时由 windowSizeChange 与 avoidAreaChange 再刷新）
+    this.refreshInsets();
+  }
+
+  /**
+   * 退出沉浸式全屏并还原窗口方向。
+   *
+   * 与 `enterFullscreen` 成对出现，覆盖三条退出路径：
+   * ① 返回上一页（`aboutToDisappear`）；② 切到后台（`onPageHide`）；
+   * ③ 用户主动退出播放页时先 `flushStop()` 再 `router.back()` —— 三者都会走到这里。
+   */
+  private exitFullscreen(): void {
+    this.unsubscribeWindowSizeChange();
+    if (!this.immersive && this.savedOrientation < 0) {
+      return;
+    }
+    this.immersive = false;
+    const win: window.Window | null = this.windowRef;
+    if (win !== null) {
+      WindowFullscreen.exit(win).then(() => {
+        // 系统栏重新出现后，其它页面需要按常规避让；这里只记录，播放页即将离开
+      });
+      WindowFullscreen.restoreOrientation(win, this.savedOrientation);
+    }
+    this.savedOrientation = -1;
+  }
+
+  /**
+   * 应用当前方向选择，并把平台是否真的接受这个设置如实反馈给用户。
+   *
+   * 为什么必须反馈：官方文档明确 `setPreferredOrientation` 对
+   * "不支持传感器旋转的设备、2in1 设备与子窗口"不生效。若静默失败，
+   * 用户点「横屏」却什么都没发生，只能当成应用坏了（这正是"异常必须到达终态"的约定）。
+   */
+  private applyOrientation(): void {
+    if (this.windowRef === null) {
+      return;
+    }
+    const target: PlayerOrientation = this.orientation;
+    WindowFullscreen.setOrientation(this.windowRef, target).then((ok) => {
+      if (!ok && !this.orientationUnavailableNotified) {
+        this.orientationUnavailableNotified = true;
+        this.setSoftNotice('当前设备不支持旋转屏幕，将保持竖屏播放', false);
+      }
+    });
+  }
+
+  /**
+   * 在全屏的三种方向选择之间切换：跟随系统 → 横屏 → 竖屏 → 跟随系统。
+   *
+   * 为什么要有"跟随系统"而不是只有强制横竖屏：用户把手机架在支架上看片时，
+   * 横竖切换应当由机身姿态决定；而躺卧观看时又希望锁死横屏。两者都要给。
+   */
+  private cycleOrientation(): void {
+    if (this.orientation === 'auto') {
+      this.orientation = 'landscape';
+    } else if (this.orientation === 'landscape') {
+      this.orientation = 'portrait';
+    } else {
+      this.orientation = 'auto';
+    }
+    this.applyOrientation();
+    this.gestureIcon = 'orientation';
+    this.gestureFeedback = this.orientationLabel();
+    this.gestureRatio = -1;
+    this.showFeedback = true;
+    this.dismissFeedback();
+    this.revealControls();
+  }
+
+  /** 当前方向选择的用户可见文案 */
+  private orientationLabel(): string {
+    if (this.orientation === 'landscape') {
+      return '横屏';
+    }
+    if (this.orientation === 'portrait') {
+      return '竖屏';
+    }
+    return '跟随系统';
+  }
+
+  /**
+   * 方向按钮的图标。
+   *
+   * 为什么按状态给不同图标：用户需要一眼看出"当前是锁定横屏还是跟随系统"。
+   * 全部用同一个旋转图标时，按钮文案与图标都表示"旋转"，反而看不出当前处在哪种模式。
+   *
+   * 符号名取自本机 SDK 的系统符号清单（`ets-loader/sysResource.js` 的 `symbol` 段，
+   * 行号 3246–7275）：`screen_rotation` / `rectangle_ratio_9_to_16` / `rectangle_ratio_16_to_9`。
+   * 注意该文件里 `rotate` 位于 `media` 段（非符号），写成 `sys.symbol.rotate` 会构建失败
+   * （实测报 `Unknown resource name 'rotate'`）。
+   */
+  private orientationIcon(): Resource {
+    if (this.orientation === 'landscape') {
+      return $r('sys.symbol.rectangle_ratio_16_to_9');
+    }
+    if (this.orientation === 'portrait') {
+      return $r('sys.symbol.rectangle_ratio_9_to_16');
+    }
+    return $r('sys.symbol.screen_rotation');
+  }
+
+  /**
+   * 订阅窗口尺寸变化。
+   *
+   * 为什么必须订阅：旋转屏幕会改变窗口尺寸，而视频面尺寸（`videoAreaWidth/Height`）
+   * 与控件避让区都是从尺寸推导出来的。不订阅的话，横过来之后视频面仍是竖屏算出的几何，
+   * 画面会缩在屏幕一角 —— 那等于"全屏"没做成。
+   */
+  private subscribeWindowSizeChange(): void {
+    if (this.windowRef === null || this.windowSizeSubscribed) {
+      return;
+    }
+    try {
+      this.windowRef.on('windowSizeChange', () => {
+        this.refreshInsets();
+      });
+      this.windowSizeSubscribed = true;
+    } catch (_e) {
+      // 订阅失败不影响播放：onAreaChange 仍会在布局变化时更新播放区实测尺寸
+    }
+  }
+
+  private unsubscribeWindowSizeChange(): void {
+    if (this.windowRef === null || !this.windowSizeSubscribed) {
+      return;
+    }
+    try {
+      this.windowRef.off('windowSizeChange');
+    } catch (_e) {
+      // 取消订阅是尽力而为
+    }
+    this.windowSizeSubscribed = false;
+  }
+
+  /**
+   * 重新计算控件避让区。
+   *
+   * `includeSystemBars` 的取值是这里的关键：只有"系统栏确实还显示着"时才需要避让它。
+   * 我们隐藏失败时必须避让（否则控件被状态栏压住），隐藏成功时不能避让
+   * （否则屏幕上平白多一条空白带）。
+   */
+  private refreshInsets(): void {
+    const includeSystemBars: boolean = !this.immersive || !this.layoutFullscreenOk;
+    this.insets = WindowFullscreen.insets(this.windowRef, includeSystemBars);
+    this.landscape = this.areaWidth() > this.areaHeight();
+  }
+
+  /**
+   * 取当前窗口实例（亮度、常亮与全屏都要用它）。
+   * 失败不抛异常：亮度手势会退化成画面调暗，"常亮"与全屏则只是不生效。
    */
   private async ensureWindow(): Promise<void> {
     if (this.windowRef !== null) {
@@ -646,13 +889,13 @@ struct PlayerPage {
   private handleTapUp(x: number): void {
     const now: number = Date.now();
     const isDoubleTap: boolean = (now - this.lastTapUpAt) < kDoubleTapMs
-      && Math.abs(x - this.lastTapX) < this.getScreenWidth() / 3;
+      && Math.abs(x - this.lastTapX) < this.gestureWidth() / 3;
     if (isDoubleTap) {
       if (this.singleTapTimerId >= 0) {
         clearTimeout(this.singleTapTimerId);
         this.singleTapTimerId = -1;
       }
-      const forward: boolean = x >= this.getScreenWidth() / 2;
+      const forward: boolean = x >= this.gestureWidth() / 2;
       // 探针：把"被判成双击"这件事写下来 —— 单击/双击是同一块区域上的两个手势，
       // 只看位置变化无法区分"没识别成双击"与"识别了但跳转失败"。
 
@@ -1833,7 +2076,9 @@ struct PlayerPage {
         this.gestureAxis = Math.abs(totalX) >= Math.abs(totalY) ? 'seek' : 'level';
       }
     }
-    const isLeftSide: boolean = x < this.getScreenWidth() / 2;
+    // 左右半屏判定同样必须用随旋转更新的宽度（见 gestureWidth 的说明）：
+    // 若用 display.width，横屏时屏幕右半部分会被判成「左侧」→ 横向滑动会去调亮度。
+    const isLeftSide: boolean = x < this.gestureWidth() / 2;
     if (this.gestureAxis === 'seek') {
       // 水平滑动 → seek：幅度按"按下点起的累计位移"算，与事件密度无关
       this.seekLastX = x;
@@ -2270,6 +2515,26 @@ struct PlayerPage {
   }
 
   /**
+   * 手势分区/双击判定所用的「屏宽」（vp）。
+   *
+   * 为什么不能直接用 `getScreenWidth()`（= `display.width / density`）：
+   * 设备实测确认 `display.width` **不随窗口旋转变化** —— 横屏时它仍返回竖屏宽度（1260px / 3.39 ≈ 371vp），
+   * 而横屏下触摸坐标 x 最大到约 2844px / 3.39 ≈ 839vp。
+   * 后果（设备实测）：
+   * ① 双击左右分区判定恒为「左侧」→ 横屏双击右半屏被判成快退（或位置被夹到 0）；
+   * ② 「两次抬手位置相差 < 屏宽/3」的阈值只有约 124vp，横屏下正常的双击很容易被判成两次单击。
+   * 根的修复是改用**根容器实测宽度**（`areaWidthVp`，由 onAreaChange 随旋转更新），
+   * 它在竖屏等于屏宽、在横屏等于屏高换算后的宽度，两个方向都与实际触摸坐标系一致。
+   */
+  private gestureWidth(): number {
+    const w: number = this.areaWidth();
+    if (w > 0) {
+      return w;
+    }
+    return this.getScreenWidth();
+  }
+
+  /**
    * 计算集数/季信息文案。
    *
    * 稳定性修复（设备实测发现的崩溃）：原实现是 `private get itemTypeLabel()`，
@@ -2433,6 +2698,16 @@ struct PlayerPage {
             selected: this.aspectMode !== 'contain',
             onTap: () => {
               this.cycleAspect();
+            }
+          })
+          // 屏幕方向：跟随系统 / 横屏 / 竖屏 —— 全屏观看的方向控制入口。
+          // 光靠传感器自动旋转不够：躺卧观看时需要锁死横屏，否则机身一偏画面就转回竖屏。
+          PlayerToolButton({
+            icon: this.orientationIcon(),
+            label: this.orientationLabel(),
+            selected: this.orientation !== 'auto',
+            onTap: () => {
+              this.cycleOrientation();
             }
           })
           // 播放中切换音频/字幕：播放页自己的覆盖层面板（不依赖详情页的 bindSheet）
@@ -2711,6 +2986,9 @@ struct PlayerPage {
     if (this.gestureIcon === 'aspect') {
       return $r('sys.symbol.aspectratio');
     }
+    if (this.gestureIcon === 'orientation') {
+      return this.orientationIcon();
+    }
     return $r('sys.symbol.speaker_wave_2');
   }
 
@@ -2885,6 +3163,14 @@ struct PlayerPage {
         }
         .width('100%')
         .height('100%')
+        // 控件层按安全区内缩：沉浸式全屏之后系统不再替我们避让，
+        // 不内缩的话返回按钮会被状态栏/挖孔压住（视频层则保持铺满，这正是全屏的目的）。
+        .padding({
+          top: this.insets.top,
+          bottom: this.insets.bottom,
+          left: this.insets.left,
+          right: this.insets.right
+        })
       }
 
       // 音频/字幕面板：播放页自有的覆盖层（详情页那套 bindSheet 在播放页不可用）
@@ -3033,6 +3319,10 @@ struct PlayerPage {
     .onAreaChange((_oldArea: Area, newArea: Area) => {
       this.areaWidthVp = Number(newArea.width);
       this.areaHeightVp = Number(newArea.height);
+      // 播放区尺寸变化即意味着旋转/分屏/系统栏显隐发生了变化：
+      // 横竖屏判定与控件避让区都要跟着重算，否则横过来之后控件仍按竖屏内缩。
+      this.landscape = this.areaWidth() > this.areaHeight();
+      this.refreshInsets();
     })
   }
 }
