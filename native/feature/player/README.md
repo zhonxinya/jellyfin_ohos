@@ -207,4 +207,16 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   既不报错也没有重试入口（违反"异常与超时必须到达终态"）。同环境下 4K 10-bit HEVC
   （「流浪地球」，3840x2160）可正常解码播放（约 10fps），因此这是**内容/解码器相关**的挂起，
   不是取流问题。宿主侧务必加看门狗（本项目 `PlayerPage` 为 20 秒）把它变成终态。
+- **软解提速：哪些招有效、哪些实测无效（都带数据，别重复试）**
+  同一模拟器、同一条目（1920×816 HEVC）实测，口径是 `softPlayOpen … decodeThreads=` 与逐帧
+  `decodeMs= … fps= …`：
+
+  | 做法 | 依据 | 实测 |
+  |---|---|---|
+  | `thread_count = 0`（自动按核数）+ `FF_THREAD_FRAME｜SLICE` | 解码器默认单线程，单核就是瓶颈；FFmpeg 头文件注明帧级并行"增加一帧/线程的延迟"，播放客户端始终有后续包，适用 | ✅ 线程 1→5，单帧 46–90ms→31–38ms，fps ≈5.6→**≈8** |
+  | `sws_getContext(..., SWS_FAST_BILINEAR, ...)` | 每帧 YUV→RGBA + 缩放是仅次于解码的开销 | ✅（与上一条同批实测） |
+  | `AV_CODEC_FLAG2_FAST`（"Allow non spec compliant speedup tricks"，`libavcodec/avcodec.h:355`） | FFmpeg 文档明确是"非严格符合规范换速度" | ❌ **无收益**：fps 8→8、单帧 29–37ms vs 31–38ms（噪声内），已回退 —— 本内容/本设备上瓶颈不在"严格性检查" |
+  | `skip_loop_filter/skip_idct`（`AVDiscard`） | 跳过去块/变换可提速 | 未采用：会引入可见块效应，播放场景不值得 |
+  | 拉帧循环接续方式 | 宿主是 `setInterval(70ms)` + 在途互斥，实测 **115ms/帧**（8.7fps）而解码只占 ~35ms —— 说明还有 ~45ms 花在 swscale/纹理上传/NAPI 往返与定时器等待上 | ⏳ **下一步的真瓶颈**：把"定时器驱动"改成"上一次拉帧完成即调度下一次"（保留一个下限间隔），目标是逼近 decode+上传的实际上限 |
+
 - **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。
