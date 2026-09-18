@@ -79,6 +79,15 @@ jobs:
         with:
           build-mode: debug
 
+      # 编译校验顺带守住"软件自带 FFmpeg"这条线：HAP 里必须带着 FFmpeg 五个库，
+      # 且 libjellyfin_native.so 的 DT_NEEDED 依赖闭包在包内完整。
+      # 少了 FFmpeg 的产物不会编译失败、也能正常启动，只会在硬解不了的媒体上丢掉软解能力，
+      # 属于典型的"静默能力缺失"，因此在这里显式卡住（校验内容见脚本文件头注释）。
+      - name: Verify FFmpeg inside HAP
+        run: |
+          set -euo pipefail
+          bash scripts/verify_hap_ffmpeg.sh "${{ steps.build.outputs.hap-path }}" arm64-v8a x86_64
+
       # 仓库不含签名材料，CI 产出的是未签名 HAP：仅用于编译校验，无法直接安装
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v7

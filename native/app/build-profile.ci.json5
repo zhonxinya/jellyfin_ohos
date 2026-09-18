@@ -8,11 +8,22 @@
 //   - 可用于编译校验（本仓库 CI 的用途）；
 //   - **不能安装到真机/模拟器**，安装报 `code:9568320 error: no signature file`。
 // 真机安装请按 README「签名」章节配置签名材料（模板见 `build-profile.json5.template`）。
+//
+// 两个产品（与 entry/build-profile.json5 的 target 一一对应）：
+//   default → 双 ABI（arm64-v8a + x86_64），CI 编译校验与模拟器验证用
+//   phone   → 仅 arm64-v8a 的真机发布包
+// 发布工作流对两者各构建一次，产出「arm64 精简包」与「双 ABI 通用包」。
 {
   "app": {
     "products": [
       {
         "name": "default",
+        "compatibleSdkVersion": "5.1.0(18)",
+        "runtimeOS": "HarmonyOS",
+        "targetSdkVersion": "6.1.0(23)"
+      },
+      {
+        "name": "phone",
         "compatibleSdkVersion": "5.1.0(18)",
         "runtimeOS": "HarmonyOS",
         "targetSdkVersion": "6.1.0(23)"
@@ -39,6 +50,12 @@
           "name": "default",
           "applyToProducts": [
             "default"
+          ]
+        },
+        {
+          "name": "phone",
+          "applyToProducts": [
+            "phone"
           ]
         }
       ]

@@ -34,6 +34,14 @@
         "compatibleSdkVersion": "5.1.0(18)",
         "runtimeOS": "HarmonyOS",
         "targetSdkVersion": "6.1.0(23)"
+      },
+      {
+        // 真机发布包用的产品：只编 arm64-v8a（与 entry/build-profile.json5 的 phone target 对应）
+        "name": "phone",
+        "signingConfig": "default",
+        "compatibleSdkVersion": "5.1.0(18)",
+        "runtimeOS": "HarmonyOS",
+        "targetSdkVersion": "6.1.0(23)"
       }
     ],
     "buildModeSet": [
@@ -57,6 +65,12 @@
           "name": "default",
           "applyToProducts": [
             "default"
+          ]
+        },
+        {
+          "name": "phone",
+          "applyToProducts": [
+            "phone"
           ]
         }
       ]

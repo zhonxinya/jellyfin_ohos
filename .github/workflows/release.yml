@@ -28,13 +28,49 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Build HAP
-        id: build
+      # ① 双 ABI 通用包（arm64-v8a 真机 + x86_64 模拟器），与 CI 编译校验一致
+      - name: Build HAP (universal, arm64-v8a + x86_64)
+        id: build-universal
         uses: ./.github/actions/build-hap
         with:
           build-mode: release
+          product: default
 
-      - name: Package Artifact
+      # 发布门禁：HAP 里必须真的带着 FFmpeg 五个库、且依赖闭包完整。
+      # 少了它应用不会崩，而是"静默丢失软解能力"，只有遇到硬解不了的片子才暴露，
+      # 所以必须在发布前卡住（脚本同时校验 ELF 架构与不允许出现的 ABI 载荷）。
+      - name: Verify FFmpeg inside universal HAP
+        run: |
+          set -euo pipefail
+          bash scripts/verify_hap_ffmpeg.sh "${{ steps.build-universal.outputs.hap-path }}" arm64-v8a x86_64
+
+      # ② 真机精简包：只编 arm64-v8a。
+      #    ⚠ 实测事实（2026-09-18）：hvigor 的 abiFilters 只决定"编哪些 ABI"，不决定
+      #    "打包哪些库"——entry/libs/ 下每个 <abi> 子目录都会被原样打进 HAP。
+      #    因此这里先把 x86_64 的预编译库移开，再构建 phone 目标，否则精简包照样近百 MB。
+      - name: Stage arm64-only build (drop emulator-ABI libs)
+        run: |
+          set -euo pipefail
+          LIBDIR=native/app/entry/libs
+          test -d "$LIBDIR/x86_64"
+          mkdir -p /tmp/abi-stash
+          mv "$LIBDIR/x86_64" /tmp/abi-stash/x86_64
+          echo "已移开 $LIBDIR/x86_64（仅模拟器用的预编译库，不进真机精简包）"
+          ls -1 "$LIBDIR"
+
+      - name: Build HAP (arm64-v8a only)
+        id: build-arm64
+        uses: ./.github/actions/build-hap
+        with:
+          build-mode: release
+          product: phone
+
+      - name: Verify FFmpeg inside arm64 HAP
+        run: |
+          set -euo pipefail
+          bash scripts/verify_hap_ffmpeg.sh "${{ steps.build-arm64.outputs.hap-path }}" arm64-v8a
+
+      - name: Package Artifacts
         id: package
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -42,8 +78,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           REPO="${GITHUB_REPOSITORY##*/}"
-          HAP="dist/${REPO}-${TAG}-unsigned.hap"
-          cp "${{ steps.build.outputs.hap-path }}" "$HAP"
+          UNIVERSAL="dist/${REPO}-${TAG}-universal-unsigned.hap"
+          ARM64="dist/${REPO}-${TAG}-arm64-v8a-unsigned.hap"
+          cp "${{ steps.build-universal.outputs.hap-path }}" "$UNIVERSAL"
+          cp "${{ steps.build-arm64.outputs.hap-path }}" "$ARM64"
+
+          # 校验和：方便使用者核对下载到的产物
+          (cd dist && sha256sum "$(basename "$UNIVERSAL")" "$(basename "$ARM64")" > SHA256SUMS.txt)
 
           # 未签名 HAP 需签名后才能安装，随包附带说明
           cat > dist/SIGNING.txt <<'EOF'
@@ -56,8 +97,67 @@ jobs:
                勾选 Automatically generate signature；
             2. 或按仓库根目录 build-profile.json5.template 手工配置签名材料后重新构建：
                  hvigorw assembleHap -p module=entry@default -p product=default -p buildMode=release
+
+          两个产物怎么选：
+            - *-arm64-v8a-unsigned.hap：真机用，体积小（只含 arm64-v8a）；
+            - *-universal-unsigned.hap：真机与 DevEco 模拟器通用（额外含 x86_64）。
           EOF
           ls -lh dist/
+
+      - name: Compose Release Notes
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          NOTES_SRC="docs/release-${TAG}.md"
+          OUT=dist/RELEASE-NOTES.md
+          if [ -f "$NOTES_SRC" ]; then
+            echo "使用仓库内发布说明：$NOTES_SRC"
+            cp "$NOTES_SRC" "$OUT"
+          else
+            echo "::warning::未找到 $NOTES_SRC，使用通用说明"
+            printf '# %s\n\n本 Release 由 GitHub Actions 从标签 %s 构建。\n' "$TAG" "$TAG" > "$OUT"
+          fi
+
+          ARM64_HAP=$(ls dist/*arm64-v8a-unsigned.hap | head -n1)
+          UNIVERSAL_HAP=$(ls dist/*universal-unsigned.hap | head -n1)
+
+          {
+            echo
+            echo '---'
+            echo
+            echo '## 发布产物'
+            echo
+            echo '| 文件 | 大小（字节） | ABI | 用途 |'
+            echo '|---|---|---|---|'
+            printf '| `%s` | %s | arm64-v8a | 真机（推荐） |\n' \
+              "$(basename "$ARM64_HAP")" "$(stat -c%s "$ARM64_HAP")"
+            printf '| `%s` | %s | arm64-v8a + x86_64 | 真机 + DevEco 模拟器 |\n' \
+              "$(basename "$UNIVERSAL_HAP")" "$(stat -c%s "$UNIVERSAL_HAP")"
+            echo
+            echo '两个产物都是**未签名** HAP，安装前请按 `SIGNING.txt` 自行签名。'
+            echo
+            echo '## 校验和'
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo '## 内置 FFmpeg（软解码）校验'
+            echo
+            echo '本 Release 的两个包在发布前都跑过 `scripts/verify_hap_ffmpeg.sh`：'
+            echo '`libjellyfin_native.so` 的 `DT_NEEDED` 依赖闭包在包内完整，'
+            echo 'FFmpeg 共享库的 ELF 架构与 ABI 相符。arm64 精简包的校验输出：'
+            echo
+            echo '```'
+            bash scripts/verify_hap_ffmpeg.sh "$ARM64_HAP" arm64-v8a
+            echo '```'
+            echo
+            echo '> 为什么强调这一点：FFmpeg 是硬解失败时的软解回落路径。若它没被打进包，'
+            echo '> 应用仍能启动、仍能播放硬解成功的媒体，只有碰到 HEVC 等硬解不了的片子才暴露问题；'
+            echo '> 因此发布流程把它作为门禁逐包校验。'
+          } >> "$OUT"
+          cat "$OUT"
 
       - name: Publish Release
         env:
@@ -66,15 +166,16 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${GITHUB_REPOSITORY##*/}"
-          HAP="dist/${REPO}-${TAG}-unsigned.hap"
-          NOTES="dist/SIGNING.txt"
+          NOTES=dist/RELEASE-NOTES.md
+          ASSETS=(dist/*-unsigned.hap dist/SHA256SUMS.txt dist/SIGNING.txt)
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，更新产物"
-            gh release upload "$TAG" "$HAP" "$NOTES" --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$TAG" --notes-file "$NOTES"
           else
             echo "创建 Release $TAG"
-            gh release create "$TAG" "$HAP" "$NOTES" \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --title "${REPO} ${TAG}" \
               --notes-file "$NOTES" \
               --verify-tag
@@ -84,6 +185,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: jellyfin-hmos-release-unsigned
-          path: dist/*.hap
+          path: |
+            dist/*.hap
+            dist/SHA256SUMS.txt
+            dist/RELEASE-NOTES.md
           if-no-files-found: error
           retention-days: 30
