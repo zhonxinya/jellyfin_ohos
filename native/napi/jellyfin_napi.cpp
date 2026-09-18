@@ -1556,6 +1556,7 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
                 + " container=" + SoftSession()->container()
                 + " size=" + std::to_string(SoftSession()->width()) + "x"
                 + std::to_string(SoftSession()->height())
+                + " decodeThreads=" + std::to_string(SoftSession()->decoderThreads())
                 + " openMs=" + std::to_string(openMs));
         out["ok"] = true;
         out["container"] = SoftSession()->container();
@@ -1590,6 +1591,10 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
     return RunAsync(env, [cappedWidth]() {
         std::vector<uint8_t> rgba;
         jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
+        // 软解速度（fps）的计时起点：首帧到达时记一次，之后每 100 帧打印实际帧率。
+        // 这是"解码效率优化有没有效果"的唯一直接证据（见 openUrl 的多核设置）。
+        static std::chrono::steady_clock::time_point fpsStart;
+        static int64_t fpsStartFrame = 0;
         const auto decodeStart = std::chrono::steady_clock::now();
         const bool ok = SoftSession()->nextFrameRgba(
             cappedWidth > 0 ? static_cast<int>(cappedWidth) : 0, rgba, frameInfo);
@@ -1618,11 +1623,24 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
         // 首帧与每 100 帧一条：用于把"起播后多久出第一帧 / 解码有多慢"变成可查事实
         if (ok && (frameInfo.frameIndex == 1 ||
                    frameInfo.frameIndex % kSoftFirstFrameLogInterval == 0)) {
+            if (frameInfo.frameIndex == 1) {
+                fpsStart = std::chrono::steady_clock::now();
+                fpsStartFrame = 1;
+            }
+            const int64_t elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - fpsStart)
+                                          .count();
+            const int64_t framesSinceStart = frameInfo.frameIndex - fpsStartFrame;
+            const double fps = (elapsedMs > 0 && framesSinceStart > 0)
+                                   ? (static_cast<double>(framesSinceStart) * 1000.0
+                                      / static_cast<double>(elapsedMs))
+                                   : 0.0;
             SoftLog("softPlayNextFrame #" + std::to_string(frameInfo.frameIndex)
                     + " pts=" + std::to_string(frameInfo.ptsSec)
                     + " " + std::to_string(frameInfo.width) + "x"
                     + std::to_string(frameInfo.height)
                     + " decodeMs=" + std::to_string(decodeMs)
+                    + " fps=" + std::to_string(static_cast<int>(fps * 10) / 10)
                     + " fetched=" + std::to_string(SoftSession()->bytesFetched()));
         }
         // 排队的 seek 落地（成功/失败都要留痕：这是"续播/跳转到底有没有生效"的唯一事实来源）

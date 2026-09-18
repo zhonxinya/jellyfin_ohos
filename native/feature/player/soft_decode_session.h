@@ -94,6 +94,14 @@ public:
     /** 已解出的视频帧数 */
     int64_t framesDecoded() const;
 
+    /**
+     * 解码器实际使用的线程数（0 表示由解码器自行决定）。
+     *
+     * 为什么暴露出来：软解帧率的第一瓶颈就是"解码是不是真的用上了多核"，
+     * 日志里带上这个数字，设备上就能一眼确认 `thread_count = 0`（自动）是否生效。
+     */
+    int decoderThreads() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
