@@ -250,11 +250,32 @@ export class JellyfinNative {
     }
   }
 
-  static async updateUserConfiguration(configurationJson: string): Promise<string> {
+  /**
+   * 当前用户的媒体库视图（`/Users/{id}/Views`）。
+   * 返回 `{ Items: [{ Id, Name, CollectionType }] }`；`Id` 就是用户配置里
+   * `OrderedViews` / `MyMediaExcludes` / `LatestItemsExcludes` / `GroupedFolders` 引用的值。
+   */
+  static async getUserViews(): Promise<string> {
     try {
-      return await jellyfinNative.updateUserConfiguration(configurationJson);
+      return await jellyfinNative.getUserViews();
     } catch (error) {
-      return JellyfinNative.fail('updateUserConfiguration', error);
+      return JellyfinNative.fail('getUserViews', error);
+    }
+  }
+
+  /**
+   * 只改若干用户配置字段。
+   *
+   * 传 `{ "HidePlayedInLatest": true }` 这样的**增量**对象即可：
+   * 原生侧会先 GET 当前 `Configuration`，把增量合并进去，再整体提交。
+   * 千万不要自己拼"完整配置"往服务端发 —— 服务端把提交对象的每个字段都抄进用户记录，
+   * 少带的字段会被重置成默认值。
+   */
+  static async patchUserConfiguration(patchJson: string): Promise<string> {
+    try {
+      return await jellyfinNative.patchUserConfiguration(patchJson);
+    } catch (error) {
+      return JellyfinNative.fail('patchUserConfiguration', error);
     }
   }
 

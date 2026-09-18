@@ -39,6 +39,8 @@
     "pages/settings/ThemeSettingsPage",
     "pages/settings/ControlsSettingsPage",
     "pages/settings/SubtitleSettingsPage",
-    "pages/settings/ShortVideoSettingsPage"
+    "pages/settings/ShortVideoSettingsPage",
+    "pages/settings/HomeSettingsPage",
+    "pages/settings/AudioSettingsPage"
   ]
 }

@@ -728,6 +728,24 @@ napi_value Search(napi_env env, napi_callback_info info)
     });
 }
 
+/**
+ * 当前用户的媒体库视图列表（`GET /Users/{userId}/Views`）。
+ * 与 `/Library/VirtualFolders` 的区别：这个端点普通用户也能调，
+ * 而且返回的 `Id` 正是用户配置里 `OrderedViews` / `MyMediaExcludes` /
+ * `LatestItemsExcludes` / `GroupedFolders` 引用的值。
+ */
+napi_value GetUserViews(napi_env env, napi_callback_info /*info*/)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    const std::string userId = session.userId();
+    return RunAsync(env, [userId]() {
+        return FromApi(jellyfin::api::getUserViews(Api(), userId)).dump();
+    });
+}
+
 napi_value GetItemDetail(napi_env env, napi_callback_info info)
 {
     auto &session = jellyfin::SessionManager::instance();
@@ -879,19 +897,27 @@ napi_value GetUserById(napi_env env, napi_callback_info info)
     });
 }
 
-napi_value UpdateUserConfiguration(napi_env env, napi_callback_info info)
+/**
+ * 只改若干用户配置字段：core 里做「GET 当前配置 → 合并 → POST 完整配置」。
+ *
+ * 之前这里是把入参当完整配置直接 POST 的，配上一个写错的端点
+ * （`/Users/Configuration?userId=` —— 正确路由是 `/Users/{userId}/Configuration`），
+ * 结果所有"用户设置"开关都保存不了；而且即使端点写对，只传部分字段也会让服务端
+ * 把没带的字段重置成默认值（见 account_api.h 的说明）。
+ */
+napi_value PatchUserConfiguration(napi_env env, napi_callback_info info)
 {
     auto &session = jellyfin::SessionManager::instance();
     if (!session.isAuthenticated()) {
         return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
     }
-    nlohmann::json configuration;
-    if (!ReadJsonArg(env, info, 0, configuration) || !configuration.is_object()) {
-        return ToNapiJson(env, MakeResult(false, 0, "configurationJson required"));
+    nlohmann::json patch;
+    if (!ReadJsonArg(env, info, 0, patch) || !patch.is_object()) {
+        return ToNapiJson(env, MakeResult(false, 0, "configuration patch required"));
     }
     const std::string userId = session.userId();
-    return RunAsync(env, [userId, configuration]() {
-        return FromApi(jellyfin::api::updateUserConfiguration(Api(), userId, configuration)).dump();
+    return RunAsync(env, [userId, patch]() {
+        return FromApi(jellyfin::api::patchUserConfiguration(Api(), userId, patch)).dump();
     });
 }
 
@@ -2941,7 +2967,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"getUserItemData", nullptr, GetUserItemData, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"getUserById", nullptr, GetUserById, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"updateUserConfiguration", nullptr, UpdateUserConfiguration, nullptr, nullptr, nullptr,
+        {"getUserViews", nullptr, GetUserViews, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"patchUserConfiguration", nullptr, PatchUserConfiguration, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"searchHints", nullptr, SearchHints, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPlaylists", nullptr, GetPlaylists, nullptr, nullptr, nullptr, napi_default, nullptr},

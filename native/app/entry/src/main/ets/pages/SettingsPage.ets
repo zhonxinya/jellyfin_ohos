@@ -120,12 +120,19 @@ export struct SettingsPage {
     return '';
   }
 
-  /** 保存单个用户配置字段并落盘 */
-  private async saveUserField(field: string, value: boolean): Promise<void> {
-    const config: Record<string, Object> = {};
-    config[field] = value;
+  /**
+   * 保存单个用户配置字段。
+   *
+   * 传增量对象即可：原生侧负责 GET 当前配置、合并、整体提交。
+   * （旧实现直接把 `{field: value}` 当完整配置 POST 到 `/Users/Configuration?userId=`，
+   * 那个路由在 10.8.12 上不存在 —— userId 被当成字面量 "Configuration"，服务端直接 400，
+   * 所以这些开关以前根本没能保存到服务器。）
+   */
+  private async saveUserField(field: string, value: boolean | string | number): Promise<void> {
+    const patch: Record<string, Object> = {};
+    patch[field] = value;
     const result: NativeResult = JellyfinNative.parseResult(
-      await JellyfinNative.updateUserConfiguration(JSON.stringify(config)));
+      await JellyfinNative.patchUserConfiguration(JSON.stringify(patch)));
     if (!result.ok && result.message.length > 0) {
       this.message = result.message;
     }
@@ -245,6 +252,15 @@ export struct SettingsPage {
     }
     if (name === 'info_circle') {
       return $r('sys.symbol.info_circle');
+    }
+    if (name === 'list_bullet') {
+      return $r('sys.symbol.list_bullet');
+    }
+    if (name === 'speaker_wave_2') {
+      return $r('sys.symbol.speaker_wave_2');
+    }
+    if (name === 'rectangle_stack') {
+      return $r('sys.symbol.rectangle_stack');
     }
     return $r('sys.symbol.square_grid_2x2');
   }
@@ -683,6 +699,14 @@ export struct SettingsPage {
               route: 'pages/settings/ControlsSettingsPage' },
           ])
 
+          // 首页与音频：账号级偏好（UserConfiguration），与"服务器管理"分开
+          this.SectionCard('\u9996\u9875\u4e0e\u97f3\u9891', 'rectangle_stack', [
+            { icon: 'list_bullet', title: '首页与媒体库', subtitle: '媒体库顺序、首页隐藏与合并显示',
+              route: 'pages/settings/HomeSettingsPage' },
+            { icon: 'speaker_wave_2', title: '音频', subtitle: '优先音轨语言、默认音轨与记住音频选择',
+              route: 'pages/settings/AudioSettingsPage' },
+          ])
+
           // 播放（含服务器开关）
           Column() {
             this.SectionCard('\u64ad\u653e', 'play_circle', [
@@ -696,12 +720,6 @@ export struct SettingsPage {
                 this.enableNextEpisodeAutoPlay, (v: boolean) => {
                   this.enableNextEpisodeAutoPlay = v;
                   this.saveUserField('EnableNextEpisodeAutoPlay', v);
-                })
-              Divider().color(this.colors().divider).strokeWidth(0.5)
-              this.ToggleRow('\u8bb0\u4f4f\u97f3\u9891\u9009\u62e9', '',
-                this.rememberAudioSelections, (v: boolean) => {
-                  this.rememberAudioSelections = v;
-                  this.saveUserField('RememberAudioSelections', v);
                 })
             }
             .width('100%')

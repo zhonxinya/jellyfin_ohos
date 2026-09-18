@@ -199,6 +199,8 @@ export struct SubtitleSettingsPage {
       return;
     }
     this.saving = true;
+    // 只提交增量字段：原生侧会 GET 当前用户配置、合并后整体提交
+    // （服务端是"整体替换"语义，自己拼完整对象少带字段就会把那些字段重置成默认值）
     const config: Record<string, Object> = {
       'SubtitleLanguagePreference': this.subtitleLanguage,
       'SubtitleMode': this.subtitleMode,
@@ -209,7 +211,7 @@ export struct SubtitleSettingsPage {
       config[keys[i]] = patch[keys[i]];
     }
     const result: NativeResult =
-      JellyfinNative.parseResult(await JellyfinNative.updateUserConfiguration(JSON.stringify(config)));
+      JellyfinNative.parseResult(await JellyfinNative.patchUserConfiguration(JSON.stringify(config)));
     this.saving = false;
     if (!result.ok) {
       this.errorMsg = result.message.length > 0 ? result.message : '\u4fdd\u5b58\u5931\u8d25';

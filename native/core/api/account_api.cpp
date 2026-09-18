@@ -1,5 +1,7 @@
 #include "account_api.h"
 
+#include "url_util.h"
+
 namespace jellyfin {
 namespace api {
 
@@ -30,13 +32,57 @@ ApiResult getPublicUsers(JellyfinApiClient &client)
 
 ApiResult getUserById(JellyfinApiClient &client, const std::string &userId)
 {
-    return client.getJson("/Users/" + userId);
+    return client.getJson("/Users/" + EncodeQueryComponent(userId));
 }
 
 ApiResult updateUserConfiguration(JellyfinApiClient &client, const std::string &userId,
                                   const nlohmann::json &configuration)
 {
-    return client.postJson("/Users/Configuration?userId=" + userId, configuration);
+    // 路由是 `{userId}/Configuration`（UserController 上的 [HttpPost("{userId}/Configuration")]）。
+    // 旧实现写成 `/Users/Configuration?userId=…`：userId 落在路由段上被当成字面量 "Configuration"，
+    // 服务端 Guid 绑定失败直接 400 —— 也就是说本应用里所有"用户设置"开关其实一直没保存成功过。
+    return client.postJson("/Users/" + EncodeQueryComponent(userId) + "/Configuration",
+                           configuration);
+}
+
+ApiResult patchUserConfiguration(JellyfinApiClient &client, const std::string &userId,
+                                 const nlohmann::json &patch)
+{
+    if (!patch.is_object()) {
+        ApiResult invalid;
+        invalid.error.statusCode = 400;
+        invalid.error.message = "configuration patch must be a JSON object";
+        return invalid;
+    }
+    if (patch.empty()) {
+        // 没有要改的字段就不发请求（也避免把一次无意义的整体替换发出去）
+        return getUserById(client, userId);
+    }
+
+    ApiResult current = getUserById(client, userId);
+    if (!current.ok()) {
+        return current;
+    }
+    if (!current.data.is_object()) {
+        ApiResult invalid;
+        invalid.error.statusCode = 0;
+        invalid.error.message = "unexpected user payload";
+        return invalid;
+    }
+
+    nlohmann::json config = current.data.value("Configuration", nlohmann::json::object());
+    if (!config.is_object()) {
+        config = nlohmann::json::object();
+    }
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        config[it.key()] = it.value();
+    }
+
+    ApiResult result = updateUserConfiguration(client, userId, config);
+    if (result.ok()) {
+        result.data = config;
+    }
+    return result;
 }
 
 } // namespace api
