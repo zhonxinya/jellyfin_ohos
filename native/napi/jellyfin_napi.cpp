@@ -2391,6 +2391,29 @@ bool ReadSafeAdminPath(napi_env env, napi_callback_info info, std::string &path)
     return IsAllowedAdminPath(path);
 }
 
+napi_value AdminGetLogText(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    ReadStringArg(env, info, 0, name);
+    // 文件名由服务端按名字精确匹配（不是拼路径），这里只挡住明显不对的输入
+    if (name.empty() || name.find('/') != std::string::npos || name.find("..") != std::string::npos) {
+        return ToNapiJson(env, MakeResult(false, 400, "invalid log file name"));
+    }
+    int64_t keepTail = 0;
+    ReadIntArg(env, info, 1, keepTail);
+    const size_t tailBytes = keepTail > 0 ? static_cast<size_t>(keepTail) : 0;
+    return RunAsync(env, [name, tailBytes]() {
+        // 日志端点返回整份文件且服务端没有 range/tail 支持，所以只把结尾一段交给界面
+        return FromApi(
+                   Api().getTextTail(jellyfin::api::buildLogFileRequest(name).path, tailBytes))
+            .dump();
+    });
+}
+
 napi_value AdminGenericGet(napi_env env, napi_callback_info info)
 {
     const nlohmann::json guard = RequireAdmin();
@@ -3117,6 +3140,9 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"adminListTasks", nullptr, AdminListTasks, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"adminGetSystemInfo", nullptr, AdminGetSystemInfo, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        // 日志文件正文：只取结尾一段（服务端返回整份文件，且没有 range/tail 支持）
+        {"adminGetLogText", nullptr, AdminGetLogText, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"adminGenericGet", nullptr, AdminGenericGet, nullptr, nullptr, nullptr, napi_default,
          nullptr},

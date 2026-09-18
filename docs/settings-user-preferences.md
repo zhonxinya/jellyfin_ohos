@@ -163,7 +163,28 @@ GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"Sav
   服务端的"当前启用"要用 `AvailableOptions` 给的 `DefaultEnabled`（它正是服务端按全局配置算出的值）。
   界面两种来源按同一口径显示，所以"还没写过配置"不会被显示成"全都没启用"。
 
+### 控制台的「日志」页：只取结尾，不整份拉进内存
+
+原来这一页把 `/System/Logs` 的 JSON 当键值表列出来（文件名、大小、时间），**看不到内容** ——
+而"看日志"才是这一页的用途。现在点开某个文件就能看结尾 256 KB。
+
+为什么只取结尾：
+
+- `SystemController.GetLogFile` 用的是 `File(stream, "text/plain")`，**没有** `enableRangeProcessing`，
+  实测响应里也没有 `Accept-Ranges` —— 服务端只会给整份文件，没有 range/tail 可用；
+- 文件还不小：本机实测 `log_YYYYMMDD.log` 一天就有 **20 MB**；
+- 所以客户端把整份读进来（`HttpClient` 本来就有 32 MiB 上限）之后只用结尾一段：
+  裁剪逻辑是纯函数 `TailBytes()`（`native/core/text_util.h`，有主机单测），
+  它会退到合法的 UTF-8 边界、并从第一个换行之后开始，避免首行是半句话或被切成乱码。
+
+好处是"交给 ArkTS 的字符串"始终 ≤ 256 KB，UI 不会因为日志变大而变卡；
+界面上也如实写出文件总大小（"文件共 20.0 MB，这里只显示最后 256.0 KB"）。
+
 ### 设备实测
+
+| 项目 | 证据 |
+| --- | --- |
+| 日志页 | 列出服务端 `/System/Logs` 的全部 4 个文件（名称/大小/时间与接口一致）；小文件 `Jellyfin.log`（110 B）→ "文件共 110 B，已完整显示" 且正文就是 `Stopping Jellyfin … / Starting Jellyfin …`；大文件 `log_20260919.log`（20.0 MB）→ "文件共 20.0 MB，这里只显示最后 256.0 KB"，正文节点 261 953 字符（≈256 KB）且内容是真实日志行 |
 
 | 项目 | 证据 |
 | --- | --- |

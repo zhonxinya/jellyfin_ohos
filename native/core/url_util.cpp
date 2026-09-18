@@ -93,9 +93,12 @@ std::string EncodeQueryComponent(const std::string &value)
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
             c == '-' || c == '_' || c == '.' || c == '~') {
             out.push_back(static_cast<char>(c));
-        } else if (c == ' ') {
-            out.push_back('+');
         } else {
+            // 空格编成 %20 而不是 '+'：Jellyfin 跑在 ASP.NET Core 上，
+            // 它的 query 解析（`QueryStringEnumerable` → `Uri.UnescapeDataString`）
+            // **不**把 '+' 当空格（那是表单编码的规则），
+            // 而 %20 在两种解释下都会被还原成空格 —— 所以这里只用 %20。
+            // 受影响的入参包括搜索词、媒体库路径（可能带空格）与日志文件名。
             out.push_back('%');
             out.push_back(kHex[c >> 4]);
             out.push_back(kHex[c & 0x0F]);

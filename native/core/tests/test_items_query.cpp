@@ -246,8 +246,8 @@ void TestFieldsOverride()
     ExpectContains(path, "EnableUserData=false", "可关闭用户数据");
 
     const std::string escaped = jellyfin::api::BuildItemsQueryPath("u ser/1", BaseQuery());
-    ExpectTrue(escaped.find("/Users/u+ser%2F1/Items?") != std::string::npos,
-               "userId 中的空格与斜杠被转义（不会破坏路径结构）");
+    ExpectTrue(escaped.find("/Users/u%20ser%2F1/Items?") != std::string::npos,
+               "userId 中的空格与斜杠被转义（空格用 %20，见 url_util.cpp 的说明）");
 }
 
 } // namespace

@@ -1,6 +1,7 @@
 #include "api_client.h"
 
 #include "session.h"
+#include "text_util.h"
 #include "url_util.h"
 
 #include <sstream>
@@ -134,6 +135,35 @@ ApiResult JellyfinApiClient::getJsonList(const std::string &path) const
         return result;
     }
     result.data = nlohmann::json::array();
+    return result;
+}
+
+ApiResult JellyfinApiClient::getTextTail(const std::string &path, std::size_t keepTailBytes) const
+{
+    if (SessionManager::instance().baseUrl().empty()) {
+        ApiResult r;
+        r.error.message = "Server not configured";
+        return r;
+    }
+    const HttpResponse resp = http_.get(absoluteUrl(path), authHeaders());
+    ApiResult result;
+    if (!resp.error.empty()) {
+        result.error.statusCode = 0;
+        result.error.message = resp.error;
+        return result;
+    }
+    result.error.statusCode = resp.status;
+    if (resp.status < 200 || resp.status >= 300) {
+        result.error.message = "HTTP " + std::to_string(resp.status);
+        return result;
+    }
+    bool truncated = false;
+    const std::string tail = TailBytes(resp.body, keepTailBytes, truncated);
+    result.data = nlohmann::json::object({
+        {"text", tail},
+        {"truncated", truncated},
+        {"totalBytes", static_cast<int>(resp.body.size())},
+    });
     return result;
 }
 

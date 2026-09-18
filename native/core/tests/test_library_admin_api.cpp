@@ -13,6 +13,7 @@
  */
 
 #include "library_admin_api.h"
+#include "text_util.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -85,7 +86,7 @@ void TestRequestBuilders()
             buildAddVirtualFolderRequest("我的 电影&剧", "movies", {"/media/movies"}, nullptr, true);
         ExpectEq("add method", r.method, "POST");
         ExpectEq("add path", r.path,
-                 "/Library/VirtualFolders?name=%E6%88%91%E7%9A%84+%E7%94%B5%E5%BD%B1%26%E5%89%A7"
+                 "/Library/VirtualFolders?name=%E6%88%91%E7%9A%84%20%E7%94%B5%E5%BD%B1%26%E5%89%A7"
                  "&collectionType=movies&refreshLibrary=true");
         ExpectJsonEq("add body uses PathInfos",
                      r.body,
@@ -127,7 +128,7 @@ void TestRequestBuilders()
         const LibraryRequest r = buildRenameVirtualFolderRequest("旧 名", "新名", false);
         ExpectEq("rename method", r.method, "POST");
         ExpectEq("rename path", r.path,
-                 "/Library/VirtualFolders/Name?name=%E6%97%A7+%E5%90%8D"
+                 "/Library/VirtualFolders/Name?name=%E6%97%A7%20%E5%90%8D"
                  "&newName=%E6%96%B0%E5%90%8D&refreshLibrary=false");
     }
 
@@ -171,10 +172,10 @@ void TestRequestBuilders()
     {
         const LibraryRequest r = buildRemoveMediaPathRequest("电影", "/media/a b", true);
         ExpectEq("remove path method", r.method, "DELETE");
-        // 路径必须编码：空格 → '+'，斜杠 → %2F（服务端 query 解码会还原成 '/'）
+        // 路径必须编码：空格 → %20（不是 '+'，见 url_util.cpp 的说明），斜杠 → %2F
         ExpectEq("remove path query", r.path,
                  "/Library/VirtualFolders/Paths?name=%E7%94%B5%E5%BD%B1"
-                 "&path=%2Fmedia%2Fa+b&refreshLibrary=true");
+                 "&path=%2Fmedia%2Fa%20b&refreshLibrary=true");
     }
 
     {
@@ -421,6 +422,66 @@ void TestNormalizeAvailableOptions()
     ExpectTrue("empty type options", empty["typeOptions"].is_array() && empty["typeOptions"].empty());
 }
 
+void TestLogFileRequestAndTail()
+{
+    using jellyfin::api::buildLogFileRequest;
+    using jellyfin::TailBytes;
+
+    // 1) 请求构造：文件名要编码（服务端按文件名精确匹配，`?`/空格/中文都会拆坏 query）
+    {
+        const LibraryRequest plain = buildLogFileRequest("log_20260919.log");
+        ExpectEq("log method", plain.method, "GET");
+        ExpectEq("log path", plain.path, "/System/Logs/Log?name=log_20260919.log");
+
+        const LibraryRequest tricky = buildLogFileRequest("日志 2026.log");
+        ExpectEq("log path encodes spaces and CJK", tricky.path,
+                 "/System/Logs/Log?name=%E6%97%A5%E5%BF%97%202026.log");
+    }
+
+    // 2) TailBytes：短文本原样返回、不标截断
+    {
+        bool truncated = true;
+        const std::string body = "line1\nline2\n";
+        ExpectEq("short text unchanged", TailBytes(body, 4096, truncated), body);
+        ExpectTrue("short text not truncated", truncated == false);
+
+        // keepTailBytes = 0 表示不截断
+        truncated = false;
+        ExpectEq("zero keeps everything", TailBytes(body, 0, truncated), body);
+        ExpectTrue("zero not truncated", truncated == false);
+    }
+
+    // 3) TailBytes：超长文本只留结尾，并且从换行之后开始（首行不是半句话）
+    {
+        std::string body;
+        for (int i = 0; i < 200; ++i) {
+            body += "line-" + std::to_string(i) + "\n";
+        }
+        bool truncated = false;
+        const std::string tail = TailBytes(body, 64, truncated);
+        ExpectTrue("long text truncated", truncated == true);
+        ExpectTrue("tail is shorter than the original", tail.size() < body.size());
+        ExpectTrue("tail keeps the last line", tail.find("line-199\n") != std::string::npos);
+        ExpectTrue("tail starts right after a newline",
+                   !tail.empty() && tail.front() != '\n' && body.find("\n" + tail) != std::string::npos);
+    }
+
+    // 4) TailBytes：切在多字节字符中间时要退到合法边界（否则界面第一行是乱码）
+    {
+        std::string body;
+        for (int i = 0; i < 50; ++i) {
+            body += "中文日志行\n";
+        }
+        bool truncated = false;
+        const std::string tail = TailBytes(body, 21, truncated);
+        ExpectTrue("cjk truncated", truncated == true);
+        // 尾部必须是完整的 UTF-8：没有孤立的续字节开头
+        const unsigned char first = static_cast<unsigned char>(tail.front());
+        ExpectTrue("tail starts at a utf-8 boundary", (first & 0xC0u) != 0x80u);
+        ExpectTrue("tail contains whole cjk lines", tail.size() % 16 == 0);
+    }
+}
+
 void TestMetadataSettingsModel()
 {
     using jellyfin::api::buildMetadataSettingsModel;
@@ -539,6 +600,7 @@ int main()
     TestNormalizeAvailableOptions();
     TestNormalizeServerConfiguration();
     TestMetadataSettingsModel();
+    TestLogFileRequestAndTail();
 
     if (gFailures != 0) {
         std::cerr << gFailures << " failure(s)\n";
