@@ -178,6 +178,9 @@ private:
     unsigned int xcomponentTextureId_ = 0;   // TEXTURE 路径：XComponent 提供的纹理 id
     unsigned int program_ = 0;
     unsigned int texture_ = 0;
+    /** 纹理当前存储的尺寸（尺寸不变时用 `glTexSubImage2D` 复用存储，避免每帧重新分配） */
+    int textureWidth_ = 0;
+    int textureHeight_ = 0;
     unsigned int vbo_ = 0;
     int attribPos_ = -1;
     int attribUv_ = -1;
