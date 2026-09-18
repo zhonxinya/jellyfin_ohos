@@ -240,6 +240,16 @@ void TestNormalizeLibraryOptions()
     }
 
     {
+        // 显式 null 与缺席等价：UI 的 isExplicit() 只看"存在且非 null"，两条路径必须一致
+        const nlohmann::json out = normalizeLibraryOptions(
+            nlohmann::json::parse(R"({"MetadataSavers":null,"LocalMetadataReaderOrder":null})"));
+        ExpectTrue("explicit null savers",
+                   !out.contains("MetadataSavers") || out["MetadataSavers"].is_null());
+        ExpectTrue("explicit null reader order",
+                   !out.contains("LocalMetadataReaderOrder") || out["LocalMetadataReaderOrder"].is_null());
+    }
+
+    {
         // 未知字段原样保留（向前兼容新版本服务端新增的选项，回传时不能丢）
         const nlohmann::json out = normalizeLibraryOptions(
             nlohmann::json::parse(R"({"SomeFutureOption":7,"TypeOptions":null})"));
