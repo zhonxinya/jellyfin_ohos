@@ -4,6 +4,7 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 import { AppIconButton } from '../components/AppIconButton';
 import { AppTopBar } from '../components/AppTopBar';
 import { HomePage } from './HomePage';
+import { ShortVideoPage } from './ShortVideoPage';
 import { SettingsPage } from './SettingsPage';
 
 /**
@@ -22,6 +23,14 @@ struct MainShell {
   @State private shellTabIndex: number = 0;
   @State private themeTick: number = 0;
   @State private drawerOpen: boolean = false;
+  /**
+   * 「视频」页的重读信号：每次切到该页签就自增。
+   *
+   * 为什么需要它：`ShortVideoPage` 是嵌在 Tabs 里的普通组件，从「短视频模式」设置页
+   * 返回时**不会重建**（`aboutToAppear` 不再触发），于是用户刚勾完媒体库、
+   * 回到「视频」页却仍是空态 —— 必须由一个外部信号告诉它"配置可能变了"。
+   */
+  @State private videoTabTick: number = 0;
 
   aboutToAppear(): void {
     AppViewModel.getInstance().onThemeChanged = () => {
@@ -55,6 +64,10 @@ struct MainShell {
     .justifyContent(FlexAlign.Center)
     .onClick(() => {
       this.shellTabIndex = index;
+      if (index === 1) {
+        // 切到「视频」页：让页面重读一次短视频媒体库配置（设置页可能刚改过）
+        this.videoTabTick = this.videoTabTick + 1;
+      }
     })
   }
 
@@ -142,6 +155,11 @@ struct MainShell {
       })
       this.DrawerDivider()
       this.DrawerItem('搜索', $r('sys.symbol.magnifyingglass'), () => { this.openSearch(); })
+      // 「视频」（短视频模式）与底部页签同一入口：抽屉里也放一个，长列表里更容易发现
+      this.DrawerItem('视频', $r('sys.symbol.play_circle'), () => {
+        this.drawerOpen = false;
+        this.shellTabIndex = 1;
+      })
       this.DrawerItem('继续观看', $r('sys.symbol.play_circle'), () => { this.pushPage('pages/ContinueWatchingPage'); })
       this.DrawerItem('播放列表', $r('sys.symbol.list_bullet'), () => { this.pushPage('pages/PlaylistsPage'); })
       this.DrawerDivider()
@@ -150,7 +168,7 @@ struct MainShell {
       }
       this.DrawerItem('设置', $r('sys.symbol.gearshape'), () => {
         this.drawerOpen = false;
-        this.shellTabIndex = 1;
+        this.shellTabIndex = 2;
       })
 
       Blank()
@@ -190,6 +208,14 @@ struct MainShell {
           }
           .tabBar($r('app.string.tab_library'))
 
+          // 「视频」页：短视频模式的承载页。内容来自设置里勾选的短视频媒体库（见
+          // pages/settings/ShortVideoSettingsPage），因此它既不属于"媒体库浏览"，
+          // 也不属于"设置"，独立成一个页签。
+          TabContent() {
+            ShortVideoPage({ themeTick: $themeTick, refreshTick: this.videoTabTick })
+          }
+          .tabBar('视频')
+
           TabContent() {
             SettingsPage({ themeTick: $themeTick, embedded: true })
           }
@@ -205,7 +231,8 @@ struct MainShell {
 
         Row() {
           this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
-          this.TabItem(1, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
+          this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
+          this.TabItem(2, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
         }
         .width('100%')
         .height(ThemeConstants.TAB_BAR_HEIGHT)
@@ -248,7 +275,7 @@ struct MainShell {
         variant: 'ghost',
         iconSize: 20,
         onTap: () => {
-          this.shellTabIndex = 1;
+          this.shellTabIndex = 2;
         }
       })
     }
