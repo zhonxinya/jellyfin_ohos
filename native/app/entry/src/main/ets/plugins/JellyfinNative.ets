@@ -456,6 +456,114 @@ export class JellyfinNative {
     }
   }
 
+  // ── 媒体库管理（设置 → 媒体库）──────────────────────────────────────────
+  // 统一走 C++ `core/api/library_admin_api.*`：这里不拼 URL、不拼 query，
+  // 返回的 `data` 已是归一化后的 UI 模型，页面只做展示与表单状态管理。
+
+  static async libraryVirtualFolders(): Promise<string> {
+    try {
+      return await jellyfinNative.libraryVirtualFolders();
+    } catch (error) {
+      return JellyfinNative.fail('libraryVirtualFolders', error);
+    }
+  }
+
+  /** 新增/编辑媒体库时的可选项（语言、抓取器、图片类型），`data` 见 LibraryModels.ets */
+  static async libraryAvailableOptions(contentType: string, isNewLibrary: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryAvailableOptions(contentType, isNewLibrary);
+    } catch (error) {
+      return JellyfinNative.fail('libraryAvailableOptions', error);
+    }
+  }
+
+  /** 首选元数据语言 + 国家/地区，`data = { languages, countries }` */
+  static async libraryLocalization(): Promise<string> {
+    try {
+      return await jellyfinNative.libraryLocalization();
+    } catch (error) {
+      return JellyfinNative.fail('libraryLocalization', error);
+    }
+  }
+
+  static async libraryAddVirtualFolder(name: string, collectionType: string, pathsJson: string,
+                                       optionsJson: string, refreshLibrary: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryAddVirtualFolder(name, collectionType, pathsJson,
+        optionsJson, refreshLibrary);
+    } catch (error) {
+      return JellyfinNative.fail('libraryAddVirtualFolder', error);
+    }
+  }
+
+  static async libraryRenameVirtualFolder(name: string, newName: string,
+                                          refreshLibrary: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryRenameVirtualFolder(name, newName, refreshLibrary);
+    } catch (error) {
+      return JellyfinNative.fail('libraryRenameVirtualFolder', error);
+    }
+  }
+
+  static async libraryRemoveVirtualFolder(name: string, refreshLibrary: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryRemoveVirtualFolder(name, refreshLibrary);
+    } catch (error) {
+      return JellyfinNative.fail('libraryRemoveVirtualFolder', error);
+    }
+  }
+
+  static async libraryAddMediaPath(name: string, path: string, networkPath: string,
+                                   refreshLibrary: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryAddMediaPath(name, path, networkPath, refreshLibrary);
+    } catch (error) {
+      return JellyfinNative.fail('libraryAddMediaPath', error);
+    }
+  }
+
+  static async libraryUpdateMediaPath(name: string, path: string, networkPath: string): Promise<string> {
+    try {
+      return await jellyfinNative.libraryUpdateMediaPath(name, path, networkPath);
+    } catch (error) {
+      return JellyfinNative.fail('libraryUpdateMediaPath', error);
+    }
+  }
+
+  static async libraryRemoveMediaPath(name: string, path: string, refreshLibrary: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryRemoveMediaPath(name, path, refreshLibrary);
+    } catch (error) {
+      return JellyfinNative.fail('libraryRemoveMediaPath', error);
+    }
+  }
+
+  static async libraryUpdateOptions(itemId: string, optionsJson: string): Promise<string> {
+    try {
+      return await jellyfinNative.libraryUpdateOptions(itemId, optionsJson);
+    } catch (error) {
+      return JellyfinNative.fail('libraryUpdateOptions', error);
+    }
+  }
+
+  static async libraryScanAll(): Promise<string> {
+    try {
+      return await jellyfinNative.libraryScanAll();
+    } catch (error) {
+      return JellyfinNative.fail('libraryScanAll', error);
+    }
+  }
+
+  static async libraryScanFolder(itemId: string, metadataRefreshMode: string, imageRefreshMode: string,
+                                 replaceAllMetadata: boolean, replaceAllImages: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.libraryScanFolder(itemId, metadataRefreshMode, imageRefreshMode,
+        replaceAllMetadata, replaceAllImages);
+    } catch (error) {
+      return JellyfinNative.fail('libraryScanFolder', error);
+    }
+  }
+
   static setPreference(key: string, value: string): string {
     try {
       return jellyfinNative.setPreference(key, value);

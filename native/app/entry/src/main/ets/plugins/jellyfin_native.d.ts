@@ -105,6 +105,30 @@ declare module 'libjellyfin_native.so' {
     adminGenericPost(path: string, bodyJson: string): string;
     adminGenericPostNoBody(path: string): string;
     adminGenericDelete(path: string): string;
+    /**
+     * 媒体库管理（设置 → 媒体库）。
+     * 请求构造与响应归一化都在 C++ `core/api/library_admin_api.*`，这里只透传参数。
+     * 返回 `{ ok, code, message, data }`，`data` 的形状见 `common/LibraryModels.ets`。
+     */
+    libraryVirtualFolders(): string;
+    libraryAvailableOptions(contentType: string, isNewLibrary: boolean): string;
+    libraryLocalization(): string;
+    /** pathsJson 是字符串数组 JSON，mediaPath 形如 `["/media/movies"]` */
+    libraryAddVirtualFolder(name: string, collectionType: string, pathsJson: string,
+                            optionsJson: string, refreshLibrary: boolean): string;
+    libraryRenameVirtualFolder(name: string, newName: string, refreshLibrary: boolean): string;
+    libraryRemoveVirtualFolder(name: string, refreshLibrary: boolean): string;
+    libraryAddMediaPath(name: string, path: string, networkPath: string,
+                        refreshLibrary: boolean): string;
+    /** 改路径，`name` 仍用「库名」，`path` 是**改后**的路径（服务端按名称+路径匹配） */
+    libraryUpdateMediaPath(name: string, path: string, networkPath: string): string;
+    libraryRemoveMediaPath(name: string, path: string, refreshLibrary: boolean): string;
+    libraryUpdateOptions(itemId: string, optionsJson: string): string;
+    /** 扫描所有媒体库 */
+    libraryScanAll(): string;
+    /** 只扫描一个媒体库（媒体库条目本身就是 CollectionFolder，可单独刷新） */
+    libraryScanFolder(itemId: string, metadataRefreshMode: string, imageRefreshMode: string,
+                      replaceAllMetadata: boolean, replaceAllImages: boolean): string;
     setPreference(key: string, value: string): string;
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;

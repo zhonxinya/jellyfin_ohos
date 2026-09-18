@@ -52,6 +52,8 @@ jobs:
                 extra="native/feature/player/engine.cpp native/feature/player/hw_decoder.cpp native/feature/player/ffmpeg_decoder.cpp native/feature/player/subtitle.cpp native/feature/player/playback_policy.cpp native/core/url_util.cpp" ;;
               test_range_cache)
                 extra="native/feature/player/range_cache.cpp native/feature/player/range_fetcher.cpp" ;;
+              test_library_admin_api)
+                extra="native/core/api/library_admin_api.cpp native/core/url_util.cpp" ;;
               *)
                 echo "::error::新增的测试 $name 尚未在本工作流登记编译源文件"
                 fail=1
