@@ -123,6 +123,20 @@ public:
      */
     bool boundToWindow(const void *window) const { return ready_ && nativeWindow_ == window; }
 
+    /**
+     * 渲染器当前是否绑在这个 `surfaceId` 对应的显示面上。
+     *
+     * `init(surfaceId, …)` 路径的 window 是我们自己从 surfaceId 创建的，调用方**拿不到**那个
+     * window 指针（不可能为了比较再创建一个）—— 所以按保存下来的 surfaceId 比对。
+     * 用途：多个宿主轮流使用同一个渲染器单例（播放页走 OH_NativeXComponent 的 window、
+     * 「视频」页走自己的 surfaceId）时，必须能判断"要不要重新绑定"，
+     * 否则会把帧画到别人那块表面上（画面不动/串画面，且不报错）。
+     */
+    bool boundToSurfaceId(uint64_t surfaceId) const
+    {
+        return ready_ && surfaceId != 0 && surfaceId_ == surfaceId;
+    }
+
     /** 初始化时那块 surface 的世代号（`XComponentBridge::SurfaceGeneration()`） */
     uint64_t surfaceGeneration() const { return surfaceGeneration_; }
 

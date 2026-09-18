@@ -1349,7 +1349,10 @@ bool EnsureSoftRendererBound(const std::string &renderMode, uint64_t surfaceId, 
         error = "surfaceId 为空（surface 尚未就绪）";
         return false;
     }
-    if (SoftRenderer().isReady()) {
+    // 复用判据同 xcomponent 路径：**必须**确认仍绑在同一块显示面上。
+    // 只判 `isReady()` 会在"另一处（播放页/上一个页面）已经初始化过渲染器"时，
+    // 把帧画到那块**别人的**表面上 —— 现象是画面完全不动且没有任何报错。
+    if (SoftRenderer().isReady() && SoftRenderer().boundToSurfaceId(surfaceId)) {
         reused = true;
         return true;
     }

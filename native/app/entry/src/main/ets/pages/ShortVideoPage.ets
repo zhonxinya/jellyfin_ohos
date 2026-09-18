@@ -1,5 +1,6 @@
 import router from '@ohos.router';
 import media from '@ohos.multimedia.media';
+import display from '@ohos.display';
 import { BusinessError } from '@ohos.base';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { AppViewModel } from '../viewmodel/AppViewModel';
@@ -41,6 +42,9 @@ const kAutoSkipMs: number = 4000;
 
 /** 进度上报节流（与播放页一致：5 秒一次 + 关键节点补发） */
 const kReportIntervalMs: number = 5000;
+
+/** 页内软解的拉帧下限间隔（与播放页同一套自调度思路：上一帧完成即排下一帧） */
+const kSoftPullMinGapMs: number = 8;
 
 @Component
 export struct ShortVideoPage {
@@ -98,6 +102,23 @@ export struct ShortVideoPage {
   private progressTimerId: number = -1;
   /** 当前这次暂停是否由"切走页签"造成（决定切回时是否自动续播） */
   private pausedByTabSwitch: boolean = false;
+
+  // ───────────────── 页内软解回退（硬解不支持时不再跳过）─────────────────
+  //
+  // 为什么能在本页做软解：软解需要一块 EGL 可渲染的显示面，本页的 XComponent 就有
+  // （`surfaceId` 路径由原生侧自行创建 window）。**不需要**播放页那块
+  // `OH_NativeXComponent` 桥 —— 那是全进程单例，两页同时用会互相抢状态。
+  // 渲染器单例按"surfaceId 是否一致"校验复用（见 boundToSurfaceId），因此
+  // 播放页与本页可以轮流接管同一个渲染器。
+  /** 当前条目是否正走页内软解 */
+  @State private softActive: boolean = false;
+  private softPulling: boolean = false;
+  private softPullTimerId: number = -1;
+  /** XComponent 的像素尺寸（软解渲染缓冲几何按它协商） */
+  private surfaceW: number = 0;
+  private surfaceH: number = 0;
+  /** 页内软解的解码目标宽度（对齐协商出的渲染缓冲） */
+  private softDecodeMaxWidth: number = 0;
   private skipTimerId: number = -1;
   private lastReportAt: number = 0;
 
@@ -108,6 +129,7 @@ export struct ShortVideoPage {
   aboutToDisappear(): void {
     this.stopProgressTicker();
     this.cancelAutoSkip();
+    this.stopSoftPlayback();
     this.releasePlayer();
   }
 
@@ -119,6 +141,11 @@ export struct ShortVideoPage {
    */
   onTabIndexChanged(): void {
     if (this.activeTab !== kVideoTabIndex) {
+      if (this.softActive) {
+        // 软解：切走即停帧循环（回来自会自动续上，见下面 else 分支）
+        this.stopSoftPullLoop();
+        return;
+      }
       // 只对"因切页签而暂停"做标记：用户自己按暂停的，切回来不该被自动续播
       if (this.avPlayer !== null && !this.paused) {
         this.pausePlayback();
@@ -126,7 +153,14 @@ export struct ShortVideoPage {
       }
       return;
     }
-    // 切回本页：续播（`play()`，**不是** `playCurrent()` —— 后者会从头重开这一条）
+    // 切回本页：软解重启帧循环；硬解用 `play()` 续播（**不是** `playCurrent()`，后者会从头重开）
+    if (this.softActive) {
+      if (!this.paused) {
+        this.startSoftPullLoop();
+        this.startProgressTicker();
+      }
+      return;
+    }
     if (this.pausedByTabSwitch && this.avPlayer !== null) {
       this.pausedByTabSwitch = false;
       try {
@@ -300,6 +334,8 @@ export struct ShortVideoPage {
   private async playCurrent(): Promise<void> {
     const item: MediaItem | null = this.currentItem();
     this.cancelAutoSkip();
+    // 切条/重开前先把页内软解收掉：硬解与软解不能同时占同一块 surface
+    this.stopSoftPlayback();
     this.stopProgressTicker();
     this.releasePlayer();
     this.playbackError = '';
@@ -406,6 +442,20 @@ export struct ShortVideoPage {
 
   /** 单击画面：暂停/继续 */
   private togglePause(): void {
+    if (this.softActive) {
+      // 软解没有暂停 API：暂停 = 停掉帧循环（画面停在最后一帧），恢复 = 重启帧循环
+      if (this.paused) {
+        this.paused = false;
+        this.startSoftPullLoop();
+        this.startProgressTicker();
+      } else {
+        this.paused = true;
+        this.stopSoftPullLoop();
+        this.stopProgressTicker();
+      }
+      this.reportProgress(this.paused);
+      return;
+    }
     if (this.avPlayer === null || this.playbackError.length > 0) {
       return;
     }
@@ -447,10 +497,171 @@ export struct ShortVideoPage {
     this.stopProgressTicker();
     this.releasePlayer();
     this.cancelAutoSkip();
+    // ── 就地软解续播（本页自己的 surface）────────────────────────────────
+    // 硬解解不了的内容（模拟器上的 HEVC 是常态）不再"提示 + 跳过"，
+    // 而是当场用 FFmpeg 软解接着播 —— 这才是短视频该有的连续感。
+    if (!this.softActive && this.surfaceId.length > 0) {
+      this.startSoftPlayback();
+      return;
+    }
+    // 软解也不行（如本构建未链接 FFmpeg）：退回"提示 + 自动跳过"，不把用户卡住
     this.skipTimerId = setTimeout(() => {
       this.skipTimerId = -1;
       this.advance(1);
     }, kAutoSkipMs);
+  }
+
+  /** 就地软解：打开会话 → 按当前位置起播 → 自调度拉帧 */
+  private async startSoftPlayback(): Promise<void> {
+    const item: MediaItem | null = this.currentItem();
+    if (item === null) {
+      return;
+    }
+    this.softActive = true;
+    this.playbackError = '';   // 软解接管后不再显示"本机无法播放"
+    this.cancelAutoSkip();
+    const seekSec: number = this.positionMs / 1000;
+    // softPlayOpen 是**异步**接口（内部要取 PlaybackInfo + 探测容器），必须 await
+    const raw: string = await JellyfinNative.softPlayOpen(item.id, this.surfaceId, this.surfaceW,
+                                                         this.surfaceH, 'surface', '{}');
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null ||
+        !JsonUtil.getBoolean(result.data as ESObject, 'ok', false)) {
+      const why: string = result.data !== null
+        ? JsonUtil.getString(result.data as ESObject, 'error', '软解打开失败') : '软解打开失败';
+      this.softActive = false;
+      this.playbackError = `本机无法播放该内容（${why}）`;
+      this.skipTimerId = setTimeout(() => {
+        this.skipTimerId = -1;
+        this.advance(1);
+      }, kAutoSkipMs);
+      return;
+    }
+    // ── EGL 渲染器必须在**本线程（UI 线程）**初始化 ────────────────────────
+    // `softPlayOpen` 跑在原生工作线程上，**故意不做** EGL 初始化：
+    // EGL/DGLES 的"当前上下文"是线程私有状态，在工作线程初始化、在 UI 线程逐帧
+    // `eglSwapBuffers` 会每帧失败（`EGL_BAD_SURFACE`，画面全黑且无报错）——
+    // 那正是此前"软解黑屏"的根因。因此这里用同步接口在当前线程建好渲染器，
+    // 并走 `surfaceId` 路径（本页自己的 XComponent），不碰播放页那块原生桥单例。
+    // 渲染缓冲几何必须**按视频尺寸**协商，不能直接用整屏尺寸：
+    // 「视频」页的 XComponent 是满屏（实测 1260×2294），而模拟器的软件 GL 交换不了这么大的缓冲
+    // （实测 `eglSwapBuffers 0x12301`，且降级阶梯折半后依旧失败 —— 表面创建后
+    // `SET_BUFFER_GEOMETRY` 已不生效）。播放页之所以没这个问题，是因为它的 XComponent 本身
+    // 就按画面比例设了尺寸（1259×537）。这里按"视频尺寸等比缩放到组件内"取几何，
+    // 顺带把解码目标宽度对齐到该几何 —— 既省 swscale 又不浪费解码算力。
+    const videoW: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
+    const videoH: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
+    let renderW: number = this.surfaceW;
+    let renderH: number = this.surfaceH;
+    if (videoW > 0 && videoH > 0 && this.surfaceW > 0 && this.surfaceH > 0) {
+      const k: number = Math.min(this.surfaceW / videoW, this.surfaceH / videoH);
+      renderW = Math.max(2, Math.floor(videoW * k));
+      renderH = Math.max(2, Math.floor(videoH * k));
+    }
+    const initRaw: string = JellyfinNative.softPlayInitRenderer(this.surfaceId, renderW,
+                                                               renderH, 'surface');
+    const initResult: NativeResult = JellyfinNative.parseResult(initRaw);
+    const renderReady: boolean = initResult.ok && initResult.data !== null
+      && JsonUtil.getBoolean(initResult.data as ESObject, 'renderReady', false);
+    if (!renderReady) {
+      const renderErr: string = initResult.ok && initResult.data !== null
+        ? JsonUtil.getString(initResult.data as ESObject, 'renderError', '') : initResult.message;
+      this.softActive = false;
+      this.playbackError = `软解画面无法上屏${renderErr.length > 0 ? '：' + renderErr : ''}`;
+      JellyfinNative.softPlayClose();
+      this.skipTimerId = setTimeout(() => {
+        this.skipTimerId = -1;
+        this.advance(1);
+      }, kAutoSkipMs);
+      return;
+    }
+    this.playingItemId = item.id;
+    // 解码宽度对齐渲染缓冲（0 = 按源分辨率，会白白多解一倍像素）
+    const negotiated: number = initResult.data !== null
+      ? JsonUtil.getNumber(initResult.data as ESObject, 'renderWidth', 0) : 0;
+    this.softDecodeMaxWidth = negotiated > 0 ? negotiated : renderW;
+    if (seekSec > 1) {
+      JellyfinNative.softPlaySeek(seekSec);
+    }
+    this.videoReady = true;
+    this.paused = false;
+    this.startSoftPullLoop();
+    this.startProgressTicker();
+  }
+
+  /** 页内软解的帧循环：自调度（上一帧完成即排下一帧），与播放页同一套思路 */
+  private startSoftPullLoop(): void {
+    this.stopSoftPullLoop();
+    this.scheduleSoftPull(0);
+  }
+
+  private scheduleSoftPull(delayMs: number): void {
+    if (this.softPullTimerId !== -1) {
+      clearTimeout(this.softPullTimerId);
+      this.softPullTimerId = -1;
+    }
+    this.softPullTimerId = setTimeout(() => {
+      this.softPullTimerId = -1;
+      this.pullSoftFrame();
+    }, delayMs);
+  }
+
+  private stopSoftPullLoop(): void {
+    if (this.softPullTimerId !== -1) {
+      clearTimeout(this.softPullTimerId);
+      this.softPullTimerId = -1;
+    }
+  }
+
+  private async pullSoftFrame(): Promise<void> {
+    if (!this.softActive || this.softPulling) {
+      return;
+    }
+    // 切走页签/离开本页就停：软解也在放声音（无音频输出，但别白烧 CPU）
+    if (this.activeTab !== kVideoTabIndex) {
+      return;
+    }
+    this.softPulling = true;
+    try {
+      const raw: string = await JellyfinNative.softPlayNextFrame(this.softDecodeMaxWidth);
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (result.ok && result.data !== null) {
+        const frame: ESObject = result.data as ESObject;
+        if (JsonUtil.getBoolean(frame, 'ok', false)) {
+          // 渲染必须在 UI 线程（本函数运行在 ArkTS 侧 = UI 线程）
+          JellyfinNative.softPlayRenderLast();
+          const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
+          if (pts > 0) {
+            this.positionMs = Math.floor(pts * 1000);
+          }
+          if (this.playingItemId.length > 0) {
+            this.reportProgress(false);
+          }
+        } else {
+          const reason: string = JsonUtil.getString(frame, 'error', '');
+          if (reason === 'eof') {
+            this.advance(1);
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      // 单帧失败不致命：下一次调度会重试
+    } finally {
+      this.softPulling = false;
+      if (this.softActive && !this.paused && this.activeTab === kVideoTabIndex) {
+        this.scheduleSoftPull(kSoftPullMinGapMs);
+      }
+    }
+  }
+
+  /** 关掉页内软解（切条/离页/改走硬解时都要调） */
+  private stopSoftPlayback(): void {
+    this.stopSoftPullLoop();
+    if (this.softActive) {
+      this.softActive = false;
+      JellyfinNative.softPlayClose();
+    }
   }
 
   private cancelAutoSkip(): void {
@@ -515,7 +726,10 @@ export struct ShortVideoPage {
   private releasePlayer(): void {
     const player: media.AVPlayer | null = this.avPlayer;
     this.avPlayer = null;
-    this.videoReady = false;
+    // 软解正在跑时不把 videoReady 打回 false（否则封面会盖住软解画面）
+    if (!this.softActive) {
+      this.videoReady = false;
+    }
     if (player !== null) {
       try {
         player.off('stateChange');
@@ -764,6 +978,12 @@ export struct ShortVideoPage {
           })
             .width('100%')
             .height('100%')
+            .onAreaChange((_oldArea: Area, newArea: Area) => {
+              // 软解渲染缓冲几何按组件像素尺寸协商（与播放页同一口径）
+              const density: number = display.getDefaultDisplaySync().densityPixels;
+              this.surfaceW = Math.round(Number(newArea.width) * density);
+              this.surfaceH = Math.round(Number(newArea.height) * density);
+            })
             .onLoad(() => {
               this.surfaceId = this.surfaceController.getXComponentSurfaceId();
               this.bindSurface();
