@@ -108,9 +108,38 @@ public:
     /** 是否走 TEXTURE 路径（OH_NativeImage：帧直接上传到 XComponent 纹理并发布，不做 swap） */
     bool isTexturePath() const { return nativeImage_ != nullptr; }
 
+    /**
+     * 当前渲染缓冲（= 实际上屏）的像素几何。
+     *
+     * 宿主应把解码尺寸对齐到这里：解码到更大只是白白多付一次 `swscale` 的开销
+     * （最终仍被缩进缓冲），解码到更小则画面直接变糊。
+     */
+    int renderWidth() const { return surfaceWidth_; }
+    int renderHeight() const { return surfaceHeight_; }
+
+    /** 缓冲因 `eglSwapBuffers` 失败而降级的次数（>0 表示本设备吃不下初始几何） */
+    int degradeCount() const { return degradeCount_; }
+
+    /**
+     * 查询给定 surface 上**实际可用的**渲染缓冲几何。
+     *
+     * 为什么必须查询而不是写死常量：能吃下多大的缓冲完全取决于设备的 GL 实现
+     * （模拟器是软件光栅化、真机是硬件），任何固定值都必然在其中一端出错 ——
+     * 写大 → 模拟器 `eglSwapBuffers` 直接失败（0x12301），写小 → 真机画面被无谓地降质。
+     *
+     * TEXTURE（OH_NativeImage）路径的缓冲几何由 XComponent 尺寸决定，平台不接受任意值，
+     * 因此返回期望几何并不作主观限制；window surface 路径的几何由 `SET_BUFFER_GEOMETRY`
+     * 显式指定，返回期望几何，真正的上限只能在 swap 失败后由降级阶梯发现。
+     */
+    static void queryRenderGeometry(bool texturePath, int requestedWidth, int requestedHeight,
+                                    int &width, int &height);
+
 private:
     /** 两条路径共用的初始化：EGL display/config/context、着色器程序、纹理与顶点缓冲 */
     bool initWithWindow(void *window, int requestedWidth, int requestedHeight, std::string &error);
+
+    /** 把缓冲几何下发给 native window（仅 window surface 路径有效），并同步 surfaceWidth_/Height_ */
+    void applyBufferGeometry(int width, int height);
 
     /** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
     bool drawFrame(const uint8_t *rgba, int width, int height, std::string &error);
@@ -141,6 +170,8 @@ private:
     bool ready_ = false;
     /** 非空表示走 OH_NativeImage（TEXTURE）路径，渲染后需 UpdateSurfaceImage */
     void *nativeImage_ = nullptr;
+    /** 缓冲几何因 swap 失败而降级的次数（用于把"本设备吃不下该几何"如实报给宿主） */
+    int degradeCount_ = 0;
 };
 
 } // namespace player

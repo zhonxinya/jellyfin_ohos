@@ -118,10 +118,20 @@
   不打断播放）；播放器没有暴露可切换轨道时（转码等）才回退到
   "改写 `AudioStreamIndex`/`SubtitleStreamIndex` → 重新取流 → seek 回原位"。
   **回退路径尚未在设备上触发过**（该条目上播放器总能给出轨道列表），只有编译验证。
-- **临时诊断件（待清理）**：播放页的状态/进度/手势/轨道探针
-  （`player_state.txt` / `player_progress.txt` / `player_gesture.txt` / `player_tracks.txt`）
-  与 `native/core/http_client.cpp` 里 `ConnectTcp` 的调试 hilog。
-  问题定性后应移除或改为调试开关。
+- **软解渲染分辨率（已修复，无需 640 上限）**：渲染缓冲几何不再写死 640 宽，
+  改为按「源尺寸 ∩ XComponent 像素尺寸」协商（`EglRenderer::queryRenderGeometry`），
+  并在 `eglSwapBuffers` 失败时**逐级折半降级**（最多 4 步、下限 320x180）重试；
+  协商结果经 `SoftPlayOpen` 的 `renderWidth`/`renderHeight` 回传，宿主据此决定解码宽度
+  （`softDecodeMaxWidth`，0 表示按源分辨率）。这样真机拿到全分辨率、模拟器自动落到它能吃下的档位，
+  不再靠"预先写死一个小上限"牺牲画质。
+- **调试显示与临时诊断件（已清理）**：播放页原有的常驻诊断行（帧号 / 抓取字节 / EGL 状态 /
+  锁定与控制条状态）、6 个 `player_*.txt` 探针、软解自动截图导出（`softcapture_*` / `softrender_*`）
+  与底部「存帧」按钮均已移除；`native/feature/player/xcomponent_bridge.cpp` 触摸热路径上的
+  逐事件 hilog 也已删除。
+  代码里保留的 `softStatus` 只是**用户可见提示**（打开中/超时/失败/已自动切换软解），
+  普通提示 4 秒自动隐去，避免长期压在画面上。
+  原生侧的 `softPlaySelfTest` / `softPlayDumpFrame` / `renderTargetProbe` 三个接口作为
+  **换机型/换 XComponent 类型时的一次性判定工具**保留，正常播放链路不再调用它们。
 - **服务端会话堆积**：`/Sessions` 曾达 60+ 条（多为我反复登录/安装的测试痕迹）；
   已在 `EntryAbility.onDestroy` 加"退出时上报停止"的兜底（仅编译验证，`aa force-stop` 不走生命周期回调）。
 

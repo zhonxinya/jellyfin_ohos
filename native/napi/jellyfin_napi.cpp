@@ -1356,6 +1356,16 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
         if (!renderReady && !renderError.empty()) {
             out["renderError"] = renderError;
         }
+        // 渲染缓冲的**实际**像素几何：宿主据此决定解码目标尺寸，避免"解码到 640 宽再被放大"
+        // 这种无谓降质，也避免解码到远超缓冲的尺寸白烧 CPU。
+        if (renderReady) {
+            out["renderWidth"] = SoftRenderer().renderWidth();
+            out["renderHeight"] = SoftRenderer().renderHeight();
+            const int degraded = SoftRenderer().degradeCount();
+            if (degraded > 0) {
+                out["renderDegraded"] = degraded;
+            }
+        }
 
         SoftSession().reset(new jellyfin::player::SoftDecodeSession());
         std::string error;

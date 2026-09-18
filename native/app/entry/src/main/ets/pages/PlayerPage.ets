@@ -4,10 +4,7 @@ import { BusinessError } from '@ohos.base';
 import window from '@ohos.window';
 import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
-import image from '@ohos.multimedia.image';
-import componentSnapshot from '@ohos.arkui.componentSnapshot';
 import avSession from '@ohos.multimedia.avsession';
-import fs from '@ohos.file.fs';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -43,6 +40,9 @@ const kTapSlopVp: number = 12;
 
 /** 双击反馈浮层的停留时间（毫秒） */
 const kRippleMs: number = 620;
+
+/** 软解瞬时提示（打开中/跳转失败等）的自动隐去时间（毫秒） */
+const kSoftNoticeMs: number = 4000;
 
 /** 音量/亮度手势的灵敏度：约 500vp 的竖直位移对应满量程 */
 const kLevelGestureRange: number = 500;
@@ -139,10 +139,23 @@ struct PlayerPage {
   private softSeekHoldUntil: number = 0;
   /** 是否已因硬解失败自动回退过软解（只回退一次） */
   private softFallbackTried: boolean = false;
+  /**
+   * 软解播放的**用户可见**提示：只在需要用户知情/操作时出现
+   * （正在打开、超时、打开失败、跳转失败、播放结束、已自动切换软解）。
+   *
+   * 为什么不再保留原来的常驻诊断行：那一行会把"第 N 帧 / 抓了多少 MB / EGL 是否已渲染 /
+   * 锁定与控制条状态"直接压在画面上，属于开发期的调试显示，不能出现在正式播放界面里。
+   * 软解正常的播放进度由进度条与时间文案承担，无需额外文字。
+   */
   @State private softStatus: string = '';
-  /** 诊断结果（渲染自检/存帧），独立于逐帧状态，避免被 70ms 刷新覆盖 */
-  @State private softDiag: string = '';
   private softTimerId: number = -1;
+  /**
+   * 软解解码目标宽度（px）：由原生侧协商出的渲染缓冲宽度决定（见 startSoftPlay）。
+   * 0 表示按源分辨率解码，不做缩放。
+   */
+  private softDecodeMaxWidth: number = 0;
+  /** 软解提示的自动隐去定时器（用户可见的提示不该永久压在画面上） */
+  private softNoticeTimerId: number = -1;
   private softPulling: boolean = false;
   /** 当前这次拉帧的起始时刻（0 表示空闲）；用于卡死看门狗 */
   private softPullStartedAt: number = 0;
@@ -478,7 +491,7 @@ struct PlayerPage {
       if (w > 0 && h > 0) {
         this.videoWidthPx = w;
         this.videoHeightPx = h;
-        this.appendProbeFile('player_state.txt', `aspectFromStreams ${w}x${h}\n`);
+
         return;
       }
     }
@@ -642,8 +655,7 @@ struct PlayerPage {
       const forward: boolean = x >= this.getScreenWidth() / 2;
       // 探针：把"被判成双击"这件事写下来 —— 单击/双击是同一块区域上的两个手势，
       // 只看位置变化无法区分"没识别成双击"与"识别了但跳转失败"。
-      this.appendProbeFile('player_gesture.txt',
-        `doubleTap forward=${forward ? 1 : 0} x=${Math.round(x)}\n`);
+
       this.showSeekRipple(forward);
       this.skipBy(forward ? kSkipStepMs : -kSkipStepMs);
       // 双击后不再把第二次抬手当成新一轮单击的起点
@@ -742,7 +754,7 @@ struct PlayerPage {
    * 软解用 FFmpeg 在 CPU 上解码，虽然帧率有限，但能把这些内容放出来。
    */
   private async startSoftPlay(): Promise<void> {
-    this.softStatus = '正在打开软解会话…';
+    this.setSoftNotice('正在打开软解会话…', false);
     // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
     this.softStopAvPlayer();
     const pxSize: number[] = this.surfacePixelSize();
@@ -757,9 +769,8 @@ struct PlayerPage {
     const openTimerId: number = setTimeout(() => {
       if (!this.softPlaying) {
         this.softOpenTimedOut = true;
-        this.softStatus = `打开软解会话超时（${Math.round(kSoftOpenTimeoutMs / 1000)} 秒无响应），`
-          + '已放弃；可点「软解」重试或改看其它条目';
-        this.appendProbeFile('player_soft.txt', 'softOpenTimeout\n');
+        this.setSoftNotice(`打开软解会话超时（${Math.round(kSoftOpenTimeoutMs / 1000)} 秒无响应），`
+          + '已放弃；可点「软解」重试或改看其它条目', false);
       }
     }, kSoftOpenTimeoutMs);
     let raw: string = '';
@@ -775,12 +786,12 @@ struct PlayerPage {
     }
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
-      this.softStatus = `软解打开失败：${result.message}`;
+      this.setSoftNotice(`软解打开失败：${result.message}`, false);
       return;
     }
     const data: ESObject = result.data as ESObject;
     if (!JsonUtil.getBoolean(data, 'ok', false)) {
-      this.softStatus = `软解打开失败：${JsonUtil.getString(data, 'error', '未知错误')}`;
+      this.setSoftNotice(`软解打开失败：${JsonUtil.getString(data, 'error', '未知错误')}`, false);
       return;
     }
     this.softPlaying = true;
@@ -789,6 +800,10 @@ struct PlayerPage {
     this.softPullStartedAt = 0;
     const renderReady: boolean = JsonUtil.getBoolean(data, 'renderReady', false);
     const renderError: string = JsonUtil.getString(data, 'renderError', '');
+    if (!renderReady && renderError.length > 0) {
+      // 渲染面不可用是用户必须知道的事实（否则只能看到一块不动的画面）
+      this.setSoftNotice(`软解画面无法上屏：${renderError}`, false);
+    }
     // 画面尺寸/时长取自软解会话（"视频比例"与进度条在软解路径上同样要正确工作）
     const softW: number = JsonUtil.getNumber(data, 'width', 0);
     const softH: number = JsonUtil.getNumber(data, 'height', 0);
@@ -800,10 +815,14 @@ struct PlayerPage {
     if (softDurationSec > 0) {
       this.durationMs = Math.round(softDurationSec * 1000);
     }
-    this.softStatus = `软解中：${JsonUtil.getString(data, 'videoCodec', '?')} `
-      + `${softW}x${softH}`
-      + ` · EGL ${renderReady ? '就绪' : '未就绪'}`
-      + (renderError.length > 0 ? `（${renderError}）` : '');
+    // ── 解码尺寸对齐渲染缓冲（分辨率的关键）─────────────────────────────
+    // 渲染缓冲能吃下多大由设备 GL 决定，原生侧已协商好并把结果回来（renderWidth/Height）。
+    // 我们按它解码，做到两件事同时成立：
+    //   1. 不欠采样 —— 4K/1080p 源在真机上按渲染缓冲的真实尺寸解码，画面不再被压到 640 宽；
+    //   2. 不浪费 —— 解码超过缓冲尺寸的部分最终仍会被缩掉，那部分 CPU/swscale 开销是白花的。
+    // renderWidth 为 0（未就绪）时传 0 = 原生分辨率，不做任何缩放。
+    const renderW: number = JsonUtil.getNumber(data, 'renderWidth', 0);
+    this.softDecodeMaxWidth = renderW > 0 ? renderW : 0;
     // 画面比例：软解由 EglRenderer 按模式换算顶点缩放（硬解走 videoScaleType）
     this.applyAspectToSoftRenderer();
     // 续播支持：如果传入了起始位置，seek 到该位置（原生侧排队，首帧时生效）
@@ -817,31 +836,15 @@ struct PlayerPage {
           this.softPositionMs = this.startPositionMs;
           this.softSeekTargetMs = this.startPositionMs;
           this.softSeekHoldUntil = Date.now() + 4000;
-          this.softDiag = `续播到 ${this.formatTime(this.startPositionMs)}（首帧生效）`;
         } else {
-          this.softDiag = `续播 seek 失败：${JsonUtil.getString(seekResult.data as ESObject, 'error', '')}`;
+          this.setSoftNotice(`续播跳转失败：${JsonUtil.getString(seekResult.data as ESObject, 'error', '')}`,
+            false);
         }
       }
     }
     this.startSoftTimer();
     // 软解播放期间同样保持屏幕常亮（与硬解路径一致）
     this.applyKeepScreenOn(true);
-    // 启动即自检（清屏为红并回读）：把"渲染目标是否可用"的判定一次性落到 softDiag，
-    // 不依赖再点一次按钮（避免自动化/人工都容易错过的时序）
-    const selfRaw: string = JellyfinNative.softPlaySelfTest();
-    const selfResult: NativeResult = JellyfinNative.parseResult(selfRaw);
-    if (selfResult.ok && selfResult.data !== null) {
-      const passed: boolean = JsonUtil.getBoolean(selfResult.data as ESObject, 'ok', false);
-      const report: string = JsonUtil.getString(selfResult.data as ESObject, 'report',
-        JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
-      this.softDiag = `渲染自检${passed ? '通过' : '未通过'}：${report}`;
-    }
-    // 渲染跑起来后自动导出一次帧缓冲（真实视频帧），无需再点任何按钮
-    setTimeout(() => {
-      if (this.softPlaying) {
-        this.autoDumpRenderedFrame();
-      }
-    }, 10000);
   }
 
   /** XComponent 的像素尺寸：优先用组件实测尺寸，未拿到时退化为整屏像素 */
@@ -857,29 +860,36 @@ struct PlayerPage {
     }
   }
 
-  /** surface 就绪即判定渲染目标可用性，结果写入常驻 softDiag（诊断入口，与播放状态无关） */
-  private async probeRenderTarget(): Promise<void> {
-    try {
-      const pxSize: number[] = this.surfacePixelSize();
-      const raw: string = JellyfinNative.renderTargetProbe(this.surfaceId, pxSize[0], pxSize[1],
-        'xcomponent');
-      const result: NativeResult = JellyfinNative.parseResult(raw);
-      if (!result.ok || result.data === null) {
-        this.softDiag = `渲染目标判定失败：${result.message}`;
-        return;
-      }
-      const data: ESObject = result.data as ESObject;
-      const ok: boolean = JsonUtil.getBoolean(data, 'ok', false);
-      const report: string = JsonUtil.getString(data, 'report',
-        JsonUtil.getString(data, 'error', ''));
-      const mode: string = JsonUtil.getString(data, 'mode', '');
-      this.softDiag = `渲染目标(${mode}) ${ok ? '可用' : '不可用'}：${report}`;
-    } catch (err) {
-      this.softDiag = `渲染目标判定异常：${(err as Error).message}`;
+  /**
+   * 设置软解提示（用户可见），并让普通提示自行隐去。
+   *
+   * @param text    提示文案
+   * @param sticky  true 表示需要用户长时间知情（如"已自动切换软解"）；false 表示瞬时提示
+   *                （打开中/跳转失败等），若干秒后自动隐去，避免长期压在画面上。
+   */
+  private setSoftNotice(text: string, sticky: boolean): void {
+    if (this.softNoticeTimerId >= 0) {
+      clearTimeout(this.softNoticeTimerId);
+      this.softNoticeTimerId = -1;
+    }
+    this.softStatus = text;
+    if (!sticky) {
+      this.softNoticeTimerId = setTimeout(() => {
+        this.softNoticeTimerId = -1;
+        this.softStatus = '';
+      }, kSoftNoticeMs);
     }
   }
 
-  /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + PixelMap 创建的开销决定上限） */
+  private clearSoftNotice(): void {
+    if (this.softNoticeTimerId >= 0) {
+      clearTimeout(this.softNoticeTimerId);
+      this.softNoticeTimerId = -1;
+    }
+    this.softStatus = '';
+  }
+
+  /** 逐帧拉取（约 70ms 一帧 ≈ 14fps；软解 + 纹理上传的开销决定上限） */
   private startSoftTimer(): void {
     this.stopSoftTimer();
     this.softTimerId = setInterval(() => {
@@ -908,10 +918,8 @@ struct PlayerPage {
       if (this.softPullStartedAt > 0
         && Date.now() - this.softPullStartedAt > kSoftPullStallMs) {
         const stalledMs: number = Date.now() - this.softPullStartedAt;
-        this.appendProbeFile('player_soft.txt',
-          `softPullStall stalledMs=${stalledMs} frames=${this.softLastFrameIndex}\n`);
-        this.softStatus = `软解无响应已 ${Math.round(stalledMs / 1000)} 秒（解到第 `
-          + `${this.softLastFrameIndex} 帧），已停止；可点「软解」重试或改看其它条目`;
+        this.setSoftNotice(`软解无响应已 ${Math.round(stalledMs / 1000)} 秒（解到第 `
+          + `${this.softLastFrameIndex} 帧），已停止；可点「软解」重试或改看其它条目`, true);
         this.softPulling = false;
         this.softPullStartedAt = 0;
         this.stopSoftPlay();
@@ -922,11 +930,13 @@ struct PlayerPage {
     this.softPullStartedAt = Date.now();
     try {
       // 渲染由原生侧 EGL 完成，这里只取元数据（帧号/时间戳/取流字节/是否已渲染）。
-      // 帧宽限制 640：模拟器 GL 为软件光栅化，上传 1920x1080 大纹理会明显拖慢甚至失败。
+      // 解码宽度取"渲染缓冲的实际宽度"（原生侧协商，见 startSoftPlay）：
+      // 0 表示按源分辨率解码。这样 4K/1080p 源在真机上就是原样的清晰度，
+      // 而不是此前写死的 640 宽（等于把所有内容都降到 640 再放大上屏）。
       //
       // 这一步**必须 await**：原生侧走工作线程执行（未命中缓存时是同步 HTTP），
       // 若在 UI 线程同步等待，会因一次网络往返阻塞主线程数秒 → 系统判 appfreeze。
-      const raw: string = await JellyfinNative.softPlayNextFrame(640);
+      const raw: string = await JellyfinNative.softPlayNextFrame(this.softDecodeMaxWidth);
       const result: NativeResult = JellyfinNative.parseResult(raw);
       if (!result.ok || result.data === null) {
         return;
@@ -936,39 +946,30 @@ struct PlayerPage {
       if (!ok) {
         const reason: string = JsonUtil.getString(frame, 'error', '');
         if (reason === 'eof') {
-          this.softStatus = '软解播放结束';
           this.stopSoftPlay();
         } else if (reason.length > 0) {
-          this.softStatus = `软解失败：${reason}`;
+          this.setSoftNotice(`软解失败：${reason}`, true);
           this.stopSoftPlay();
         }
         return;
       }
       const pts: number = JsonUtil.getNumber(frame, 'ptsSec', 0);
       const idx: number = JsonUtil.getNumber(frame, 'frameIndex', 0);
-      const fetched: number = JsonUtil.getNumber(frame, 'bytesFetched', 0);
       // 渲染在 UI 线程做（原生侧只解码）：EGL 窗口 surface 不能在线程池线程上 swap
       const renderRaw: string = JellyfinNative.softPlayRenderLast();
       const renderResult: NativeResult = JellyfinNative.parseResult(renderRaw);
-      const rendered: boolean = renderResult.ok && renderResult.data !== null
-        ? JsonUtil.getBoolean(renderResult.data as ESObject, 'rendered', false) : false;
       const renderError: string = renderResult.ok && renderResult.data !== null
         ? JsonUtil.getString(renderResult.data as ESObject, 'renderError', '') : '';
-      // 软解播放的进度上报（节流）：此前软解只出画面、不向服务端报告进度，
-      // 导致"继续观看"位置、多端同步都不生效。按 5 秒节流，与硬解路径一致。
-      //
+      if (renderError.length > 0 && this.softStatus.length === 0) {
+        // 上屏失败必须让用户知道（否则只是一块不动的画面），且只提示一次
+        this.setSoftNotice(`软解画面无法上屏：${renderError}`, true);
+      }
       // ── 排队的 seek 结果 ────────────────────────────────────────────────
       // seek 在原生侧排队、由本帧的拉取顺带执行（避免 UI 线程做同步 HTTP），
-      // 结果就挂在这一帧上：跳转是否真的生效，此前从界面完全看不出来。
-      if (JsonUtil.getBoolean(frame, 'seekApplied', false)) {
-        const seekedTo: number = JsonUtil.getNumber(frame, 'seekedToSec', 0);
-        this.appendProbeFile('player_soft.txt', `seekApplied to=${seekedTo.toFixed(1)}\n`);
-        this.softDiag = `已跳转到 ${this.formatTime(seekedTo * 1000)}`;
-      }
+      // 结果挂在这一帧上：跳转失败时必须让用户看到原因。
       const seekError: string = JsonUtil.getString(frame, 'seekError', '');
       if (seekError.length > 0) {
-        this.appendProbeFile('player_soft.txt', `seekFailed ${seekError}\n`);
-        this.softStatus = `跳转失败：${seekError}`;
+        this.setSoftNotice(`跳转失败：${seekError}`, false);
       }
       // 跳转保持窗口：seek 刚发出后的若干帧仍来自旧位置，若照单回写，进度条会先弹回原处
       // 再跳到目标（观感像"没跳成功"）。保持期内只显示目标位置，直到画面追上目标。
@@ -982,16 +983,8 @@ struct PlayerPage {
       }
       this.softLastFrameIndex = idx;
       this.reportSoftProgressThrottled(pts);
-      this.softStatus = `${Math.floor(pts / 60)}:${this.pad2(Math.floor(pts % 60))}`
-        + ` · 第 ${idx} 帧 · ${(fetched / 1048576).toFixed(1)} MB`
-        + ` · ${rendered ? 'EGL 已渲染' : '未渲染'}`
-        // 把交互状态也放进常驻诊断行：锁定/控制条这类状态无法靠"看覆盖层"可靠判断
-        // （UI 可能被其它层遮挡或自动隐藏），写进文字后一次 dump 即可确知真实状态。
-        + ` · 锁定=${this.controlsLocked ? '是' : '否'} 控件=${this.showControls ? '显示' : '隐藏'}`
-        + (this.lastProgressReportAt > 0 ? ' · 已上报进度' : '')
-        + (renderError.length > 0 ? `（${renderError}）` : '');
     } catch (err) {
-      this.softStatus = `软解异常：${(err as Error).message}`;
+      this.setSoftNotice(`软解异常：${(err as Error).message}`, true);
     } finally {
       this.softPulling = false;
       this.softPullStartedAt = 0;
@@ -999,89 +992,10 @@ struct PlayerPage {
   }
 
   /**
-   * 诊断：软解运行一段时间后**自动**导出一次渲染缓冲（不含清屏自检，故回读到的是真实视频帧）。
-   *
-   * 为什么要自动：手动点「存帧」需要控制条处于显示状态，设备自动化下时序很难对齐；
-   * 这条路径只要软解在跑就必然产出文件，便于确证"软解画面确实渲染到了帧缓冲"。
-   * 截图验证：同时导出组件快照和渲染缓冲，提供双重验证证据。
-   */
-  private async autoDumpRenderedFrame(): Promise<void> {
-    try {
-      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-      const timestamp: string = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-      // ① 组件级快照：XComponent(TEXTURE) 的内容由 ArkUI 合成，
-      //    componentSnapshot 能抓到组件真实显示结果（系统 snapshot_display 未必包含）。
-      const capturePath: string = `${ctx.cacheDir}/softcapture_${timestamp}.png`;
-      try {
-        const shot: image.PixelMap = await componentSnapshot.get('softVideoArea');
-        const packer: image.ImagePacker = image.createImagePacker();
-        const buf: ArrayBuffer = await packer.packing(shot, { format: 'image/png', quality: 100 });
-        const file = fs.openSync(capturePath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-        fs.writeSync(file.fd, buf);
-        fs.closeSync(file);
-        this.softDiag = `截图验证：组件快照 → ${capturePath}`;
-      } catch (snapErr) {
-        this.softDiag = `截图验证：组件快照失败 — ${(snapErr as Error).message}`;
-      }
-      // ② 原生渲染缓冲回读（TEXTURE 路径不支持时会明确报错，不再给误导性黑图）
-      const path: string = `${ctx.cacheDir}/softrender_${timestamp}.png`;
-      const raw: string = JellyfinNative.softPlayDumpFrame(path);
-      const result: NativeResult = JellyfinNative.parseResult(raw);
-      if (result.ok && result.data !== null) {
-        const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
-        const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
-        const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
-        this.softDiag = `${this.softDiag}\n截图验证：渲染缓冲 ${source} ${w}x${h} → ${path}`;
-      } else {
-        this.softDiag = `${this.softDiag}\n截图验证：渲染缓冲 — ${result.message}`;
-      }
-    } catch (err) {
-      this.softDiag = `截图验证异常：${(err as Error).message}`;
-    }
-  }
-
-  /** 诊断：先做 EGL 渲染自检（清屏为红并回读），再把渲染缓冲回读成 PNG */
-  private async dumpSoftFrame(): Promise<void> {
-    try {
-      // 自检结果直接进状态栏：能判别"surface 不可作为 GL 目标"与"绘制路径有 bug"
-      const selfRaw: string = JellyfinNative.softPlaySelfTest();
-      const selfResult: NativeResult = JellyfinNative.parseResult(selfRaw);
-      if (selfResult.ok && selfResult.data !== null) {
-        const ok: boolean = JsonUtil.getBoolean(selfResult.data as ESObject, 'ok', false);
-        const report: string = JsonUtil.getString(selfResult.data as ESObject, 'report',
-          JsonUtil.getString(selfResult.data as ESObject, 'error', ''));
-        this.softDiag = `自检${ok ? '通过' : '未通过'}：${report}`;
-      }
-      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-      const path: string = `${ctx.cacheDir}/softplay_frame.png`;
-      const raw: string = JellyfinNative.softPlayDumpFrame(path);
-      const result: NativeResult = JellyfinNative.parseResult(raw);
-      if (result.ok && result.data !== null) {
-        const source: string = JsonUtil.getString(result.data as ESObject, 'source', '');
-        const w: number = JsonUtil.getNumber(result.data as ESObject, 'width', 0);
-        const h: number = JsonUtil.getNumber(result.data as ESObject, 'height', 0);
-        this.softDiag = `${this.softDiag}\n已存帧：${source} ${w}x${h} → ${path}`;
-      } else {
-        this.softDiag = `${this.softDiag}\n存帧失败：${result.message}`;
-      }
-    } catch (err) {
-      this.softDiag = `存帧异常：${(err as Error).message}`;
-    }
-  }
-
-  /**
-   * 软解播放的进度上报（5 秒节流）。
-   *
-   * 为什么需要：软解路径此前只把画面渲染出来，**从不向服务端上报进度**，
-   * 于是"继续观看"、跨端续播、观看记录都不会更新——功能上等于半成品。
-   * 节流策略与硬解路径保持一致（避免高频请求）。
-   */
-  /**
    * 创建 AVSession（官方"媒体会话"能力）：让播放进入系统媒体控制/后台播放体系。
    *
    * 官方文档路径：`avSession.createAVSession(context, tag, 'video')` → `setAVMetadata` → `activate`，
    * 并订阅 play/pause/stop/seek 回调，使系统媒体控件（通知栏/锁屏/耳机按键）能驱动本播放器。
-   * 结果写入探针文件（读屏对播放页不可靠，文件通道已验证可写）。
    */
   private async initAvSession(): Promise<void> {
     try {
@@ -1108,7 +1022,7 @@ struct PlayerPage {
         if (this.avPlayer !== null) {
           this.avPlayer.seek(timeMs);
         }
-        this.appendProbeFile('player_avsession.txt', `sessionSeek to=${timeMs}\n`);
+
       });
       await session.activate();
       // 把播放状态同步进系统会话（通知栏/锁屏媒体控件据此显示播放/暂停与进度）
@@ -1117,11 +1031,9 @@ struct PlayerPage {
         position: { elapsedTime: 0, updateTime: Date.now() }
       });
       this.avSessionRef = session;
-      this.appendProbeFile('player_avsession.txt',
-        `created+activated+statePlay item=${this.itemId}\n`);
+
     } catch (err) {
-      this.appendProbeFile('player_avsession.txt',
-        `error ${(err as Error).message}\n`);
+
     }
   }
 
@@ -1160,9 +1072,7 @@ struct PlayerPage {
     if (this.avPlayer !== null && !this.softPlaying) {
       this.refreshAvTracks();
     }
-    this.appendProbeFile('player_tracks.txt',
-      `openSheet avAudio=${this.avAudioTracks.length} jfStreams=${this.mediaStreams.length}`
-      + ` soft=${this.softPlaying ? 1 : 0}\n`);
+
   }
 
   private closeTrackSheet(): void {
@@ -1245,10 +1155,9 @@ struct PlayerPage {
         this.subtitleStreamIndex =
           JsonUtil.getNumber(jfSubs[subOrdinal] as ESObject, 'Index', -1);
       }
-      this.appendProbeFile('player_tracks.txt', line + '\n');
+
     } catch (err) {
-      this.appendProbeFile('player_tracks.txt',
-        `getTrackDescription error ${(err as Error).message}\n`);
+
     }
   }
 
@@ -1267,8 +1176,7 @@ struct PlayerPage {
         }
       }
     } catch (err) {
-      this.appendProbeFile('player_tracks.txt',
-        `subtitleTrackIndexes error ${(err as Error).message}\n`);
+
     }
     return out;
   }
@@ -1299,12 +1207,10 @@ struct PlayerPage {
       }
       this.persistTrackOptions();
       this.trackNote = '已切换音频';
-      this.appendProbeFile('player_tracks.txt',
-        `selectAudio ok track=${avIndex} confirmed=[${confirm}]\n`);
+
     } catch (err) {
       this.trackNote = `切换音频失败：${(err as Error).message}`;
-      this.appendProbeFile('player_tracks.txt',
-        `selectAudio fail track=${avIndex} ${(err as Error).message}\n`);
+
     }
   }
 
@@ -1347,8 +1253,7 @@ struct PlayerPage {
       opts['subtitleStreamIndex'] = this.subtitleStreamIndex;
       this.playbackOptions = JSON.stringify(opts);
     } catch (err) {
-      this.appendProbeFile('player_tracks.txt',
-        `persistTrackOptions error ${(err as Error).message}\n`);
+
     }
   }
 
@@ -1371,8 +1276,7 @@ struct PlayerPage {
     if (this.avSubtitleTracks.length > 0 && ordinal >= 0
       && ordinal < this.avSubtitleTracks.length) {
       const avIdx: number = JsonUtil.getNumber(this.avSubtitleTracks[ordinal] as ESObject, 'idx', -1);
-      this.appendProbeFile('player_tracks.txt',
-        `subtitle embedded stream=${streamIndex} ordinal=${ordinal} track=${avIdx}\n`);
+
       await this.selectSubtitleTrack(avIdx, streamIndex);
       return;
     }
@@ -1391,11 +1295,9 @@ struct PlayerPage {
     }
     try {
       const before: number[] = await this.subtitleTrackIndexes();
-      this.appendProbeFile('player_tracks.txt',
-        `subtitle external stream=${streamIndex} format=${format} before=${before.length}`
-        + ` urlLen=${url.length} loading...\n`);
+
       await this.avPlayer.addSubtitleFromUrl(url);
-      this.appendProbeFile('player_tracks.txt', `subtitle external loaded stream=${streamIndex}\n`);
+
       const after: number[] = await this.subtitleTrackIndexes();
       let target: number = -1;
       for (let i = 0; i < after.length; i++) {
@@ -1414,15 +1316,13 @@ struct PlayerPage {
       }
       if (target < 0) {
         this.trackNote = '字幕已加载，但播放器未暴露该字幕轨';
-        this.appendProbeFile('player_tracks.txt',
-          `subtitle loaded stream=${streamIndex} format=${format} but no track\n`);
+
         return;
       }
       await this.selectSubtitleTrack(target, streamIndex);
     } catch (err) {
       this.trackNote = `切换字幕失败：${(err as Error).message}`;
-      this.appendProbeFile('player_tracks.txt',
-        `subtitle fail stream=${streamIndex} ${(err as Error).message}\n`);
+
     }
   }
 
@@ -1436,8 +1336,7 @@ struct PlayerPage {
         try {
           await this.avPlayer.deselectTrack(this.avSubtitleIndex);
         } catch (desErr) {
-          this.appendProbeFile('player_tracks.txt',
-            `deselect old subtitle ${this.avSubtitleIndex} err ${(desErr as Error).message}\n`);
+
         }
       }
       await this.avPlayer.selectTrack(avIndex);
@@ -1445,12 +1344,10 @@ struct PlayerPage {
       this.subtitleStreamIndex = streamIndex;
       this.persistTrackOptions();
       this.trackNote = '字幕已切换';
-      this.appendProbeFile('player_tracks.txt',
-        `subtitle ok stream=${streamIndex} track=${avIndex}\n`);
+
     } catch (err) {
       this.trackNote = `切换字幕失败：${(err as Error).message}`;
-      this.appendProbeFile('player_tracks.txt',
-        `subtitle select fail track=${avIndex} ${(err as Error).message}\n`);
+
     }
   }
 
@@ -1459,10 +1356,9 @@ struct PlayerPage {
     if (this.avPlayer !== null && this.avSubtitleIndex >= 0) {
       try {
         await this.avPlayer.deselectTrack(this.avSubtitleIndex);
-        this.appendProbeFile('player_tracks.txt', `subtitle off track=${this.avSubtitleIndex}\n`);
+
       } catch (err) {
-        this.appendProbeFile('player_tracks.txt',
-          `subtitle off fail ${(err as Error).message}\n`);
+
       }
     }
     this.avSubtitleIndex = -1;
@@ -1483,8 +1379,7 @@ struct PlayerPage {
     this.audioStreamIndex = audioIndex;
     this.subtitleStreamIndex = subtitleIndex;
     this.persistTrackOptions();
-    this.appendProbeFile('player_tracks.txt',
-      `reopen audio=${audioIndex} subtitle=${subtitleIndex} resumeMs=${resumeMs}\n`);
+
     await this.openPlayer();
     // 回到切换前的位置（AVPlayer 在 prepared 后 seek 最稳妥，这里做一次兜底 seek）
     setTimeout(() => {
@@ -1726,36 +1621,16 @@ struct PlayerPage {
     this.lastProgressReportAt = now;
     // 记录"正在播放"，供 Ability.onDestroy 在应用退出时上报 stopped（会话卫生）
     PlaybackState.set(this.itemId, Math.floor(ptsSec * 10000000));
-    const raw: string = await JellyfinNative.reportPlaybackProgress(this.itemId,
+    await JellyfinNative.reportPlaybackProgress(this.itemId,
       Math.floor(ptsSec * 10000000), false);
     // 同步进系统媒体会话（通知栏/锁屏进度条随播放推进）；与进度上报同一节流节奏。
     if (this.avSessionRef !== null) {
       this.avSessionRef.setAVPlaybackState({
         state: avSession.PlaybackState.PLAYBACK_STATE_PLAY,
         position: { elapsedTime: Math.floor(ptsSec * 1000), updateTime: Date.now() }
-      }).then(() => {
-        this.appendProbeFile('player_avsession.txt',
-          `syncPlaybackState pos=${Math.floor(ptsSec)}s\n`);
       }).catch(() => {
         // 同步失败不影响播放
       });
-    }
-    // 文件探针：便于设备验证时直接确认"软解路径确实上报了、服务端是否接受"
-    // （读屏对播放页不可靠，见 writeStateProbe 的说明）
-    this.appendProbeFile('player_progress.txt',
-      `softProgress pts=${ptsSec.toFixed(1)} resp=${raw.length > 160 ? raw.substring(0, 160) : raw}\n`);
-  }
-
-  /** 追加一行到沙箱诊断文件（失败不影响播放） */
-  private appendProbeFile(name: string, line: string): void {
-    try {
-      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-      const file = fs.openSync(`${ctx.cacheDir}/${name}`,
-        fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.APPEND);
-      fs.writeSync(file.fd, line);
-      fs.closeSync(file);
-    } catch (err) {
-      // 诊断写入失败忽略
     }
   }
 
@@ -1780,7 +1655,7 @@ struct PlayerPage {
       this.gestureIcon = 'seek';
       this.gestureRatio = -1;
       this.showFeedback = true;
-      this.appendProbeFile('player_gesture.txt', 'longPressBoost start speed=2\n');
+
     }, 600);
   }
 
@@ -1902,7 +1777,7 @@ struct PlayerPage {
       return;
     }
     // 探针：记录原生触摸事件到达，便于设备验证
-    this.appendProbeFile('player_gesture.txt', `nativeDown x=${x.toFixed(1)} y=${y.toFixed(1)}\n`);
+
     this.onGestureDown(x, y);
   }
 
@@ -1917,9 +1792,7 @@ struct PlayerPage {
     if (this.controlsLocked) {
       return;
     }
-    this.appendProbeFile('player_gesture.txt',
-      `nativeGesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
-      + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
+
     this.onGestureUp(x, y);
   }
 
@@ -2010,9 +1883,7 @@ struct PlayerPage {
     if (this.gestureAxis === 'seek' && Math.abs(this.seekDragMs) > 100) {
       // 拖动进度：抬手才真正落地（拖动过程中只更新界面，避免每一帧都发 seek 请求）
       this.seekTo(this.positionMs);
-      this.appendProbeFile('player_gesture.txt',
-        `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
-        + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
+
     }
     // 松手结束长按加速（无论是否已进入加速态）
     this.stopLongPressBoost();
@@ -2055,12 +1926,10 @@ struct PlayerPage {
           this.pullSoftFrame();
         }
       }
-      this.appendProbeFile('player_gesture.txt',
-        `seekTo target=${Math.round(target)} soft=1 queued=${queued ? 1 : 0}\n`);
+
     } else if (this.avPlayer !== null) {
       this.avPlayer.seek(target);
-      this.appendProbeFile('player_gesture.txt',
-        `seekTo target=${Math.round(target)} soft=0 queued=0\n`);
+
     }
     this.positionMs = target;
   }
@@ -2075,13 +1944,8 @@ struct PlayerPage {
     if (this.avPlayer !== null) {
       this.avPlayer.setSpeed(this.playbackSpeed);
     }
-    this.appendProbeFile('player_gesture.txt',
-      `longPressBoost stop restore=${this.playbackSpeed}\n`);
-    this.dismissFeedback();
-  }
 
-  private pad2(v: number): string {
-    return v < 10 ? `0${v}` : `${v}`;
+    this.dismissFeedback();
   }
 
   private softStopAvPlayer(): void {
@@ -2164,7 +2028,7 @@ struct PlayerPage {
             this.avPlayer?.prepare();
           } else {
             this.preparePendingSurface = true;
-            this.appendProbeFile('player_state.txt', 'prepareWaitSurface\n');
+
           }
         } else if (state === 'prepared') {
           this.durationMs = (this.avPlayer?.duration ?? 0);
@@ -2172,14 +2036,12 @@ struct PlayerPage {
           const vw: number = this.avPlayer?.width ?? 0;
           const vh: number = this.avPlayer?.height ?? 0;
           if (vw > 0 && vh > 0 && (vw !== this.videoWidthPx || vh !== this.videoHeightPx)) {
-            this.appendProbeFile('player_state.txt',
-              `aspectFromPlayer ${vw}x${vh} (meta ${this.videoWidthPx}x${this.videoHeightPx})\n`);
+
             this.videoWidthPx = vw;
             this.videoHeightPx = vh;
           }
           this.applyAspectToAvPlayer();
-          this.appendProbeFile('player_state.txt',
-            `avPrepared ${vw}x${vh} mode=${this.aspectMode}\n`);
+
           // 播放期间保持屏幕常亮（看完一集不该因为息屏中断）
           this.applyKeepScreenOn(true);
           this.status = UiState.SUCCESS;
@@ -2191,13 +2053,9 @@ struct PlayerPage {
             this.resumeApplied = true;
             this.avPlayer?.seek(this.startPositionMs);
             this.positionMs = this.startPositionMs;
-            this.appendProbeFile('player_tracks.txt',
-              `resume seek to ${this.startPositionMs}ms\n`);
           }
-          // 硬解已就绪：清掉软解留下的诊断文案（否则会一直挂着"EGL 已渲染/第 N 帧"这类
-          // 上一段软解会话的信息，看起来像两路同时在播）
-          this.softDiag = '';
-          this.softStatus = '';
+          // 硬解已就绪：清掉软解可能留下的提示（上一段软解会话的信息不应继续挂在画面上）
+          this.clearSoftNotice();
           // 轨道列表只有 prepared 之后才取得到（音轨/字幕切换的基础）
           this.refreshAvTracks();
         } else if (state === 'completed') {
@@ -2266,10 +2124,6 @@ struct PlayerPage {
   private handlePlaybackFailure(message: string): void {
     this.status = UiState.ERROR;
     this.errorMsg = message;
-    // 探针：把硬解失败的事实与文案记下来。此前只能从"自动回退软解"这一现象倒推，
-    // 无法区分"硬解不支持该编码"与"我们自己的某一步把它弄挂了"。
-    this.appendProbeFile('player_soft.txt',
-      `hardFail ${message} state=${this.stateText} url=${this.playUrl.length > 0 ? 'yes' : 'no'}\n`);
     // 允许"重试"重新应用续播位置：重试会重建播放器（走一次 prepared），
     // 若不再应用一次，重试成功后就变成从头播放（设备实测踩到：首次拉流失败 → 重试 → 回到 0:00）。
     this.resumeApplied = false;
@@ -2281,7 +2135,7 @@ struct PlayerPage {
       return;
     }
     this.softFallbackTried = true;
-    this.softDiag = `硬解不可用（${reason}）→ 自动切换 FFmpeg 软解…`;
+    this.setSoftNotice(`硬解不可用（${reason}）→ 正在切换 FFmpeg 软解…`, false);
     await this.startSoftPlay();
     if (!this.softPlaying) {
       // 软解也起不来时回到错误态，让用户看到原因并手动重试
@@ -2297,10 +2151,10 @@ struct PlayerPage {
     this.errorMsg = '';
     this.isPlaying = true;
     // 软解会话已支持 seek 续播（av_seek_frame + avcodec_flush_buffers），
-    // 这里如实提示用户当前状态
-    this.softStatus = this.startPositionMs > 1000
+    // 这里如实提示用户当前状态。这条是"用户需要知情"的，不自动隐去。
+    this.setSoftNotice(this.startPositionMs > 1000
       ? `已自动切换软解（将从 ${this.formatTime(this.startPositionMs)} 续播）`
-      : '已自动切换软解播放';
+      : '已自动切换软解播放', true);
   }
 
   private refreshState(): void {
@@ -2498,8 +2352,6 @@ struct PlayerPage {
             // 同一次点击的抬手事件会"穿透"到刚出现的覆盖层上把它立刻解锁
             // （实测表现为"点了锁定却没锁上"）。
             this.lockChangedAt = Date.now();
-            this.refreshStateDiag(this.controlsLocked ? '锁定' : '取消锁定');
-            this.writeStateProbe(this.controlsLocked ? '锁定' : '取消锁定');
           }
         })
       }
@@ -2608,23 +2460,12 @@ struct PlayerPage {
             onTap: () => {
               if (this.softPlaying) {
                 this.stopSoftPlay();
-                this.softStatus = '已停止软解';
+                this.setSoftNotice('已停止软解', false);
               } else {
                 this.startSoftPlay();
               }
             }
           })
-          // 诊断：回读 EGL 渲染缓冲并写成 PNG（验证"确实渲染出来了"，不依赖系统截图是否含 surface）
-          if (this.softPlaying) {
-            PlayerToolButton({
-              showIcon: false,
-              label: '存帧',
-              selected: false,
-              onTap: () => {
-                this.dumpSoftFrame();
-              }
-            })
-          }
         }
         .padding({ left: 2, right: 2 })
       }
@@ -2845,24 +2686,10 @@ struct PlayerPage {
   }
 
   /**
-   * 把播放页状态写进沙箱文件（`cache/player_state.txt`），供设备验证直接读取。
-   *
-   * 为什么要用文件而不是读屏：实测 `uitest dumpLayout` 对播放页**不可靠**
-   * （XComponent/控件经常不出现，甚至整页只剩状态栏），而文件产物可以稳定 pull 回来，
-   * 与前面用 `softcapture.png` 验证渲染的做法一致。
-   */
-  private writeStateProbe(action: string): void {
-    this.appendProbeFile('player_state.txt',
-      `${action} locked=${this.controlsLocked ? 1 : 0}`
-      + ` controls=${this.showControls ? 1 : 0} playing=${this.softPlaying ? 1 : 0}`
-      + ` status=${this.status}\n`);
-  }
-
-  /**
    * 解锁：忽略"刚锁定后极短时间内的点击"。
    *
    * 为什么需要：锁定覆盖层是整屏的，点锁定按钮的同一次抬手事件会穿透到刚出现的覆盖层，
-   * 导致"点了锁定立刻又被解锁"（诊断设备上表现为锁定态无法复现，实际是真实缺陷）。
+   * 导致"点了锁定立刻又被解锁"。
    */
   private unlockByUser(): void {
     if (Date.now() - this.lockChangedAt < 400) {
@@ -2871,22 +2698,9 @@ struct PlayerPage {
     this.controlsLocked = false;
     this.lockChangedAt = Date.now();
     this.revealControls();
-    this.refreshStateDiag('解锁');
-    this.writeStateProbe('解锁');
   }
 
-  /**
-   * 把交互状态写进常驻诊断行（渲染目标探测行）。
-   *
-   * 为什么需要：锁定/控制条显隐这类状态无法靠"看覆盖层是否存在"可靠判断
-   * （覆盖层可能被遮挡、控件会自动隐藏），写进文字后一次 dump 即可确知真实状态，
-   * 无需依赖"猜坐标点击 + 目视判断"。
-   */
-  private refreshStateDiag(action: string): void {
-    this.softDiag = `[${action}] 锁定=${this.controlsLocked ? '是' : '否'} 控件=${this.showControls ? '显示' : '隐藏'}`;
-  }
-
-  /** 手势/比例反馈图标 —— 用系统符号替代原来的 emoji（⏩ ⏪ 🔆 🔊） */
+  /** 手势/比例反馈图标 —— 用系统符号替代 emoji（⏩ ⏪ 🔆 🔊） */
   private gestureSymbol(): Resource {
     if (this.gestureIcon === 'seek') {
       return this.lastSeekForward ? $r('sys.symbol.chevron_right') : $r('sys.symbol.chevron_left');
@@ -2942,7 +2756,6 @@ struct PlayerPage {
       // 把视频面的宽高比算成与画面一致后，视频面之外自然留出黑边，Centered 在 Stack 正中。
       XComponent({ id: 'jellyfin_player', type: XComponentType.SURFACE,
         libraryname: 'jellyfin_native', controller: this.surfaceController })
-        .id('softVideoArea')
         .width(this.videoAreaWidth())
         .height(this.videoAreaHeight())
         .backgroundColor(this.colors().videoBackground)
@@ -2961,11 +2774,7 @@ struct PlayerPage {
             && this.avPlayer.state === 'initialized') {
             this.preparePendingSurface = false;
             this.avPlayer.prepare();
-            this.appendProbeFile('player_state.txt', 'prepareAfterSurface\n');
           }
-          // surface 一就绪就判定"该设备能否把它当 GL 渲染目标"（清屏为红 + 回读），
-          // 结果进常驻 softDiag：打开播放页即可看到结论，无需任何播放/控制条交互
-          this.probeRenderTarget();
         })
       // 手势与"点击唤出控制条"的透明承载层。
       // 为什么需要它：官方 NativeXComponent 模式（XComponent 指定 libraryname）下，
@@ -2996,9 +2805,7 @@ struct PlayerPage {
           } else if (event.type === TouchType.Up) {
             // 文件探针：手势结束时记录一次结果，便于设备验证直接确认"手势确实被识别"
             // （进度条/浮层这类瞬时 UI 无法用读屏稳定观察）
-            this.appendProbeFile('player_gesture.txt',
-              `gesture seekDeltaMs=${this.seekDragMs} volume=${this.volume.toFixed(2)}`
-              + ` longPressBoost=${this.longPressBoosting ? 1 : 0} positionMs=${this.positionMs}\n`);
+
             this.onGestureUp(touch.x, touch.y);
           } else if (event.type === TouchType.Cancel) {
             // 手势被打断（来电、系统手势抢占）：同样要结束本次滑动，
@@ -3113,8 +2920,6 @@ struct PlayerPage {
           .backgroundColor(this.colors().cardBackground)
           .borderRadius(ThemeConstants.CARD_RADIUS)
           .shadow({ radius: 16, color: this.colors().buttonShadow, offsetX: 0, offsetY: 6 })
-          // 组件 id：设备验证时用 componentSnapshot.get('trackSheetCard') 抓面板实际渲染结果
-          .id('trackSheetCard')
         }
         .width('100%')
         .height('100%')
@@ -3201,24 +3006,23 @@ struct PlayerPage {
         .backgroundColor(this.colors().videoBackground)
       }
 
-      // 软解状态常驻浮层（不随控制条自动隐藏，便于用户与诊断查看进度）
-      if (this.softDiag.length > 0) {
-        Text(this.softDiag)
-          .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().onOverlay)
-          .backgroundColor(this.colors().badgeScrim)
-          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-          .borderRadius(ThemeConstants.BADGE_RADIUS)
-          .margin({ top: 110 })
-      }
-      if (this.softStatus.length > 0) {
+      // 软解提示：只在需要用户知情/操作时出现（正在打开、超时、失败、已自动切换软解）。
+      //
+      // 为什么不再常驻：原来的诊断行会把"第 N 帧 / 抓了多少 MB / EGL 是否已渲染 /
+      // 锁定与控制条状态"永久压在画面上 —— 那是开发期的调试显示，不属于播放界面。
+      // 现在普通提示会自动隐去，只有"已自动切换软解"这类需要用户知情的会保留。
+      // 错误态自己已经在整屏覆盖层里展示文案，这里不重复。
+      if (this.softStatus.length > 0 && this.status !== UiState.ERROR) {
         Text(this.softStatus)
           .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlay)
           .backgroundColor(this.colors().badgeScrim)
-          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
           .borderRadius(ThemeConstants.BADGE_RADIUS)
+          .constraintSize({ maxWidth: '86%' })
+          .textAlign(TextAlign.Center)
           .margin({ top: 72 })
+          .hitTestBehavior(HitTestMode.None)
       }
     }
     .width('100%')
