@@ -1,5 +1,6 @@
 import router from '@ohos.router';
 import { JellyfinNative, NativeResult } from '../../plugins/JellyfinNative';
+import { JsonUtil } from '../../common/JsonUtil';
 import { UiState } from '../../common/UiState';
 import { ThemeColors, ThemeConstants } from '../../common/ThemeConstants';
 import { AppViewModel } from '../../viewmodel/AppViewModel';
@@ -35,6 +36,7 @@ class LibraryAction {
 
 const ACTIONS: LibraryAction[] = [
   new LibraryAction('paths', '路径', $r('sys.symbol.folder'), false),
+  new LibraryAction('cover', '封面', $r('sys.symbol.save'), false),
   new LibraryAction('options', '媒体库选项', $r('sys.symbol.list_bullet'), false),
   // 注意：系统符号里没有 rotate（`rotate` 在 media 段，不是符号），扫描用"循环箭头"
   new LibraryAction('scan', '扫描', $r('sys.symbol.arrow_2_circlepath'), false),
@@ -56,6 +58,9 @@ const ACTIONS: LibraryAction[] = [
  * - `POST /Library/VirtualFolders/LibraryOptions`     整体替换媒体库选项
  * - `POST /Library/Refresh`                           扫描全部媒体库
  * - `POST /Items/{itemId}/Refresh`                    只扫描一个媒体库
+ * - `GET  /Items/{itemId}/Images`                     封面信息（类型/尺寸）
+ * - `POST /Items/{itemId}/RemoteImages/Download`      由服务器抓取 URL 图片作为封面
+ * - `DELETE /Items/{itemId}/Images/{imageType}`       删除封面
  *
  * 请求构造与响应解析都在 C++（`core/api/library_admin_api.*`），本页只管展示与表单状态。
  */
@@ -96,6 +101,13 @@ struct LibrariesAdminPage {
   /** 扫描菜单（选一次扫描力度） */
   @State private showScanSheet: boolean = false;
   @State private scanTarget: LibraryEntry | null = null;
+
+  /** 封面浮层 */
+  @State private showCoverSheet: boolean = false;
+  @State private coverTarget: LibraryEntry | null = null;
+  @State private coverUrl: string = '';
+  /** 服务端已有的图片摘要（如 `Primary 1280×720`） */
+  @State private coverInfo: string = '';
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
@@ -315,6 +327,8 @@ struct LibrariesAdminPage {
   private handleAction(actionKey: string, folder: LibraryEntry): void {
     if (actionKey === 'paths') {
       this.openChild('pages/admin/LibraryPathsPage', folder);
+    } else if (actionKey === 'cover') {
+      this.openCoverSheet(folder);
     } else if (actionKey === 'options') {
       this.openChild('pages/admin/LibraryOptionsPage', folder);
     } else if (actionKey === 'scan') {
@@ -324,6 +338,95 @@ struct LibrariesAdminPage {
     } else if (actionKey === 'delete') {
       this.requestDelete(folder);
     }
+  }
+
+  // ── 封面 ────────────────────────────────────────────────────────────────
+
+  /**
+   * 打开封面浮层，并先问服务端要"当前有哪些图片、多大"。
+   *
+   * 为什么先查一次：卡片上只显示"有没有封面"，进了浮层要能说清"当前是 1280×720 的 Primary"，
+   * 用户才知道自己是在替换什么。查询失败不阻断（浮层照常可用，只是尺寸行不显示）。
+   */
+  private async openCoverSheet(folder: LibraryEntry): Promise<void> {
+    if (this.actionBusy) {
+      return;
+    }
+    if (folder.itemId.length === 0) {
+      this.notice('该媒体库还没有被服务器索引（缺少 ItemId），无法设置封面；请先「扫描全部」', false);
+      return;
+    }
+    this.coverTarget = folder;
+    this.coverUrl = '';
+    this.coverInfo = '';
+    this.notice('', true);
+    this.showCoverSheet = true;
+    const raw: string = await JellyfinNative.libraryCoverInfo(folder.itemId);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      this.coverInfo = '';
+      return;
+    }
+    const items: Object[] = JsonUtil.extractItems(result.data);
+    const parts: string[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const info: ESObject = items[i] as ESObject;
+      const type: string = JsonUtil.getString(info, 'ImageType', '');
+      const width: number = JsonUtil.getNumber(info, 'Width', 0);
+      const height: number = JsonUtil.getNumber(info, 'Height', 0);
+      if (type.length > 0) {
+        parts.push(width > 0 && height > 0 ? `${type} ${width}×${height}` : type);
+      }
+    }
+    this.coverInfo = parts.length > 0 ? parts.join('、') : '当前没有封面';
+  }
+
+  private async setCover(): Promise<void> {
+    const target: LibraryEntry | null = this.coverTarget;
+    if (target === null || this.actionBusy) {
+      return;
+    }
+    const url: string = this.coverUrl.trim();
+    if (url.length === 0) {
+      this.notice('请输入图片地址（http/https）', false);
+      return;
+    }
+    if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
+      this.notice('图片地址必须以 http:// 或 https:// 开头', false);
+      return;
+    }
+    this.actionBusy = true;
+    const raw: string =
+      await JellyfinNative.librarySetCoverFromUrl(target.itemId, 'Primary', url);
+    const message: string = this.errorOf(raw, '设置封面失败（服务器可能抓不到这个地址）');
+    this.actionBusy = false;
+    if (message.length > 0) {
+      this.notice(message, false);
+      return;
+    }
+    this.showCoverSheet = false;
+    this.coverTarget = null;
+    this.notice('封面已更新（由服务器抓取该地址）', true);
+    this.reload();
+  }
+
+  private async removeCover(): Promise<void> {
+    const target: LibraryEntry | null = this.coverTarget;
+    if (target === null || this.actionBusy) {
+      return;
+    }
+    this.actionBusy = true;
+    const raw: string = await JellyfinNative.libraryDeleteCover(target.itemId, 'Primary', -1);
+    const message: string = this.errorOf(raw, '删除封面失败');
+    this.actionBusy = false;
+    if (message.length > 0) {
+      this.notice(message, false);
+      return;
+    }
+    this.showCoverSheet = false;
+    this.coverTarget = null;
+    this.notice('封面已删除，卡片会显示首字占位块', true);
+    this.reload();
   }
 
   // ── 视图 ────────────────────────────────────────────────────────────────
@@ -700,6 +803,70 @@ struct LibrariesAdminPage {
   }
 
   @Builder
+  CoverSheet() {
+    Column({ space: 12 }) {
+      Text(`「${this.coverTarget !== null ? this.coverTarget.name : ''}」的封面`)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().textPrimary)
+        .width('100%')
+      Text(this.coverInfo.length > 0 ? `服务器上现有：${this.coverInfo}` : '正在读取封面信息…')
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().textSecondary)
+        .width('100%')
+      TextInput({ text: this.coverUrl, placeholder: '图片地址（http:// 或 https://）' })
+        .width('100%')
+        .onChange((value: string) => {
+          this.coverUrl = value;
+        })
+      Text('图片由服务器去抓取并保存，客户端只发送地址，不会让图片经过手机中转。')
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().textTertiary)
+        .width('100%')
+      if (this.actionMessage.length > 0) {
+        Text(this.actionMessage)
+          .fontSize(ThemeConstants.LABEL_SMALL)
+          .fontColor(this.actionOk ? this.colors().success : this.colors().error)
+          .width('100%')
+          .maxLines(3)
+      }
+      Button(this.actionBusy ? '处理中...' : '从该地址设置封面')
+        .width('100%')
+        .height(44)
+        .backgroundColor(this.colors().brandPrimary)
+        .fontColor(this.colors().onBrand)
+        .enabled(!this.actionBusy)
+        .onClick(() => {
+          this.setCover();
+        })
+      Button('删除现有封面')
+        .width('100%')
+        .height(44)
+        .backgroundColor(this.colors().errorLight)
+        .fontColor(this.colors().onBrand)
+        .enabled(!this.actionBusy)
+        .onClick(() => {
+          this.removeCover();
+        })
+      Button('取消')
+        .width('100%')
+        .height(44)
+        .backgroundColor(this.colors().surfacePressed)
+        .fontColor(this.colors().textSecondary)
+        .onClick(() => {
+          this.showCoverSheet = false;
+          this.coverTarget = null;
+          this.notice('', true);
+        })
+    }
+    .padding(20)
+    .backgroundColor(this.colors().cardBackground)
+    .borderRadius(12)
+    .width('88%')
+    .onClick(() => {
+    })
+  }
+
+  @Builder
   DeleteConfirm() {
     Column({ space: 12 }) {
       Text('删除媒体库？')
@@ -863,7 +1030,8 @@ struct LibrariesAdminPage {
           })
       }
 
-      if (this.showAddForm || this.showRenameForm || this.showDeleteConfirm || this.showScanSheet) {
+      if (this.showAddForm || this.showRenameForm || this.showDeleteConfirm || this.showScanSheet
+        || this.showCoverSheet) {
         Column() {
           if (this.showAddForm) {
             this.AddForm()
@@ -871,6 +1039,8 @@ struct LibrariesAdminPage {
             this.RenameForm()
           } else if (this.showScanSheet) {
             this.ScanSheet()
+          } else if (this.showCoverSheet) {
+            this.CoverSheet()
           } else {
             this.DeleteConfirm()
           }
@@ -884,8 +1054,10 @@ struct LibrariesAdminPage {
           this.showRenameForm = false;
           this.showDeleteConfirm = false;
           this.showScanSheet = false;
+          this.showCoverSheet = false;
           this.scanTarget = null;
           this.deleteTarget = null;
+          this.coverTarget = null;
           this.notice('', true);
         })
       }

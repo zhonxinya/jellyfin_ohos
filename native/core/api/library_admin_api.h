@@ -111,6 +111,36 @@ LibraryRequest buildRefreshItemRequest(const std::string &itemId, const std::str
                                        const std::string &imageRefreshMode, bool replaceAllMetadata,
                                        bool replaceAllImages);
 
+/// @name 媒体库封面（`ImageController` / `RemoteImageController`）
+/// @{
+
+/**
+ * `GET /Items/{itemId}/Images`：条目已有的图片列表（`ImageInfo[]`：
+ * `ImageType` / `ImageIndex` / `Width` / `Height`）。用来在界面上如实显示"当前封面尺寸"，
+ * 而不是只知道"有没有"。
+ */
+LibraryRequest buildItemImagesRequest(const std::string &itemId);
+
+/**
+ * `POST /Items/{itemId}/RemoteImages/Download?type=&imageUrl=`：
+ * 让**服务器**去把给定 URL 的图片抓下来存成封面（`ProviderManager.SaveImage`）。
+ *
+ * 为什么先做这一条而不是"本地上传"：本地上传要走系统图片选择器，本工程的模拟器上没有可验证的图片来源，
+ * 而这条只需要一个 URL，客户端到服务端、服务端抓图、界面刷新整条链路都能在设备上验证。
+ * 本地上传见 `POST /Items/{itemId}/Images/{imageType}`（二进制体），文档里记为未实现。
+ */
+LibraryRequest buildRemoteImageDownloadRequest(const std::string &itemId, const std::string &imageType,
+                                               const std::string &imageUrl);
+
+/**
+ * `DELETE /Items/{itemId}/Images/{imageType}?imageIndex=`：删除图片。
+ * `imageIndex` 为负数时不下发该参数（服务端按类型删）。
+ */
+LibraryRequest buildDeleteItemImageRequest(const std::string &itemId, const std::string &imageType,
+                                           int imageIndex);
+
+/// @}
+
 /// @}
 /// @name 响应归一化（纯函数）
 /// @{

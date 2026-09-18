@@ -603,6 +603,35 @@ export class JellyfinNative {
     }
   }
 
+  /** 条目已有图片（`ImageInfo[]`）：用来显示"当前封面 1280×720"这类事实 */
+  static async libraryCoverInfo(itemId: string): Promise<string> {
+    try {
+      return await jellyfinNative.libraryCoverInfo(itemId);
+    } catch (error) {
+      return JellyfinNative.fail('libraryCoverInfo', error);
+    }
+  }
+
+  /** 让服务器去抓取给定 URL 的图片作为封面（客户端只传 URL，不需要自己下载/上传二进制） */
+  static async librarySetCoverFromUrl(itemId: string, imageType: string,
+                                      imageUrl: string): Promise<string> {
+    try {
+      return await jellyfinNative.librarySetCoverFromUrl(itemId, imageType, imageUrl);
+    } catch (error) {
+      return JellyfinNative.fail('librarySetCoverFromUrl', error);
+    }
+  }
+
+  /** 删除封面；`imageIndex` 传 -1 表示按类型整组删除 */
+  static async libraryDeleteCover(itemId: string, imageType: string,
+                                  imageIndex: number): Promise<string> {
+    try {
+      return await jellyfinNative.libraryDeleteCover(itemId, imageType, imageIndex);
+    } catch (error) {
+      return JellyfinNative.fail('libraryDeleteCover', error);
+    }
+  }
+
   static setPreference(key: string, value: string): string {
     try {
       return jellyfinNative.setPreference(key, value);
