@@ -212,7 +212,13 @@ struct MainShell {
           // pages/settings/ShortVideoSettingsPage），因此它既不属于"媒体库浏览"，
           // 也不属于"设置"，独立成一个页签。
           TabContent() {
-            ShortVideoPage({ themeTick: $themeTick, refreshTick: this.videoTabTick })
+            ShortVideoPage({
+              themeTick: $themeTick,
+              refreshTick: this.videoTabTick,
+              // 页签下标传进去：离开「视频」页时页面自己要暂停播放
+              // （嵌入式组件不会销毁，否则会在"设置"页里继续放声音）
+              activeTab: this.shellTabIndex
+            })
           }
           .tabBar('视频')
 

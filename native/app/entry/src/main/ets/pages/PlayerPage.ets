@@ -110,6 +110,24 @@ const kSoftOpenTimeoutMs: number = 30000;
 const kSoftRenderErrorLimit: number = 3;
 
 /**
+ * 锁定态"锁提示"的停留时间（毫秒）。
+ *
+ * 锁定后画面应当干净，锁只在用户单击时亮一下（见 `showLockBadge`）：
+ * 3.5 秒足够看清"锁在哪、怎么解"，又不至于长期压在画面上。
+ */
+const kLockBadgeMs: number = 3500;
+
+/**
+ * 刚点完锁定按钮后的"宽限期"（毫秒）：这段时间内的单击不再显示锁提示。
+ *
+ * 为什么需要（设备实测）：锁定按钮就在视频画面之上，同一次点击的抬手事件
+ * 还会被视频区的手势状态机看到（原生触摸通道与 ArkUI 手势层是两条通道），
+ * 于是"点锁定"立刻又被判成"单击 → 显示锁"，锁提示当场就弹出来了 ——
+ * 与"锁模式单击才显示锁"的语义不符。给 450ms 宽限期把这次点击吃掉。
+ */
+const kLockGraceMs: number = 450;
+
+/**
  * 是否是图形字幕（位图字幕：PGS/SUP/VOBSUB/DVB…）。
  *
  * 这类字幕的内容是图片，服务端**无法**转成文本，播放器也解析不出可渲染的文本，
@@ -191,6 +209,15 @@ struct PlayerPage {
   @State private showControls: boolean = true;
   @State private playbackSpeed: number = 1.0;
   @State private controlsLocked: boolean = false;
+  /**
+   * 锁定态下"锁提示"是否可见。
+   *
+   * 需求：锁模式**单击显示锁**，再次点击锁才取消锁定 —— 所以锁定后默认什么都不显示
+   * （画面干净），单击才把锁亮出来；解锁也只能点锁本身。
+   */
+  @State private lockBadgeVisible: boolean = false;
+  /** 锁提示的自动收起定时器 */
+  private lockBadgeTimerId: number = -1;
   @State private volume: number = 1.0;
   @State private gestureFeedback: string = '';
   @State private gestureIcon: string = '';
@@ -626,6 +653,33 @@ struct PlayerPage {
     }
   }
 
+  /**
+   * 控制面板里的"非功能区域"（顶栏 / 中央控制簇 / 底部控制条之间的空白）。
+   *
+   * 为什么单独做一个可点容器：面板是**整屏**覆盖层，用户点它的空白处时事件被面板吃掉、
+   * 什么都不发生 —— 观感是"想收起面板却收不起来"。这里用 `layoutWeight(1)` 的透明容器
+   * 占住空白，点它即撤下面板（与点画面一次等价），符合"控制面板可以点击非功能区域撤离"。
+   */
+  @Builder
+  ControlDismissArea() {
+    Column()
+      .width('100%')
+      .layoutWeight(1)
+      .backgroundColor(Color.Transparent)
+      .onClick(() => {
+        this.hideControlsByUser();
+      })
+  }
+
+  /** 用户主动撤下控制面板（与自动隐藏区分：这个不看是否正在播放） */
+  private hideControlsByUser(): void {
+    if (this.hideTimerId >= 0) {
+      clearTimeout(this.hideTimerId);
+      this.hideTimerId = -1;
+    }
+    this.showControls = false;
+  }
+
   // ─────────────────────────── 画面比例 ───────────────────────────
 
   /** 屏幕像素密度（px / vp），「原始」比例的 1:1 换算需要它 */
@@ -1043,10 +1097,45 @@ struct PlayerPage {
     }, kSingleTapDelayMs);
   }
 
-  /** 单击：锁定态下解锁；否则显隐控制条 */
+  /**
+   * 单击：锁定态下**显示锁**（解锁只能点锁本身）；否则显隐控制条。
+   *
+   * 需求原话："屏幕锁定只能通过点击锁的位置来恢复，锁模式单击可以显示锁，
+   * 再次点击锁可以取消锁定模式" —— 所以单击只把锁亮出来，不再顺手解锁
+   * （此前点画面任意位置都会解锁，"想看一眼进度就把锁解掉了"）。
+   */
+  /**
+   * 锁定态的单击：只做"显示/收起锁提示"，**不做**双击快进、不做拖动 seek。
+   *
+   * 复用与正常路径相同的单击延时（`kSingleTapDelayMs`），保证两条通道（ArkUI 手势层 /
+   * 原生兜底轮询）的判定口径一致。
+   */
+  private handleLockedTap(x: number): void {
+    this.lastTapUpAt = Date.now();
+    this.lastTapX = x;
+    if (this.singleTapTimerId >= 0) {
+      clearTimeout(this.singleTapTimerId);
+    }
+    this.singleTapTimerId = setTimeout(() => {
+      this.singleTapTimerId = -1;
+      this.onSingleTap();
+    }, kSingleTapDelayMs);
+  }
+
   private onSingleTap(): void {
+    // 刚切换过锁定状态的那一次单击不算"用户意图"，**两个方向都要挡**：
+    // · 点"锁定"：同一次抬手的单击若被采纳，锁提示会当场弹出来；
+    // · 点"解锁"（锁图标）：解锁已经唤出了控制面板，而这次抬手产生的单击
+    //   又会把它再收起（实测：解锁后控制面板没留住）。
+    if (Date.now() - this.lockChangedAt < kLockGraceMs) {
+      return;
+    }
     if (this.controlsLocked) {
-      this.unlockByUser();
+      if (this.lockBadgeVisible) {
+        this.hideLockBadge();
+      } else {
+        this.showLockBadge();
+      }
       return;
     }
     if (this.showControls) {
@@ -2224,6 +2313,8 @@ struct PlayerPage {
 
   private handleNativeTouchUp(x: number, y: number): void {
     if (this.controlsLocked) {
+      // 与 ArkUI 手势层同一口径：锁定态只保留"单击显示/收起锁提示"
+      this.handleLockedTap(x);
       return;
     }
 
@@ -2812,6 +2903,8 @@ struct PlayerPage {
             this.controlsLocked = !this.controlsLocked;
             if (this.controlsLocked) {
               this.showControls = false;
+              // 锁定瞬间不显示锁提示：先给一个干净的画面，用户点一下再看锁
+              this.hideLockBadge();
             } else {
               this.revealControls();
             }
@@ -3145,38 +3238,71 @@ struct PlayerPage {
   }
 
   @Builder
-  LockedOverlay() {
-    Column({ space: 6 }) {
-      // 圆形解锁按钮：品牌色 + 明确图标，让"下一步该点哪里"一目了然
-      // （原来只有一行小字提示，用户得先读懂文案才知道能点）
-      Button({ type: ButtonType.Circle, stateEffect: true }) {
+  LockBadge() {
+    // 锁定态**不再是整屏遮罩**（原来是 85% 不透明的黑幕 + 文案，点哪里都解锁）：
+    // 需求是"锁模式单击可以显示锁，再次点击锁才可以取消锁定"，也就是
+    // ① 锁定时画面应当干净（不挡画面、不挡进度）；
+    // ② 单击只**显示**锁，只有点锁本身才解锁 —— 避免"想看看进度却把锁解掉了"。
+    Column({ space: 10 }) {
+      // 解锁按钮：锁图标 + 品牌色描边，让"下一步该点哪里"一目了然
+      Column() {
         SymbolGlyph($r('sys.symbol.lock'))
-          .fontSize(26)
-          .fontColor([this.colors().onBrand])
+          .fontSize(30)
+          .fontColor([this.colors().onOverlay])
       }
-      .width(64)
-      .height(64)
-      .backgroundColor(this.colors().brandPrimary)
-      .margin({ bottom: 8 })
+      .width(72)
+      .height(72)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.colors().overlayControlStrong)
+      .border({
+        width: 1.5,
+        color: this.colors().brandPrimary,
+        radius: 36
+      })
       .onClick(() => {
         this.unlockByUser();
       })
-      Text('屏幕已锁定')
-        .fontSize(ThemeConstants.BODY_MEDIUM)
-        .fontColor(this.colors().onOverlay)
-      Text('点击任意位置解锁')
+
+      Text('已锁定 · 点锁图标解锁')
         .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().onOverlayMuted)
-        .margin({ top: 2 })
+        .fontColor(this.colors().onOverlay)
+        .backgroundColor(this.colors().overlayControlStrong)
+        .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+        .borderRadius(ThemeConstants.BADGE_RADIUS)
     }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
+    // 只占内容大小、**不铺满整屏**：锁之外的位置不归它处理，落回视频区手势状态机
+    // （`onSingleTap` 里"再点一下收起锁提示"）。此前铺满整屏并挂 onClick，
+    // 会与手势状态机对同一次点击各处理一遍，效果互相抵消（实测：点别处锁提示不消失）。
     .alignItems(HorizontalAlign.Center)
-    .backgroundColor(this.colors().overlayControlStrong)
-    .onClick(() => {
-      this.unlockByUser();
-    })
+    .justifyContent(FlexAlign.Center)
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  /**
+   * 显示锁提示（锁定态单击触发），3.5 秒后自动收起。
+   *
+   * 为什么要自动收起：提示的目的是"告诉用户锁在哪、怎么解"，
+   * 一直挂着又变成了遮挡画面的浮层 —— 与"锁定时画面干净"的诉求冲突。
+   */
+  private showLockBadge(): void {
+    if (this.lockBadgeTimerId >= 0) {
+      clearTimeout(this.lockBadgeTimerId);
+      this.lockBadgeTimerId = -1;
+    }
+    this.lockBadgeVisible = true;
+    this.lockBadgeTimerId = setTimeout(() => {
+      this.lockBadgeTimerId = -1;
+      this.lockBadgeVisible = false;
+    }, kLockBadgeMs);
+  }
+
+  private hideLockBadge(): void {
+    if (this.lockBadgeTimerId >= 0) {
+      clearTimeout(this.lockBadgeTimerId);
+      this.lockBadgeTimerId = -1;
+    }
+    this.lockBadgeVisible = false;
   }
 
   /**
@@ -3191,6 +3317,7 @@ struct PlayerPage {
     }
     this.controlsLocked = false;
     this.lockChangedAt = Date.now();
+    this.hideLockBadge();
     this.revealControls();
   }
 
@@ -3286,11 +3413,19 @@ struct PlayerPage {
         .height('100%')
         .backgroundColor(Color.Transparent)
         .onTouch((event: TouchEvent) => {
-          if (this.controlsLocked) {
-            return;
-          }
           const touches: TouchObject[] = event.touches;
           if (touches.length !== 1) {
+            return;
+          }
+          if (this.controlsLocked) {
+            // 锁定态**只保留"单击"这一条路径**（显示/收起锁提示），其余手势一律忽略。
+            //
+            // 为什么不能直接 return（原实现如此）：那样锁定后画面收不到任何触摸，
+            // 「单击显示锁」就永远不可能发生 —— 设备实测：锁定后单击，锁提示不出现，
+            // 用户也就没有任何"点锁解锁"的入口（等于把自己锁死）。
+            if (event.type === TouchType.Up) {
+              this.handleLockedTap(touches[0].x);
+            }
             return;
           }
           const touch: TouchObject = touches[0];
@@ -3360,9 +3495,11 @@ struct PlayerPage {
         this.CompletedOverlay()
       }
 
-      // 锁定覆盖层
-      if (this.controlsLocked) {
-        this.LockedOverlay()
+      // 锁提示：**锁定后默认不显示**，单击画面才亮出来（见 onSingleTap / showLockBadge）。
+      // 这里必须同时判 `lockBadgeVisible`：只判 `controlsLocked` 的话，锁一按下提示就挂在
+      // 画面上了（设备实测踩到），与"锁模式单击可以显示锁"的诉求相反。
+      if (this.controlsLocked && this.lockBadgeVisible) {
+        this.LockBadge()
       }
 
       // 控制面板
@@ -3370,13 +3507,14 @@ struct PlayerPage {
         Column() {
           this.TopBar()
 
-          Blank()
+          // 空白区（顶栏与中央控制簇之间）：点击即撤下控制面板
+          this.ControlDismissArea()
 
           // 主操作居中（Infuse/iina 全屏的布局）：播放/暂停与 ±10s 在画面正中，
           // 顶部只放标题/返回，底部只放进度与工具开关，三者互不挤压
           this.CenterControls()
 
-          Blank()
+          this.ControlDismissArea()
 
           this.BottomControls()
         }

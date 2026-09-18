@@ -51,7 +51,6 @@ declare module 'libjellyfin_native.so' {
     reportPlaybackProgress(itemId: string, positionTicks: number, isPaused: boolean): string;
     reportPlaybackStopped(itemId: string, positionTicks: number): string;
     playerOpen(itemId: string, optionsJson: string): string;
-    playerSoftDecodeProbe(itemId: string, cacheDir: string, optionsJson: string): string;
     softPlayOpen(itemId: string, surfaceId: string, surfaceWidth: number, surfaceHeight: number, renderMode: string, optionsJson: string): string;
     /**
      * 在**当前线程**初始化/复用软解 EGL 渲染器（必须是将来调用 `softPlayRenderLast()`
@@ -93,9 +92,6 @@ declare module 'libjellyfin_native.so' {
     softPlaySetScale(mode: number): string;
     /** 读取 XComponent 视频区域的最新触摸事件（由 DispatchTouchEvent 捕获） */
     getXComponentTouchEvent(): string;
-    softPlayDumpFrame(path: string): string;
-    softPlaySelfTest(): string;
-    renderTargetProbe(surfaceId: string, width: number, height: number, renderMode: string): string;
     playerPlay(): string;
     playerPause(): string;
     playerSeek(positionTicks: number): string;
