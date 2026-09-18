@@ -119,6 +119,11 @@ jobs:
             printf '# %s\n\n本 Release 由 GitHub Actions 从标签 %s 构建。\n' "$TAG" "$TAG" > "$OUT"
           fi
 
+          # 发布说明同时服务于两个读者：仓库里的文档（相对链接正确）与 Release 页面
+          # （相对链接点不开，因为渲染基准不再是 docs/）。生成正文时把相对链接改写成
+          # 指向本标签的绝对链接——v1.0.0 发布时踩过一次：正文里 3 个链接点不开。
+          sed -i "s|](\.\./|](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/|g" "$OUT"
+
           ARM64_HAP=$(ls dist/*arm64-v8a-unsigned.hap | head -n1)
           UNIVERSAL_HAP=$(ls dist/*universal-unsigned.hap | head -n1)
 
