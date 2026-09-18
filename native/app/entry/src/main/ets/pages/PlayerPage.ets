@@ -171,6 +171,13 @@ struct PlayerPage {
   /** 是否已因硬解失败自动回退过软解（只回退一次） */
   private softFallbackTried: boolean = false;
   /**
+   * 回退软解时要接上的播放位置（毫秒，0 表示没有）。
+   *
+   * 只有"播放中途硬解失败"才会有值：这时软解必须从当前位置续上，
+   * 而不是用进播放页时的续播点（那是"从头/从上次退出点"的语义）。
+   */
+  private softFallbackStartMs: number = 0;
+  /**
    * 软解播放的**用户可见**提示：只在需要用户知情/操作时出现
    * （正在打开、超时、打开失败、跳转失败、播放结束、已自动切换软解）。
    *
@@ -1222,16 +1229,18 @@ struct PlayerPage {
     }
     // 画面比例：软解由 EglRenderer 按模式换算顶点缩放（硬解走 videoScaleType）
     this.applyAspectToSoftRenderer();
-    // 续播支持：如果传入了起始位置，seek 到该位置（原生侧排队，首帧时生效）
-    if (this.startPositionMs > 1000) {
-      const seekSec: number = this.startPositionMs / 1000;
+    // 定位目标：优先"硬解失败时所在的位置"（无感切换），否则用传入的续播位置。
+    const seekTargetMs: number = this.softFallbackStartMs > 1000
+      ? this.softFallbackStartMs : this.startPositionMs;
+    if (seekTargetMs > 1000) {
+      const seekSec: number = seekTargetMs / 1000;
       const seekRaw: string = JellyfinNative.softPlaySeek(seekSec);
       const seekResult: NativeResult = JellyfinNative.parseResult(seekRaw);
       if (seekResult.ok && seekResult.data !== null) {
         const seekQueued: boolean = JsonUtil.getBoolean(seekResult.data as ESObject, 'ok', false);
         if (seekQueued) {
-          this.softPositionMs = this.startPositionMs;
-          this.softSeekTargetMs = this.startPositionMs;
+          this.softPositionMs = seekTargetMs;
+          this.softSeekTargetMs = seekTargetMs;
           this.softSeekHoldUntil = Date.now() + 4000;
         } else {
           this.setSoftNotice(`续播跳转失败：${JsonUtil.getString(seekResult.data as ESObject, 'error', '')}`,
@@ -2545,11 +2554,26 @@ struct PlayerPage {
    * 只回退一次，避免与用户手动"重试"互相打架。
    */
   private handlePlaybackFailure(message: string): void {
-    this.status = UiState.ERROR;
-    this.errorMsg = message;
-    // 允许"重试"重新应用续播位置：重试会重建播放器（走一次 prepared），
-    // 若不再应用一次，重试成功后就变成从头播放（设备实测踩到：首次拉流失败 → 重试 → 回到 0:00）。
+    // ── 无感切换：别先闪一次"播放出错"整屏覆盖层 ──────────────────────────
+    // 原来的顺序是"置 ERROR → 再尝试软解"，于是用户会看到：硬解报错 → 整屏红色错误页
+    // → 半秒后被软解画面顶掉。这就是"有感"的来源。
+    // 现在：只要还有软解可回退，就保持**加载态**（转圈 + 标题 + "正在切换软解…"），
+    // 只有软解也起不来时才进错误态（那时错误页是必要的终态）。
     this.resumeApplied = false;
+    const willFallback: boolean = !this.softFallbackTried && !this.softPlaying;
+    if (!willFallback) {
+      this.status = UiState.ERROR;
+      this.errorMsg = message;
+      return;
+    }
+    // 记录"失败发生时的播放位置"：软解要**接着这里**播，而不是回到进播放页时的续播点。
+    // 否则出现"硬解播到 10 分钟报错 → 软解从 0 开始"的进度倒退（无感切换的另一半）。
+    if (this.positionMs > 1000) {
+      this.softFallbackStartMs = this.positionMs;
+    }
+    this.status = UiState.LOADING;
+    this.stateText = '正在切换软解…';
+    this.setSoftNotice(`硬解不可用（${message}）→ 正在切换 FFmpeg 软解…`, true);
     this.maybeFallbackToSoftDecode(message);
   }
 
