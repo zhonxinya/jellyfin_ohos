@@ -22,6 +22,8 @@
     "pages/admin/TasksPage",
     "pages/admin/SystemInfoPage",
     "pages/admin/LibrariesAdminPage",
+    "pages/admin/LibraryPathsPage",
+    "pages/admin/LibraryOptionsPage",
     "pages/admin/StreamingPage",
     "pages/admin/TranscodingPage",
     "pages/admin/PlaybackSettingsPage",

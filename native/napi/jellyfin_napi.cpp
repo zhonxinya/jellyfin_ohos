@@ -2,6 +2,7 @@
 
 #include "api/account_api.h"
 #include "api/catalog_api.h"
+#include "api/library_admin_api.h"
 #include "api/media_api.h"
 #include "api/playback_api.h"
 #include "api/playlist_api.h"
@@ -2419,6 +2420,264 @@ napi_value AdminGenericDelete(napi_env env, napi_callback_info info)
     return RunAsync(env, [path]() { return FromApi(Api().deleteJson(path)).dump(); });
 }
 
+// ── 媒体库管理（设置 → 媒体库）──────────────────────────────────────────────
+// 请求构造与响应归一化在 core 的 library_admin_api.{h,cpp} 里（纯函数，有主机单测）；
+// 这里只做「取参数 → 构造请求 → 异步执行」的桥接，不拼 URL、不解析业务 JSON。
+// 这些端点全部要求管理员权限（/Library/VirtualFolders/* 是 RequiresElevation）。
+
+std::vector<std::string> JsonToStringVector(const nlohmann::json &value)
+{
+    std::vector<std::string> out;
+    if (!value.is_array()) {
+        return out;
+    }
+    for (const auto &item : value) {
+        if (item.is_string()) {
+            out.push_back(item.get<std::string>());
+        }
+    }
+    return out;
+}
+
+std::string RunLibraryRequest(const jellyfin::api::LibraryRequest &request)
+{
+    return FromApi(jellyfin::api::execute(Api(), request)).dump();
+}
+
+napi_value LibraryVirtualFolders(napi_env env, napi_callback_info /*info*/)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    return RunAsync(env, []() { return FromApi(jellyfin::api::getVirtualFolders(Api())).dump(); });
+}
+
+napi_value LibraryAvailableOptions(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string contentType;
+    ReadStringArg(env, info, 0, contentType);
+    bool isNewLibrary = false;
+    ReadBoolArg(env, info, 1, isNewLibrary);
+    return RunAsync(env, [contentType, isNewLibrary]() {
+        const auto request =
+            jellyfin::api::buildAvailableOptionsRequest(contentType, isNewLibrary);
+        jellyfin::ApiResult result = jellyfin::api::execute(Api(), request);
+        if (result.ok()) {
+            result.data = jellyfin::api::normalizeAvailableOptions(result.data);
+        }
+        return FromApi(result).dump();
+    });
+}
+
+napi_value LibraryLocalization(napi_env env, napi_callback_info /*info*/)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    return RunAsync(env, []() { return FromApi(jellyfin::api::getLocalization(Api())).dump(); });
+}
+
+napi_value LibraryAddVirtualFolder(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    std::string collectionType;
+    std::string pathsJson;
+    std::string optionsJson;
+    bool refreshLibrary = true;
+    ReadStringArg(env, info, 0, name);
+    ReadStringArg(env, info, 1, collectionType);
+    ReadStringArg(env, info, 2, pathsJson);
+    ReadStringArg(env, info, 3, optionsJson);
+    ReadBoolArg(env, info, 4, refreshLibrary);
+    nlohmann::json paths;
+    nlohmann::json options;
+    ReadJsonArg(env, info, 2, paths);
+    ReadJsonArg(env, info, 3, options);
+    if (name.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library name is required"));
+    }
+    const std::vector<std::string> pathList = JsonToStringVector(paths);
+    return RunAsync(env, [name, collectionType, pathList, options, refreshLibrary]() {
+        return RunLibraryRequest(jellyfin::api::buildAddVirtualFolderRequest(
+            name, collectionType, pathList, options, refreshLibrary));
+    });
+}
+
+napi_value LibraryRenameVirtualFolder(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    std::string newName;
+    bool refreshLibrary = false;
+    ReadStringArg(env, info, 0, name);
+    ReadStringArg(env, info, 1, newName);
+    ReadBoolArg(env, info, 2, refreshLibrary);
+    if (name.empty() || newName.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Both name and new name are required"));
+    }
+    return RunAsync(env, [name, newName, refreshLibrary]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildRenameVirtualFolderRequest(name, newName, refreshLibrary));
+    });
+}
+
+napi_value LibraryRemoveVirtualFolder(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    bool refreshLibrary = true;
+    ReadStringArg(env, info, 0, name);
+    ReadBoolArg(env, info, 1, refreshLibrary);
+    if (name.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library name is required"));
+    }
+    return RunAsync(env, [name, refreshLibrary]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildRemoveVirtualFolderRequest(name, refreshLibrary));
+    });
+}
+
+napi_value LibraryAddMediaPath(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    std::string path;
+    std::string networkPath;
+    bool refreshLibrary = true;
+    ReadStringArg(env, info, 0, name);
+    ReadStringArg(env, info, 1, path);
+    ReadStringArg(env, info, 2, networkPath);
+    ReadBoolArg(env, info, 3, refreshLibrary);
+    if (name.empty() || path.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library name and path are required"));
+    }
+    return RunAsync(env, [name, path, networkPath, refreshLibrary]() {
+        return RunLibraryRequest(jellyfin::api::buildAddMediaPathRequest(
+            name, path, networkPath, refreshLibrary));
+    });
+}
+
+napi_value LibraryUpdateMediaPath(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    std::string path;
+    std::string networkPath;
+    ReadStringArg(env, info, 0, name);
+    ReadStringArg(env, info, 1, path);
+    ReadStringArg(env, info, 2, networkPath);
+    if (name.empty() || path.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library name and path are required"));
+    }
+    return RunAsync(env, [name, path, networkPath]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildUpdateMediaPathRequest(name, path, networkPath));
+    });
+}
+
+napi_value LibraryRemoveMediaPath(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string name;
+    std::string path;
+    bool refreshLibrary = true;
+    ReadStringArg(env, info, 0, name);
+    ReadStringArg(env, info, 1, path);
+    ReadBoolArg(env, info, 2, refreshLibrary);
+    if (name.empty() || path.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library name and path are required"));
+    }
+    return RunAsync(env, [name, path, refreshLibrary]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildRemoveMediaPathRequest(name, path, refreshLibrary));
+    });
+}
+
+napi_value LibraryUpdateOptions(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string optionsJson;
+    nlohmann::json options;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, optionsJson);
+    if (!ReadJsonArg(env, info, 1, options)) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library options JSON is required"));
+    }
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library item id is required"));
+    }
+    return RunAsync(env, [itemId, options]() {
+        return RunLibraryRequest(
+            jellyfin::api::buildUpdateLibraryOptionsRequest(itemId, options));
+    });
+}
+
+napi_value LibraryScanAll(napi_env env, napi_callback_info /*info*/)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    return RunAsync(env, []() {
+        return RunLibraryRequest(jellyfin::api::buildRefreshLibraryRequest());
+    });
+}
+
+napi_value LibraryScanFolder(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string metadataRefreshMode;
+    std::string imageRefreshMode;
+    bool replaceAllMetadata = false;
+    bool replaceAllImages = false;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, metadataRefreshMode);
+    ReadStringArg(env, info, 2, imageRefreshMode);
+    ReadBoolArg(env, info, 3, replaceAllMetadata);
+    ReadBoolArg(env, info, 4, replaceAllImages);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Library item id is required"));
+    }
+    return RunAsync(env, [itemId, metadataRefreshMode, imageRefreshMode, replaceAllMetadata,
+                          replaceAllImages]() {
+        return RunLibraryRequest(jellyfin::api::buildRefreshItemRequest(
+            itemId, metadataRefreshMode, imageRefreshMode, replaceAllMetadata, replaceAllImages));
+    });
+}
+
 napi_value SetPreference(napi_env env, napi_callback_info info)
 {
     std::string key;
@@ -2692,6 +2951,30 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"adminGenericPostNoBody", nullptr, AdminGenericPostNoBody, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"adminGenericDelete", nullptr, AdminGenericDelete, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        // 媒体库管理（设置 → 媒体库）：端点与参数含义见 core/api/library_admin_api.h
+        {"libraryVirtualFolders", nullptr, LibraryVirtualFolders, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryAvailableOptions", nullptr, LibraryAvailableOptions, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryLocalization", nullptr, LibraryLocalization, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryAddVirtualFolder", nullptr, LibraryAddVirtualFolder, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryRenameVirtualFolder", nullptr, LibraryRenameVirtualFolder, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryRemoveVirtualFolder", nullptr, LibraryRemoveVirtualFolder, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryAddMediaPath", nullptr, LibraryAddMediaPath, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryUpdateMediaPath", nullptr, LibraryUpdateMediaPath, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryRemoveMediaPath", nullptr, LibraryRemoveMediaPath, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryUpdateOptions", nullptr, LibraryUpdateOptions, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"libraryScanAll", nullptr, LibraryScanAll, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"libraryScanFolder", nullptr, LibraryScanFolder, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"setPreference", nullptr, SetPreference, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPreferences", nullptr, GetPreferences, nullptr, nullptr, nullptr, napi_default,
