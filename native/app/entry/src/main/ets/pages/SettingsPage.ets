@@ -652,14 +652,14 @@ export struct SettingsPage {
             this.SectionCard('内容管理', 'folder', [
             { icon: 'folder', title: '媒体库', subtitle: '媒体库管理、显示、元数据与 NFO 设置', route: 'pages/admin/LibrariesAdminPage' },
             { icon: 'person_2', title: '用户', subtitle: '添加和管理服务器用户', route: 'pages/admin/UsersPage' },
-            { icon: 'play_circle', title: '播放', subtitle: '转码、恢复播放、流媒体传输与进度条预览图', route: 'pages/admin/PlaybackSettingsPage' },
+            { icon: 'play_circle', title: '播放', subtitle: '服务器级播放：远程码率上限与相关设置入口', route: 'pages/admin/PlaybackSettingsPage' },
             { icon: 'puzzle', title: '插件', subtitle: '已安装的服务器插件', route: 'pages/admin/PluginsPage' },
             ])
             this.SectionCard('服务器设置', 'gearshape', [
             { icon: 'display', title: '控制台', subtitle: '服务器信息、数据统计与操作', route: 'pages/admin/AdminHubPage' },
             { icon: 'gearshape', title: '常规', subtitle: '服务器名称、语言、路径与性能限制', route: 'pages/admin/GeneralSettingsPage' },
-            { icon: 'wifi', title: '网络', subtitle: '端口、HTTPS、远程访问与网络发现', route: 'pages/admin/AdminGenericPage', titleParam: '网络', pathParam: '/System/Configuration/Network' },
-            { icon: 'paintpalette', title: '品牌', subtitle: '启动画面、登录声明与自定义 CSS', route: 'pages/admin/AdminGenericPage', titleParam: '品牌', pathParam: '/System/Configuration/Branding' },
+            { icon: 'wifi', title: '网络', subtitle: '远程访问、端口、HTTPS、局域网与代理', route: 'pages/admin/NetworkSettingsPage' },
+            { icon: 'paintpalette', title: '品牌', subtitle: '启动画面、登录免责声明与自定义 CSS', route: 'pages/admin/BrandingSettingsPage' },
             { icon: 'key', title: 'API 密钥', subtitle: '管理 API 访问密钥', route: 'pages/admin/ApiKeysPage' },
             ])
             this.SectionCard('运行状态', 'timer', [
