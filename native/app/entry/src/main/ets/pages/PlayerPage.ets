@@ -97,6 +97,18 @@ const kSoftPullStallMs: number = 20000;
 const kSoftOpenTimeoutMs: number = 30000;
 
 /**
+ * 软解**上屏连续失败**多少次即判定"渲染不可用"并停止软解（终态）。
+ *
+ * 为什么要有一个（而不是"失败就一直重试"）：软解只解码视频（无音频输出），
+ * 上屏失败就是"用户什么都看不到"。历史上失败被静默忽略，表现成永远的黑屏
+ * （设备实测：EGL 在工作线程初始化，UI 线程每帧 `eglSwapBuffers` 报
+ * `EGL_BAD_SURFACE`，帧号照涨、屏幕全黑、无任何提示）。
+ * 取 3 而不是 1：偶发一次（surface 正在重建等）允许自愈（原生侧会在帧循环里
+ * 重新绑定当前 surface），连续失败才说明真的上不了屏。
+ */
+const kSoftRenderErrorLimit: number = 3;
+
+/**
  * 是否是图形字幕（位图字幕：PGS/SUP/VOBSUB/DVB…）。
  *
  * 这类字幕的内容是图片，服务端**无法**转成文本，播放器也解析不出可渲染的文本，
@@ -157,6 +169,16 @@ struct PlayerPage {
   private softDecodeMaxWidth: number = 0;
   /** 软解提示的自动隐去定时器（用户可见的提示不该永久压在画面上） */
   private softNoticeTimerId: number = -1;
+  /**
+   * 软解的渲染器是否起不来（EGL 初始化失败/上屏失败）。
+   *
+   * 为什么要单独记一个标志：软解只解码视频（无音频输出），渲染起不来就等于"什么都没有"。
+   * 此时**必须**让用户看到原因、并让后续流程进入终态，而不是让会话继续偷偷解码、
+   * 把画面丢进虚空（历史缺陷：渲染每帧失败却只显示"已自动切换软解播放"，屏幕全黑）。
+   */
+  private softRenderFailed: boolean = false;
+  /** 连续上屏失败计数：偶发一次可容忍，连续失败必须给终态（否则就是"永久黑屏"） */
+  private softRenderErrorStreak: number = 0;
   private softPulling: boolean = false;
   /** 当前这次拉帧的起始时刻（0 表示空闲）；用于卡死看门狗 */
   private softPullStartedAt: number = 0;
@@ -997,6 +1019,8 @@ struct PlayerPage {
    * 软解用 FFmpeg 在 CPU 上解码，虽然帧率有限，但能把这些内容放出来。
    */
   private async startSoftPlay(): Promise<void> {
+    this.softRenderFailed = false;
+    this.softRenderErrorStreak = 0;
     this.setSoftNotice('正在打开软解会话…', false);
     // 硬解失败后应停掉 AVPlayer，避免两路同时读流（同时把 surface 让给 EGL）
     this.softStopAvPlayer();
@@ -1041,11 +1065,47 @@ struct PlayerPage {
     this.softPaused = false;
     this.softLastFrameIndex = 0;
     this.softPullStartedAt = 0;
-    const renderReady: boolean = JsonUtil.getBoolean(data, 'renderReady', false);
-    const renderError: string = JsonUtil.getString(data, 'renderError', '');
-    if (!renderReady && renderError.length > 0) {
-      // 渲染面不可用是用户必须知道的事实（否则只能看到一块不动的画面）
-      this.setSoftNotice(`软解画面无法上屏：${renderError}`, false);
+    this.softRenderErrorStreak = 0;
+
+    // ── 在 UI 线程初始化 EGL 渲染器（"软解黑屏"的修复点）──────────────────
+    // 为什么必须在这里、且必须是同步调用：
+    // EGL/DGLES 把"当前上下文 / 当前 surface"记在**线程私有**状态里，初始化与逐帧渲染
+    // 必须同线程。`softPlayOpen` 跑在原生的工作线程上（为了不阻塞 UI 做网络/解析），
+    // 若让它在那边初始化 EGL，则 UI 线程帧循环里的每一次 `eglSwapBuffers` 都会失败：
+    // 设备实测（模拟器，HEVC 源自动回退软解）驱动日志每 70ms 一条
+    // `DGLES: EGL_BAD_SURFACE, g_handle is null`（0x300d），帧号正常增长、
+    // **屏幕全黑、且没有任何上层错误提示** —— 就是用户看到的"软解黑屏"。
+    // 现在初始化改到这里（UI 线程 = `softPlayRenderLast()` 所在线程），两者同线程。
+    const renderInitRaw: string =
+      JellyfinNative.softPlayInitRenderer(this.surfaceId, pxSize[0], pxSize[1], 'xcomponent');
+    const renderInitResult: NativeResult = JellyfinNative.parseResult(renderInitRaw);
+    let renderReady: boolean = false;
+    let renderError: string = '';
+    let renderW: number = 0;
+    if (renderInitResult.ok && renderInitResult.data !== null) {
+      const initData: ESObject = renderInitResult.data as ESObject;
+      renderReady = JsonUtil.getBoolean(initData, 'renderReady', false);
+      renderError = JsonUtil.getString(initData, 'renderError', '');
+      renderW = JsonUtil.getNumber(initData, 'renderWidth', 0);
+      // 渲染缓冲几何随协商结果变化（本设备能吃多大由 GL 决定）
+      this.softDecodeMaxWidth = renderW > 0 ? renderW : 0;
+    } else {
+      renderError = renderInitResult.message.length > 0
+        ? renderInitResult.message : '初始化 EGL 渲染器失败';
+    }
+    if (!renderReady) {
+      // ── 渲染面不可用时必须给终态，不能"看着在播、屏幕全黑"──────────────
+      // 软解会话只解码视频（无音频输出），渲染起不来 = 用户什么都得不到：
+      // 与其让它继续偷偷解码、把画面丢进虚空，不如如实报错并释放会话。
+      const reason: string = renderError.length > 0 ? renderError : 'EGL 渲染器未就绪';
+      this.softRenderFailed = true;
+      this.softPlaying = false;
+      JellyfinNative.softPlayClose();
+      // 提示 + 错误态：用户既能看到原因，也有「重试」入口（终态，不会静静黑着）
+      this.setSoftNotice(`软解画面无法上屏：${reason}`, true);
+      this.status = UiState.ERROR;
+      this.errorMsg = `软解画面无法上屏：${reason}`;
+      return;
     }
     // 画面尺寸/时长取自软解会话（"视频比例"与进度条在软解路径上同样要正确工作）
     const softW: number = JsonUtil.getNumber(data, 'width', 0);
@@ -1064,8 +1124,13 @@ struct PlayerPage {
     //   1. 不欠采样 —— 4K/1080p 源在真机上按渲染缓冲的真实尺寸解码，画面不再被压到 640 宽；
     //   2. 不浪费 —— 解码超过缓冲尺寸的部分最终仍会被缩掉，那部分 CPU/swscale 开销是白花的。
     // renderWidth 为 0（未就绪）时传 0 = 原生分辨率，不做任何缩放。
-    const renderW: number = JsonUtil.getNumber(data, 'renderWidth', 0);
-    this.softDecodeMaxWidth = renderW > 0 ? renderW : 0;
+    //
+    // 注：renderWidth 已在上面由 `softPlayInitRenderer` 取回（渲染器初始化的真实结果），
+    // 不再依赖 `softPlayOpen` 的返回值 —— 后者跑在工作线程上，本来就拿不到渲染器几何。
+    if (this.softDecodeMaxWidth <= 0) {
+      const fallbackW: number = JsonUtil.getNumber(data, 'renderWidth', 0);
+      this.softDecodeMaxWidth = fallbackW > 0 ? fallbackW : 0;
+    }
     // 画面比例：软解由 EglRenderer 按模式换算顶点缩放（硬解走 videoScaleType）
     this.applyAspectToSoftRenderer();
     // 续播支持：如果传入了起始位置，seek 到该位置（原生侧排队，首帧时生效）
@@ -1203,9 +1268,30 @@ struct PlayerPage {
       const renderResult: NativeResult = JellyfinNative.parseResult(renderRaw);
       const renderError: string = renderResult.ok && renderResult.data !== null
         ? JsonUtil.getString(renderResult.data as ESObject, 'renderError', '') : '';
-      if (renderError.length > 0 && this.softStatus.length === 0) {
-        // 上屏失败必须让用户知道（否则只是一块不动的画面），且只提示一次
-        this.setSoftNotice(`软解画面无法上屏：${renderError}`, true);
+      if (renderError.length > 0) {
+        // ── 上屏失败必须到达终态 ────────────────────────────────────────────
+        // 此前这里只在"没有别的提示"时才写一条提示，于是自动回退软解后那句
+        // "已自动切换软解播放"会把上屏错误**永久盖住** —— 用户只看到一块黑屏，
+        // 既不知道原因也没有重试入口。现在：先如实显示，连续失败即停止软解。
+        this.softRenderErrorStreak++;
+        if (this.softRenderErrorStreak === 1) {
+          this.setSoftNotice(`软解画面无法上屏：${renderError}`, true);
+        }
+        if (this.softRenderErrorStreak >= kSoftRenderErrorLimit) {
+          this.softRenderFailed = true;
+          const failText: string =
+            `软解画面无法上屏（连续 ${this.softRenderErrorStreak} 帧）：${renderError}`;
+          this.setSoftNotice(failText, true);
+          this.softPulling = false;
+          this.softPullStartedAt = 0;
+          this.stopSoftPlay();
+          // 与打开阶段的上屏失败一致：给错误态（含「重试」入口），不留"黑着但看着像在播"
+          this.status = UiState.ERROR;
+          this.errorMsg = failText;
+          return;
+        }
+      } else {
+        this.softRenderErrorStreak = 0;
       }
       // ── 排队的 seek 结果 ────────────────────────────────────────────────
       // seek 在原生侧排队、由本帧的拉取顺带执行（避免 UI 线程做同步 HTTP），
@@ -2213,6 +2299,7 @@ struct PlayerPage {
     // 清掉看门狗状态：否则上一次卡死的起始时刻会留到下一次播放，导致新的拉帧被立刻误判为卡死
     this.softPulling = false;
     this.softPullStartedAt = 0;
+    this.softRenderErrorStreak = 0;
     // 停止/切换/退出时补发最终进度：只靠节流中的周期上报会丢失最后几秒位置
     // （与硬解路径的 flushStop 行为保持一致）
     if (this.itemId.length > 0 && this.lastProgressReportAt > 0) {
@@ -2380,11 +2467,21 @@ struct PlayerPage {
       return;
     }
     this.softFallbackTried = true;
+    this.softRenderFailed = false;
     this.setSoftNotice(`硬解不可用（${reason}）→ 正在切换 FFmpeg 软解…`, false);
     await this.startSoftPlay();
     if (!this.softPlaying) {
-      // 软解也起不来时回到错误态，让用户看到原因并手动重试
+      // 软解也起不来时回到错误态，让用户看到原因并手动重试。
+      //
+      // 关键：**不要把具体原因覆盖掉**。此前这里只把 status 置为 ERROR，而
+      // `startSoftPlay` 给出的原因（如"软解画面无法上屏：…"）随后会被下面那句
+      // "已自动切换软解播放"盖掉 —— 于是渲染失败的场景下用户看到的是"一切正常"的提示
+      // 配一块纯黑屏。现在把原因写进错误态文案，用户知道发生了什么、也知道可以重试。
+      const reasonText: string = this.softStatus.length > 0
+        ? this.softStatus
+        : (this.softRenderFailed ? '软解画面无法上屏' : '软解启动失败');
       this.status = UiState.ERROR;
+      this.errorMsg = reasonText;
       return;
     }
     // 软解已经跑起来了：必须离开错误态。

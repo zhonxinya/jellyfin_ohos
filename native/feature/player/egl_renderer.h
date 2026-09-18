@@ -37,8 +37,13 @@ enum class ScaleMode : int {
  * 为什么需要：软解在 CPU 上出帧后必须上屏；用 `Image(PixelMap)` 逐帧刷新既重又易踩生命周期坑，
  * 直接渲染进视频面（surface）才是播放器该有的路径，也是流畅播放的前提。
  *
- * 线程约束：EGL 上下文与 GL 调用必须在**同一线程**内完成（当前由 ArkTS 定时器驱动的
- * 解码循环所在线程负责），不要在别的线程调用这些方法。
+ * 线程约束：EGL 上下文与 GL 调用必须在**同一线程**内完成（本项目为 ArkTS 的 UI 线程，
+ * 帧循环里的 `softPlayRenderLast()` 就在该线程上）。这不是"建议"而是硬约束：
+ * EGL/DGLES 把"当前上下文 / 当前 surface"记在**线程私有**状态里，初始化在某线程、
+ * 渲染在另一线程时 `eglSwapBuffers` 只会失败（实测 `EGL_BAD_SURFACE`，驱动侧
+ * `g_handle is null`），画面全黑而**上层拿不到任何异常** —— 这正是"软解黑屏"的成因。
+ * 因此 `init*()` 必须由**将来调用 `renderRgba()` 的那个线程**发起；
+ * `drawFrame()` 会主动校验，线程不符时如实报错而不是静默黑屏。
  */
 class EglRenderer {
 public:
@@ -90,8 +95,12 @@ public:
     /**
      * **官方路径**：用 ArkUI 经 `OH_NativeXComponent` 回调交来的 `OHNativeWindow*` 初始化
      * （见 `xcomponent_bridge.h`）。相比 surfaceId 方式，window 与尺寸都由 framework 给出。
+     *
+     * @param surfaceGeneration 该 surface 的世代号（`XComponentBridge::SurfaceGeneration()`），
+     *                          仅用于诊断与"是否仍是同一块 surface"的判定，可传 0。
      */
-    bool initFromWindow(void *nativeWindow, int width, int height, std::string &error);
+    bool initFromWindow(void *nativeWindow, int width, int height, std::string &error,
+                        uint64_t surfaceGeneration = 0);
 
     /**
      * 重绘最近一帧并在 **swap 之前** 回读帧缓冲（导出渲染结果的正确做法）。
@@ -104,6 +113,21 @@ public:
 
     void destroy();
     bool isReady() const { return ready_; }
+
+    /**
+     * 渲染器当前是否绑在这块 native window 上。
+     *
+     * 为什么需要：渲染器是进程级单例，而 XComponent 的 surface 会随页面进出/旋转被销毁重建。
+     * 只按 `isReady()` 复用，就会把帧画到**已经死掉的 surface** 上 —— 画面不变、也不报错
+     * （实测表现同样是"软解黑屏"）。宿主必须先比对 window 指针，不同则重新 `init*()`。
+     */
+    bool boundToWindow(const void *window) const { return ready_ && nativeWindow_ == window; }
+
+    /** 初始化时那块 surface 的世代号（`XComponentBridge::SurfaceGeneration()`） */
+    uint64_t surfaceGeneration() const { return surfaceGeneration_; }
+
+    /** 初始化（= GL 调用必须与之同线程）所在的线程 id（0 表示未知/未初始化） */
+    uint64_t renderThreadId() const { return renderThreadId_; }
 
     /** 是否走 TEXTURE 路径（OH_NativeImage：帧直接上传到 XComponent 纹理并发布，不做 swap） */
     bool isTexturePath() const { return nativeImage_ != nullptr; }
@@ -172,6 +196,19 @@ private:
     void *nativeImage_ = nullptr;
     /** 缓冲几何因 swap 失败而降级的次数（用于把"本设备吃不下该几何"如实报给宿主） */
     int degradeCount_ = 0;
+    /**
+     * `nativeWindow_` 是否由**我们**创建（= `init(surfaceId)` 路径）。
+     *
+     * 只有自己创建的 window 才能销毁。framework 经 `OH_NativeXComponent` 回调交来的 window
+     * 属于 ArkUI，`initFromTexture` 的 window 属于 `OH_NativeImage`（销毁 NativeImage 即可）
+     * —— 误销毁它们会毁掉 XComponent 的显示面（实测：之后在同一 XComponent 上重建 EGL surface，
+     * `eglSwapBuffers` 报 `0x12301`，画面再也不上屏）。
+     */
+    bool windowOwned_ = false;
+    /** 初始化时的 surface 世代号（诊断 / 换 surface 判定用） */
+    uint64_t surfaceGeneration_ = 0;
+    /** 初始化所在线程 id：GL 调用必须与之相同（见类注释的线程约束） */
+    uint64_t renderThreadId_ = 0;
 };
 
 } // namespace player

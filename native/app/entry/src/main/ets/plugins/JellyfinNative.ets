@@ -514,8 +514,32 @@ export class JellyfinNative {
   }
 
   /**
+   * 在当前线程（UI 线程）初始化/复用软解 EGL 渲染器。
+   *
+   * **必须在 `softPlayOpen` 成功之后、启动帧循环之前调用，且只能在 UI 线程调用**：
+   * EGL 上下文是线程私有状态，初始化线程必须与逐帧 `softPlayRenderLast()` 的线程相同。
+   * 历史缺陷：初始化发生在 `softPlayOpen` 的 `RunAsync` 工作线程上，于是 UI 线程的每帧
+   * `eglSwapBuffers` 都报 EGL_BAD_SURFACE（0x300d），帧号在涨、**屏幕全黑且无任何报错**。
+   *
+   * 返回 JSON（用 `parseResult` 解）：
+   * `data = { renderReady, renderReused, renderWidth, renderHeight, renderError?,
+   *           xcomponentSize?, renderThreadId, surfaceGeneration }`
+   */
+  static softPlayInitRenderer(surfaceId: string = '', width: number = 0, height: number = 0,
+                              renderMode: string = 'xcomponent'): string {
+    try {
+      return jellyfinNative.softPlayInitRenderer(surfaceId, width, height, renderMode);
+    } catch (error) {
+      return JellyfinNative.fail('softPlayInitRenderer', error);
+    }
+  }
+
+  /**
    * 软解播放会话：打开流式软解（FFmpeg Range 取流 + 逐帧 RGBA），供逐帧渲染使用。
    * 返回 JSON，字段见 native/napi/jellyfin_napi.cpp 的 SoftPlayOpen。
+   *
+   * 注意：本接口**不初始化 EGL 渲染器**（它运行在工作线程上，而 EGL 初始化必须与渲染同线程），
+   * 渲染器由宿主随后调用 `softPlayInitRenderer()` 建立。
    */
   static async softPlayOpen(itemId: string, surfaceId: string = '', surfaceWidth: number = 0,
                             surfaceHeight: number = 0, renderMode: string = 'surface',

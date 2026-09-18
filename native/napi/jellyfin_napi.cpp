@@ -35,6 +35,7 @@
 #include "../feature/player/xcomponent_bridge.h"
 
 #include <cctype>
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -1257,7 +1258,182 @@ bool WriteRgbaPng(const std::vector<uint8_t> &rgba, int width, int height, const
 }
 
 /**
- * 打开软解会话并初始化 EGL 渲染器。
+ * 软解路径的 hilog 记录。
+ *
+ * 为什么值得保留（而不是"调试完就删"）：软解这条链路最容易出的故障是**静默黑屏**
+ * —— 帧在解、帧号在涨、没有异常、屏幕上什么都没有（实测根因：EGL 在别的线程初始化，
+ * UI 线程每帧 `eglSwapBuffers` 报 `EGL_BAD_SURFACE`，上层看不到任何错误）。
+ * 这几条记录刻意保持极低频率（关键节点 + 每 100 帧一条），用于把"何时起播、
+ * 首帧何时上屏、渲染是否失败"变成可查的事实。
+ */
+void SoftLog(const std::string &message)
+{
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "SoftPlay", "%{public}s", message.c_str());
+}
+
+/** 软解逐帧日志的间隔（每 100 帧一条，约 12~18 秒），既留痕又不刷屏 */
+constexpr int64_t kSoftFirstFrameLogInterval = 100;
+
+/**
+ * 把 EGL 渲染器绑定到当前 XComponent surface（**只能在将来渲染的那个线程上调用**）。
+ *
+ * 为什么这件事必须单独抽出来、并且不能放在 `softPlayOpen` 里做：
+ * `softPlayOpen` 是 `RunAsync`（libuv 工作线程），而 EGL/DGLES 的"当前上下文 / 当前
+ * surface"是**线程私有**状态 —— 在工作线程初始化、在 UI 线程逐帧 `eglSwapBuffers`
+ * 只会失败。设备实测（DevEco x86_64 模拟器，HEVC 源自动回退软解）：
+ *   · 初始化发生在 tid=31744（工作线程）：`DGLES: Initialize display` 等日志都是该 tid；
+ *   · 逐帧 swap 发生在 tid=31628（UI 线程，`softPlayRenderLast`）：每 70ms 一条
+ *     `DGLES: EGL_BAD_SURFACE, g_handle is null`（0x300d）；
+ *   · 结果：帧解出来了、帧号在涨，**屏幕全黑且没有任何上层报错** —— 即"软解黑屏"。
+ * 因此初始化统一由宿主的 **UI 线程** 通过同步接口 `softPlayInitRenderer()` 发起，
+ * 与帧循环里的 `softPlayRenderLast()` 保持同线程。
+ *
+ * @param allowInit false 时只做"复用判定"（供工作线程上的 `softPlayOpen` 使用）
+ * @param reused    输出：是否复用了已就绪且仍绑在当前 surface 上的渲染器
+ */
+bool EnsureSoftRendererBound(const std::string &renderMode, uint64_t surfaceId, int width, int height,
+                             bool allowInit, bool &reused, std::string &error, std::string *sizeText)
+{
+    reused = false;
+    const bool xcomponentMode = renderMode.empty() || renderMode == "xcomponent";
+
+    if (xcomponentMode) {
+        // 官方路径：window 由 ArkUI 经 OH_NativeXComponent 回调给出（见 xcomponent_bridge）
+        void *surfaceWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
+        if (surfaceWindow == nullptr) {
+            error = jellyfin::player::XComponentBridge::IsRegistered()
+                        ? "XComponent surface 尚未创建（等待 OnSurfaceCreated）"
+                        : "未收到 OH_NativeXComponent：请确认 XComponent 指定了 libraryname";
+            return false;
+        }
+        int surfaceW = 0;
+        int surfaceH = 0;
+        if (!jellyfin::player::XComponentBridge::SurfaceSize(surfaceW, surfaceH)) {
+            // 尺寸取自 ArkTS 侧的组件实测值兜底
+            surfaceW = width;
+            surfaceH = height;
+        }
+        if (sizeText != nullptr) {
+            *sizeText = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
+        }
+        // 复用条件：已就绪**且仍绑在同一块 window 上**。
+        // 只判 `isReady()` 不够：渲染器是进程级单例，而 XComponent 的 surface 会随页面
+        // 进出被销毁重建；沿用旧 surface 会让帧画到死掉的显示面上（不报错、画面不动）。
+        if (SoftRenderer().isReady() && SoftRenderer().boundToWindow(surfaceWindow)) {
+            reused = true;
+            return true;
+        }
+        if (!allowInit) {
+            error = "EGL 渲染器需在 UI 线程初始化（softPlayInitRenderer）";
+            return false;
+        }
+        return SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH, error,
+                                            jellyfin::player::XComponentBridge::SurfaceGeneration());
+    }
+
+    if (renderMode == "texture") {
+        // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
+        if (SoftRenderer().isReady() && SoftRenderer().isTexturePath()) {
+            reused = true;
+            return true;
+        }
+        if (!allowInit) {
+            error = "EGL 渲染器需在 UI 线程初始化（softPlayInitRenderer）";
+            return false;
+        }
+        return SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId), error, width, height);
+    }
+
+    // surfaceId 路径：window 由我们自己从 surfaceId 创建
+    if (surfaceId == 0) {
+        error = "surfaceId 为空（surface 尚未就绪）";
+        return false;
+    }
+    if (SoftRenderer().isReady()) {
+        reused = true;
+        return true;
+    }
+    if (!allowInit) {
+        error = "EGL 渲染器需在 UI 线程初始化（softPlayInitRenderer）";
+        return false;
+    }
+    return SoftRenderer().init(surfaceId, error, width, height);
+}
+
+/**
+ * 在当前线程（宿主为 ArkTS 的 UI 线程）初始化/复用软解 EGL 渲染器。
+ *
+ * 参数：surfaceId、组件像素宽高、渲染模式（'' | 'xcomponent' | 'texture' | 'surface'）。
+ * 返回：ok / renderReady / renderWidth / renderHeight / renderReused / xcomponentSize /
+ *       renderError / surfaceGeneration / renderThreadId。
+ *
+ * 调用时机：`softPlayOpen` 成功之后、启动帧循环之前（见 PlayerPage.startSoftPlay）。
+ * 这一步会做 `eglInitialize` + 着色器编译（实测约 35ms，一次播放只做一次），
+ * 属于可接受的 UI 线程开销；而它换来的是"渲染与初始化同线程"这一硬约束的成立。
+ */
+napi_value SoftPlayInitRenderer(napi_env env, napi_callback_info info)
+{
+    std::string surfaceIdText;
+    int64_t width = 0;
+    int64_t height = 0;
+    std::string renderMode;
+    ReadStringArg(env, info, 0, surfaceIdText);
+    ReadIntArg(env, info, 1, width);
+    ReadIntArg(env, info, 2, height);
+    ReadStringArg(env, info, 3, renderMode);
+    uint64_t surfaceId = 0;
+    try {
+        surfaceId = surfaceIdText.empty() ? 0 : std::stoull(surfaceIdText);
+    } catch (...) {
+        surfaceId = 0;
+    }
+
+    std::string error;
+    std::string sizeText;
+    bool reused = false;
+    const bool ready = EnsureSoftRendererBound(renderMode, surfaceId, static_cast<int>(width),
+                                               static_cast<int>(height), true, reused, error,
+                                               &sizeText);
+    nlohmann::json out = {
+        {"renderReady", ready},
+        {"renderReused", reused},
+        {"renderThreadId", SoftRenderer().renderThreadId()},
+        {"surfaceGeneration", jellyfin::player::XComponentBridge::SurfaceGeneration()},
+    };
+    if (!sizeText.empty()) {
+        out["xcomponentSize"] = sizeText;
+    }
+    if (ready) {
+        out["renderWidth"] = SoftRenderer().renderWidth();
+        out["renderHeight"] = SoftRenderer().renderHeight();
+        const int degraded = SoftRenderer().degradeCount();
+        if (degraded > 0) {
+            out["renderDegraded"] = degraded;
+        }
+    } else if (!error.empty()) {
+        out["renderError"] = error;
+    }
+    out["renderMode"] = renderMode.empty() ? "surface" : renderMode;
+    SoftLog(std::string("softPlayInitRenderer ready=") + (ready ? "1" : "0")
+            + " reused=" + (reused ? "1" : "0")
+            + " mode=" + out["renderMode"].get<std::string>()
+            + " geo=" + std::to_string(SoftRenderer().renderWidth()) + "x"
+            + std::to_string(SoftRenderer().renderHeight())
+            + (sizeText.empty() ? std::string() : (" surface=" + sizeText))
+            + " tid=" + std::to_string(SoftRenderer().renderThreadId())
+            + " err=" + error);
+    // 注意：即便渲染器没起来也返回 ok=true（会话仍在），由宿主决定是否继续 ——
+    // 但宿主**必须**按 renderReady 判断，否则就是"看着在播、屏幕全黑"。
+    return ToNapiJson(env, MakeResult(true, 200, "ok", out));
+}
+
+/**
+ * 打开软解会话。
+ *
+ * 注意：**本函数不再初始化 EGL 渲染器**（它跑在 RunAsync 工作线程上，见
+ * `EnsureSoftRendererBound` 的说明），只做"渲染器是否已在本 surface 上就绪"的判定；
+ * 真正的初始化由宿主在 UI 线程调用同步接口 `softPlayInitRenderer()` 完成。
+ *
  * @param surfaceId XComponent 的 surface id（字符串形式的 uint64）
  */
 napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
@@ -1308,7 +1484,13 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
         }
         out["playMethod"] = jellyfin::player::PlayMethodToString(pbSession.method);
 
-        // EGL 渲染器：绑定 XComponent surface（失败则退化为仅解码、由 ArkTS 侧决定是否显示）
+        // EGL 渲染器：**只复用、不初始化**。
+        //
+        // 本函数跑在 RunAsync 的工作线程上，而 EGL 上下文是线程私有的 —— 在这里
+        // `eglInitialize` 会让之后 UI 线程的 `eglSwapBuffers` 每帧失败（EGL_BAD_SURFACE，
+        // 画面全黑无报错）。因此这里只判定"渲染器是否已就绪且仍绑在当前 surface 上"，
+        // 未就绪时把 `renderNeedsInit` 交给宿主，由宿主在 UI 线程调用
+        // `softPlayInitRenderer()` 完成初始化。
         std::string renderError;
         bool renderReady = false;
         if (!surfaceIdText.empty()) {
@@ -1319,44 +1501,29 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
                 surfaceId = 0;
             }
             if (surfaceId != 0 || renderMode == "xcomponent") {
-                if (SoftRenderer().isReady()) {
-                    // 已就绪（例如刚被 renderTargetProbe 初始化过）时复用，避免二次初始化同一 surface
-                    renderReady = true;
-                    out["renderReused"] = true;
-                } else if (renderMode == "xcomponent") {
-                    // 官方路径：window 由 ArkUI 经 OH_NativeXComponent 回调给出（见 xcomponent_bridge）
-                    int surfaceW = 0;
-                    int surfaceH = 0;
-                    void *surfaceWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
-                    if (!jellyfin::player::XComponentBridge::SurfaceSize(surfaceW, surfaceH)) {
-                        // 尺寸取自 ArkTS 侧的组件实测值兜底
-                        surfaceW = static_cast<int>(surfaceWidth);
-                        surfaceH = static_cast<int>(surfaceHeight);
-                    }
-                    if (surfaceWindow == nullptr) {
-                        renderError = "XComponent surface 尚未创建（等待 OnSurfaceCreated）";
-                    } else {
-                        renderReady = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH,
-                                                                    renderError);
-                        out["xcomponentSize"] = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
-                    }
-                } else if (renderMode == "texture") {
-                    // XComponent(TEXTURE)：surfaceId 是 GL 纹理 id，经 OH_NativeImage 渲染并发布
-                    renderReady = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId),
-                                                                 renderError,
-                                                                 static_cast<int>(surfaceWidth),
-                                                                 static_cast<int>(surfaceHeight));
-                } else {
-                    renderReady = SoftRenderer().init(surfaceId, renderError,
+                bool reused = false;
+                std::string sizeText;
+                renderReady = EnsureSoftRendererBound(renderMode, surfaceId,
                                                       static_cast<int>(surfaceWidth),
-                                                      static_cast<int>(surfaceHeight));
+                                                      static_cast<int>(surfaceHeight),
+                                                      /*allowInit=*/false, reused, renderError,
+                                                      &sizeText);
+                if (!sizeText.empty()) {
+                    out["xcomponentSize"] = sizeText;
+                }
+                if (reused) {
+                    out["renderReused"] = true;
                 }
                 out["renderMode"] = renderMode.empty() ? "surface" : renderMode;
             }
         }
         out["renderReady"] = renderReady;
-        if (!renderReady && !renderError.empty()) {
-            out["renderError"] = renderError;
+        if (!renderReady) {
+            // 宿主据此知道"必须先在自己的线程上初始化渲染器"（见 softPlayInitRenderer）
+            out["renderNeedsInit"] = true;
+            if (!renderError.empty()) {
+                out["renderError"] = renderError;
+            }
         }
         // 渲染缓冲的**实际**像素几何：宿主据此决定解码目标尺寸，避免"解码到 640 宽再被放大"
         // 这种无谓降质，也避免解码到远超缓冲的尺寸白烧 CPU。
@@ -1371,13 +1538,25 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
 
         SoftSession().reset(new jellyfin::player::SoftDecodeSession());
         std::string error;
+        const auto openStart = std::chrono::steady_clock::now();
         if (!SoftSession()->openUrl(pbSession.playUrl, error)) {
             SoftSession().reset();
-            SoftRenderer().destroy();
+            // 注意：**不销毁渲染器**。本函数在工作线程上运行，而 EGL 上下文是渲染线程
+            // （UI 线程）私有的 —— 在这里销毁 EGL 对象属于跨线程操作。
+            // 渲染器已经绑在当前 surface 上，留着下次直接复用即可（见 softPlayInitRenderer）。
             out["ok"] = false;
             out["error"] = error;
+            SoftLog("softPlayOpen 打开失败：" + error);
             return MakeResult(true, 200, "ok", out).dump();
         }
+        const auto openMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - openStart)
+                                .count();
+        SoftLog("softPlayOpen ok codec=" + SoftSession()->videoCodec()
+                + " container=" + SoftSession()->container()
+                + " size=" + std::to_string(SoftSession()->width()) + "x"
+                + std::to_string(SoftSession()->height())
+                + " openMs=" + std::to_string(openMs));
         out["ok"] = true;
         out["container"] = SoftSession()->container();
         out["videoCodec"] = SoftSession()->videoCodec();
@@ -1411,8 +1590,12 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
     return RunAsync(env, [cappedWidth]() {
         std::vector<uint8_t> rgba;
         jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
+        const auto decodeStart = std::chrono::steady_clock::now();
         const bool ok = SoftSession()->nextFrameRgba(
             cappedWidth > 0 ? static_cast<int>(cappedWidth) : 0, rgba, frameInfo);
+        const auto decodeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - decodeStart)
+                                  .count();
 
         nlohmann::json out = {
             {"ok", ok},
@@ -1431,6 +1614,23 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
         }
         if (!frameInfo.error.empty()) {
             out["error"] = frameInfo.error;
+        }
+        // 首帧与每 100 帧一条：用于把"起播后多久出第一帧 / 解码有多慢"变成可查事实
+        if (ok && (frameInfo.frameIndex == 1 ||
+                   frameInfo.frameIndex % kSoftFirstFrameLogInterval == 0)) {
+            SoftLog("softPlayNextFrame #" + std::to_string(frameInfo.frameIndex)
+                    + " pts=" + std::to_string(frameInfo.ptsSec)
+                    + " " + std::to_string(frameInfo.width) + "x"
+                    + std::to_string(frameInfo.height)
+                    + " decodeMs=" + std::to_string(decodeMs)
+                    + " fetched=" + std::to_string(SoftSession()->bytesFetched()));
+        }
+        // 排队的 seek 落地（成功/失败都要留痕：这是"续播/跳转到底有没有生效"的唯一事实来源）
+        if (frameInfo.seekApplied) {
+            SoftLog("seek applied to=" + std::to_string(frameInfo.seekedToSec) + "s frame=#"
+                    + std::to_string(frameInfo.frameIndex));
+        } else if (!frameInfo.seekError.empty()) {
+            SoftLog("seek 失败：" + frameInfo.seekError);
         }
         bool rendered = false;
         std::string renderError;
@@ -1473,16 +1673,55 @@ napi_value SoftPlayRenderLast(napi_env env, napi_callback_info /*info*/)
     }
     bool rendered = false;
     std::string renderError;
-    if (!rgba.empty() && width > 0 && height > 0 && SoftRenderer().isReady()) {
-        rendered = SoftRenderer().renderRgba(rgba.data(), width, height, renderError);
-    } else if (rgba.empty()) {
+    if (rgba.empty()) {
         renderError = "还没有可渲染的帧";
     } else if (!SoftRenderer().isReady()) {
         renderError = "渲染器未就绪";
+    } else {
+        // ── surface 重建的**自愈**点 ──────────────────────────────────────────
+        // XComponent 的 surface 会因页面重进/旋转被销毁重建，而渲染器是进程级单例、
+        // 仍指着旧的 window。只按 `isReady()` 复用会把帧画到已死掉的显示面上
+        // （不报错、画面不动 —— 同样是"软解黑屏"的一种）。
+        // 本函数恰好运行在**渲染线程**（宿主为 UI 线程）上，正是唯一能安全重建 EGL 的地方，
+        // 因此这里发现 window 变了就地重新绑定，让播放跨 surface 重建继续。
+        void *currentWindow = jellyfin::player::XComponentBridge::SurfaceWindow();
+        if (currentWindow != nullptr && !SoftRenderer().isTexturePath()
+            && !SoftRenderer().boundToWindow(currentWindow)) {
+            int sizeW = 0;
+            int sizeH = 0;
+            if (!jellyfin::player::XComponentBridge::SurfaceSize(sizeW, sizeH)) {
+                sizeW = SoftRenderer().renderWidth();
+                sizeH = SoftRenderer().renderHeight();
+            }
+            std::string bindError;
+            if (!SoftRenderer().initFromWindow(currentWindow, sizeW, sizeH, bindError,
+                                              jellyfin::player::XComponentBridge::SurfaceGeneration())) {
+                renderError = "XComponent surface 已重建，重新绑定渲染器失败：" + bindError;
+            }
+        }
+        if (renderError.empty()) {
+            rendered = SoftRenderer().renderRgba(rgba.data(), width, height, renderError);
+        }
+    }
+    // 上屏结果：首次成功、以及**每一次失败**都要留痕（静默黑屏正是"失败没人知道"）
+    if (rendered) {
+        static int renderedCount = 0;
+        ++renderedCount;
+        if (renderedCount == 1 || renderedCount % kSoftFirstFrameLogInterval == 0) {
+            SoftLog("softPlayRenderLast ok #" + std::to_string(renderedCount)
+                    + " frame=" + std::to_string(width) + "x" + std::to_string(height));
+        }
+    } else {
+        static int renderFailCount = 0;
+        ++renderFailCount;
+        if (renderFailCount <= 3 || renderFailCount % 50 == 0) {
+            SoftLog("softPlayRenderLast 失败 #" + std::to_string(renderFailCount) + "：" + renderError);
+        }
     }
     nlohmann::json data = {
         {"rendered", rendered},
         {"renderError", renderError},
+        {"renderThreadId", SoftRenderer().renderThreadId()},
     };
     return ToNapiJson(env, MakeResult(true, 200, "ok", data));
 }
@@ -1628,7 +1867,8 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
                             : "未收到 OH_NativeXComponent：请确认 XComponent 指定了 libraryname";
         } else {
             out["xcomponentSize"] = std::to_string(surfaceW) + "x" + std::to_string(surfaceH);
-            ready = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH, initError);
+            ready = SoftRenderer().initFromWindow(surfaceWindow, surfaceW, surfaceH, initError,
+                                                 jellyfin::player::XComponentBridge::SurfaceGeneration());
         }
     } else if (out["mode"] == "texture") {
         ready = SoftRenderer().initFromTexture(static_cast<uint32_t>(surfaceId), initError,
@@ -1650,8 +1890,11 @@ napi_value RenderTargetProbe(napi_env env, napi_callback_info info)
     out["report"] = report;
     // 探测**不销毁**渲染器：保留它已建立好的 EGL surface。
     // 实测教训：探测跑完 destroy 之后，软解会在同一个 XComponent window 上重建 EGL surface，
-    // 而第二次创建的表面 swap 报 0x12301（首个表面正常）。`softPlayOpen` 已有
-    // "渲染器已就绪则复用" 的分支，因此保留即可安全共用，也避免同一 window 上的二次初始化。
+    // 而第二次创建的表面 swap 报 0x12301（首个表面正常）。现在 `destroy()` 已经不再销毁
+    // framework 的 window（见 EglRenderer::destroy 的归属说明），但"同一 window 上二次初始化"
+    // 仍是该模拟器上已验证过的坑，因此这里依旧保留渲染器、由 `softPlayInitRenderer` 复用。
+    // 另注：本探测是**同步**接口（跑在 ArkTS 的 UI 线程上），与帧循环渲染同线程 ——
+    // 这也是它能 swap 成功、而当初在工作线程初始化的软解路径不能的原因。
     return ToNapiJson(env, MakeResult(true, 200, "ok", out));
 }
 
@@ -1707,6 +1950,7 @@ napi_value SoftPlaySeek(napi_env env, napi_callback_info info)
         }
     }
     SoftSession()->requestSeek(positionSec);
+    SoftLog("softPlaySeek queued target=" + std::to_string(positionSec) + "s");
     nlohmann::json data = {
         {"ok", true},
         {"queued", true},
@@ -2340,6 +2584,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"playerSoftDecodeProbe", nullptr, PlayerSoftDecodeProbe, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"softPlayOpen", nullptr, SoftPlayOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"softPlayInitRenderer", nullptr, SoftPlayInitRenderer, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
         {"softPlayNextFrame", nullptr, SoftPlayNextFrame, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"softPlayRenderLast", nullptr, SoftPlayRenderLast, nullptr, nullptr, nullptr, napi_default,

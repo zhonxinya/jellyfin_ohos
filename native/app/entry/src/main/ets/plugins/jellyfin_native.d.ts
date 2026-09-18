@@ -54,6 +54,20 @@ declare module 'libjellyfin_native.so' {
     playerSoftDecodeProbe(itemId: string, cacheDir: string, optionsJson: string): string;
     softPlayOpen(itemId: string, surfaceId: string, surfaceWidth: number, surfaceHeight: number, renderMode: string, optionsJson: string): string;
     /**
+     * 在**当前线程**初始化/复用软解 EGL 渲染器（必须是将来调用 `softPlayRenderLast()`
+     * 的那个线程 —— 即 ArkTS 的 UI 线程）。
+     *
+     * 为什么必须是同步接口：EGL/DGLES 把"当前上下文 / 当前 surface"记在**线程私有**状态里，
+     * 初始化与渲染必须同线程。历史实现把初始化放在 `softPlayOpen`（`RunAsync` 工作线程）里，
+     * 于是 UI 线程逐帧 `eglSwapBuffers` 全部失败：驱动日志 `EGL_BAD_SURFACE, g_handle is null`
+     * （0x300d），**帧在涨、屏幕全黑、上层无任何报错** —— 即"软解黑屏"。
+     *
+     * 调用时机：`softPlayOpen` 成功之后、启动帧循环之前。
+     * 返回 JSON：`{ ok, data: { renderReady, renderReused, renderWidth, renderHeight,
+     *             renderError?, xcomponentSize?, renderThreadId, surfaceGeneration } }`
+     */
+    softPlayInitRenderer(surfaceId: string, width: number, height: number, renderMode: string): string;
+    /**
      * 取下一帧（解码 + EGL 渲染）。
      *
      * **异步**：该路径未命中缓存时会做同步 HTTP，必须放在工作线程执行，
