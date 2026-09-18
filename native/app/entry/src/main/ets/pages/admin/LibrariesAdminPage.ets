@@ -15,26 +15,31 @@ import { PageHeader } from '../../components/PageHeader';
 import { LoadingState } from '../../components/LoadingState';
 import { EmptyState } from '../../components/EmptyState';
 import { JellyfinImage } from '../../components/JellyfinImage';
+import { ChipButton } from '../../components/ChipButton';
 
 /** 每个媒体库卡片上的操作（对应服务端 LibraryStructureController 的各个端点） */
 class LibraryAction {
   key: string;
   label: string;
+  /** 系统符号名：图标与文字一起出现，扫一眼就能分辨哪个是危险操作 */
+  icon: Resource;
   danger: boolean;
 
-  constructor(key: string, label: string, danger: boolean) {
+  constructor(key: string, label: string, icon: Resource, danger: boolean) {
     this.key = key;
     this.label = label;
+    this.icon = icon;
     this.danger = danger;
   }
 }
 
 const ACTIONS: LibraryAction[] = [
-  new LibraryAction('paths', '路径', false),
-  new LibraryAction('options', '媒体库选项', false),
-  new LibraryAction('scan', '扫描', false),
-  new LibraryAction('rename', '重命名', false),
-  new LibraryAction('delete', '删除', true)
+  new LibraryAction('paths', '路径', $r('sys.symbol.folder'), false),
+  new LibraryAction('options', '媒体库选项', $r('sys.symbol.list_bullet'), false),
+  // 注意：系统符号里没有 rotate（`rotate` 在 media 段，不是符号），扫描用"循环箭头"
+  new LibraryAction('scan', '扫描', $r('sys.symbol.arrow_2_circlepath'), false),
+  new LibraryAction('rename', '重命名', $r('sys.symbol.textformat'), false),
+  new LibraryAction('delete', '删除', $r('sys.symbol.xmark_circle_fill'), true)
 ];
 
 /**
@@ -325,33 +330,54 @@ struct LibrariesAdminPage {
 
   @Builder
   ActionChip(action: LibraryAction, folder: LibraryEntry) {
-    Text(action.label)
-      .fontSize(ThemeConstants.META_SMALL)
-      .fontColor(action.danger ? this.colors().onBrand : this.colors().textPrimary)
-      .backgroundColor(action.danger ? this.colors().errorLight : this.colors().surfacePressed)
-      .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-      .borderRadius(ThemeConstants.BADGE_RADIUS)
-      .onClick(() => {
+    ChipButton({
+      label: action.label,
+      icon: action.icon,
+      tone: action.danger ? 'danger' : 'neutral',
+      onTap: () => {
         this.handleAction(action.key, folder);
-      })
+      }
+    })
   }
 
-  /** 卡片上的"选项摘要"：只显示用户最关心、又能一眼看出差异的几项 */
+  /**
+   * 卡片上的"选项摘要"。
+   *
+   * 改成分行 + 小胶囊：原来三项挤成一行（`实时监控开 · 章节图关 · 元数据语言 默认`），
+   * 长库名/长语言码时会被挤掉；分行后每项独立，且"关"的状态用更暗的颜色，扫起来更快。
+   */
   @Builder
   OptionSummary(folder: LibraryEntry) {
-    Row() {
-      Text(folder.options.getBool('EnableRealtimeMonitor', true) ? '实时监控开' : '实时监控关')
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textSecondary)
-      Text(` · ${folder.options.getBool('EnableChapterImageExtraction', false) ? '章节图开' : '章节图关'}`)
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textSecondary)
-      Text(` · 元数据语言 ${folder.options.getString('PreferredMetadataLanguage', '').length > 0
-        ? folder.options.getString('PreferredMetadataLanguage', '') : '默认'}`)
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textSecondary)
+    Column({ space: 4 }) {
+      Row({ space: 6 }) {
+        Text('实时监控')
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textTertiary)
+        Text(folder.options.getBool('EnableRealtimeMonitor', true) ? '开' : '关')
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(folder.options.getBool('EnableRealtimeMonitor', true)
+            ? this.colors().success : this.colors().textSecondary)
+        Text('章节图')
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textTertiary)
+          .margin({ left: 8 })
+        Text(folder.options.getBool('EnableChapterImageExtraction', false) ? '开' : '关')
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(folder.options.getBool('EnableChapterImageExtraction', false)
+            ? this.colors().success : this.colors().textSecondary)
+        Text('元数据语言')
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textTertiary)
+          .margin({ left: 8 })
+        Text(folder.options.getString('PreferredMetadataLanguage', '').length > 0
+          ? folder.options.getString('PreferredMetadataLanguage', '') : '默认')
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().textSecondary)
+      }
+      .width('100%')
     }
     .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -457,9 +483,16 @@ struct LibrariesAdminPage {
           .width('100%')
       }
 
-      Row({ space: 8 }) {
+      /*
+       * 操作行必须能换行：五个带图标的胶囊在窄屏上一行放不下，
+       * 用单行 Row 会把「重命名」「删除」挤到屏幕外（实测点不到）。
+       */
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
         ForEach(ACTIONS, (action: LibraryAction) => {
-          this.ActionChip(action, folder)
+          Column() {
+            this.ActionChip(action, folder)
+          }
+          .margin({ right: 8, bottom: 8 })
         }, (action: LibraryAction) => action.key)
       }
       .width('100%')

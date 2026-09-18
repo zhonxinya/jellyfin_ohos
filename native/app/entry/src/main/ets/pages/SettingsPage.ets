@@ -644,10 +644,10 @@ export struct SettingsPage {
 
           // 管理：仅向管理员显示，避免普通用户进入服务器管理页面
           if (AppViewModel.getInstance().isAdmin) {
-            this.SectionCard('\u7ba1\u7406', 'gearshape', [
-            { icon: 'externaldrive', title: '\u8bbe\u5907', subtitle: '\u7ba1\u7406\u8fde\u63a5\u5230\u670d\u52a1\u5668\u7684\u8bbe\u5907', route: 'pages/admin/DevicesPage' },
-            { icon: 'clock', title: '\u6d3b\u52a8', subtitle: '\u67e5\u770b\u670d\u52a1\u5668\u6d3b\u52a8\u65e5\u5fd7', route: 'pages/admin/ActivityPage' },
-            { icon: 'folder', title: '\u5a92\u4f53\u5e93', subtitle: '\u5a92\u4f53\u5e93\u7ba1\u7406\u3001\u663e\u793a\u3001\u5143\u6570\u636e\u4e0e NFO \u8bbe\u7f6e', route: 'pages/admin/LibrariesAdminPage' },
+            this.SectionCard('管理', 'gearshape', [
+            { icon: 'externaldrive', title: '设备', subtitle: '管理连接到服务器的设备', route: 'pages/admin/DevicesPage' },
+            { icon: 'clock', title: '活动', subtitle: '查看服务器活动日志', route: 'pages/admin/ActivityPage' },
+            { icon: 'folder', title: '媒体库', subtitle: '媒体库管理、显示、元数据与 NFO 设置', route: 'pages/admin/LibrariesAdminPage' },
             { icon: 'display', title: '\u63a7\u5236\u53f0', subtitle: '\u670d\u52a1\u5668\u4fe1\u606f\u3001\u6570\u636e\u7edf\u8ba1\u4e0e\u64cd\u4f5c', route: 'pages/admin/AdminHubPage' },
             { icon: 'timer', title: '\u8ba1\u5212\u4efb\u52a1', subtitle: '\u67e5\u770b\u5e76\u7ba1\u7406\u670d\u52a1\u5668\u8ba1\u5212\u4efb\u52a1', route: 'pages/admin/TasksPage' },
             { icon: 'paintpalette', title: '\u54C1\u724c', subtitle: '\u542f\u52a8\u753b\u9762\u3001\u767b\u5f55\u58f0\u660e\u4e0e\u81ea\u5b9a\u4e49 CSS', route: 'pages/admin/AdminGenericPage', titleParam: '\u54C1\u724C', pathParam: '/System/Configuration/Branding' },
