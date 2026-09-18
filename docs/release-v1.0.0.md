@@ -48,7 +48,8 @@
 
 除包内静态校验外，把本版的 release 产物签名后装进模拟器，用一个自建的最小 Jellyfin
 服务端对外提供**真实的样本视频**（H.264 1280×720 MKV），再走应用自己的诊断入口
-详情页 →「播放选项」→「软解首帧预览」（该入口即 `playerSoftDecodeProbe` → FFmpeg 软解），
+详情页 →「播放选项」→「软解首帧预览」（该入口即 `playerSoftDecodeProbe` → FFmpeg 软解；
+**注：该调试入口已在后续版本移除**，FFmpeg 是否随包可用改由 `scripts/verify_hap_ffmpeg.sh` 门禁校验），
 设备上实际显示：
 
 ```text

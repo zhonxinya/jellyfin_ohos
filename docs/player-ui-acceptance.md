@@ -250,14 +250,19 @@ EGL/DGLES 把"当前上下文 / 当前 surface"记在**线程私有**状态里�
   协商结果经 `SoftPlayOpen` 的 `renderWidth`/`renderHeight` 回传，宿主据此决定解码宽度
   （`softDecodeMaxWidth`，0 表示按源分辨率）。这样真机拿到全分辨率、模拟器自动落到它能吃下的档位，
   不再靠"预先写死一个小上限"牺牲画质。
-- **调试显示与临时诊断件（已清理）**：播放页原有的常驻诊断行（帧号 / 抓取字节 / EGL 状态 /
+- **调试显示与临时诊断件（已全部移除）**：播放页原有的常驻诊断行（帧号 / 抓取字节 / EGL 状态 /
   锁定与控制条状态）、6 个 `player_*.txt` 探针、软解自动截图导出（`softcapture_*` / `softrender_*`）
   与底部「存帧」按钮均已移除；`native/feature/player/xcomponent_bridge.cpp` 触摸热路径上的
   逐事件 hilog 也已删除。
   代码里保留的 `softStatus` 只是**用户可见提示**（打开中/超时/失败/已自动切换软解），
   普通提示 4 秒自动隐去，避免长期压在画面上。
-  原生侧的 `softPlaySelfTest` / `softPlayDumpFrame` / `renderTargetProbe` 三个接口作为
-  **换机型/换 XComponent 类型时的一次性判定工具**保留，正常播放链路不再调用它们。
+  **本轮又清掉了最后一处调试 UI**：详情页「播放选项」里的「软解首帧预览」（那是一个开发者工具：
+  它把 FFmpeg 探测结果与首帧 PNG 直接摊在界面上），连同 ArkTS 侧的
+  `playerSoftDecodeProbe` / `softPlaySelfTest` / `softPlayDumpFrame` / `renderTargetProbe`
+  四个包装器与类型声明一起删除。
+  原生实现仍保留在 `native/napi/jellyfin_napi.cpp`（作为**换机型/换 XComponent 类型时的判定工具**），
+  但**界面上不再有任何入口**；发布前的 FFmpeg 门禁改由 `scripts/verify_hap_ffmpeg.sh`
+  （包内 DT_NEEDED 依赖闭包校验）承担，不再依赖界面操作。
 - **服务端会话堆积**：`/Sessions` 曾达 60+ 条（多为我反复登录/安装的测试痕迹）；
   已在 `EntryAbility.onDestroy` 加"退出时上报停止"的兜底（仅编译验证，`aa force-stop` 不走生命周期回调）。
 
