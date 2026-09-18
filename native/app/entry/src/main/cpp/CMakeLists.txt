@@ -39,9 +39,29 @@ add_library(jellyfin_native SHARED
 
 target_compile_features(jellyfin_native PRIVATE cxx_std_17)
 
+# ── 版本号单一来源 ────────────────────────────────────────────────────────────
+# 应用版本只写在 AppScope/app.json5 的 versionName 里，这里在配置期读出来注入 C++，
+# 供 User-Agent、Jellyfin 鉴权头的 Client 版本以及各模块自报版本使用。
+# 起因：app.json5 已是 1.0.0，而 core/napi/player 与 User-Agent 还各自写着 0.1.0，
+# 服务端仪表盘与 Sessions 里看到的应用版本互相矛盾。改版本只需改 app.json5 一处。
+# 解析失败不致命：回退到下面的默认值（宿主单测不经 CMake，用 app_version.h 里的回退宏）。
+set(JELLYFIN_APP_VERSION "1.0.0")
+if(EXISTS "${NATIVEROOT}/app/AppScope/app.json5")
+  file(READ "${NATIVEROOT}/app/AppScope/app.json5" JELLYFIN_APP_JSON5)
+  string(REGEX MATCH "\"versionName\"[ \t]*:[ \t]*\"([^\"]+)\"" _APP_VERSION_MATCH "${JELLYFIN_APP_JSON5}")
+  if(CMAKE_MATCH_1)
+    set(JELLYFIN_APP_VERSION "${CMAKE_MATCH_1}")
+  else()
+    message(WARNING "未能从 AppScope/app.json5 解析 versionName，回退为 ${JELLYFIN_APP_VERSION}")
+  endif()
+endif()
+
 target_compile_definitions(jellyfin_native PRIVATE
   MBEDTLS_CONFIG_FILE="jellyfin_mbedtls_config.h"
+  JELLYFIN_APP_VERSION="${JELLYFIN_APP_VERSION}"
 )
+
+message(STATUS "应用版本：${JELLYFIN_APP_VERSION}（取自 AppScope/app.json5 的 versionName）")
 
 target_include_directories(jellyfin_native PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -90,6 +110,11 @@ target_link_libraries(jellyfin_native PUBLIC
 #   2) JELLYFIN_FFMPEG_ROOT/<abi>/lib             （默认 <repo 父目录>/_ffmpeg-build/out）
 # 仍找不到时**不**定义 JELLYFIN_HAS_FFMPEG：FfmpegDecoder 会如实报告"解码不可用"，
 # 而不是假装可用（见 native/feature/player/ffmpeg_decoder.cpp）。
+#
+# ⚠ ABI 打包事实（实测，2026-09-18）：`abiFilters` 只决定**hvigor 编哪些 ABI**，
+# 不决定**打包哪些库**——`entry/libs/` 下的每个 <abi> 子目录都会被原样打进 HAP。
+# 所以"只给真机的精简包"必须在打包前把 entry/libs/x86_64 移开，
+# 单靠目标级 abiFilters 挡不住它（见 .github/workflows/release.yml 的 arm64 步骤）。
 set(JELLYFIN_FFMPEG_ROOT "" CACHE PATH "FFmpeg 预编译根目录（含 <abi>/lib、<abi>/include）")
 if(NOT JELLYFIN_FFMPEG_ROOT)
   set(JELLYFIN_FFMPEG_ROOT "${NATIVEROOT}/../../_ffmpeg-build/out")

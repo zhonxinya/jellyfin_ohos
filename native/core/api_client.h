@@ -4,6 +4,8 @@
 #include "error.h"
 #include "http_client.h"
 
+#include "app_version.h"
+
 #include <string>
 #include <utility>
 
@@ -46,7 +48,8 @@ private:
     HttpClient http_;
     std::string clientName_ = "Jellyfin HarmonyOS";
     std::string deviceName_ = "HarmonyOS";
-    std::string version_ = "0.1.0";
+    /** 客户端版本：Jellyfin 鉴权头里的 Client 版本，也是服务端 Sessions 里显示的应用版本 */
+    std::string version_ = JELLYFIN_APP_VERSION;
 };
 
 } // namespace jellyfin

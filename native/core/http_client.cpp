@@ -1,5 +1,6 @@
 #include "http_client.h"
 
+#include "app_version.h"
 #include "http_response.h"
 #include "http_tls.h"
 #include "socket_util.h"
@@ -365,7 +366,7 @@ HttpResponse HttpClient::request(const std::string &method, const std::string &u
         req << ":" << parsed.port;
     }
     req << "\r\n";
-    req << "User-Agent: JellyfinHarmonyOS/0.1.0\r\n";
+    req << "User-Agent: JellyfinHarmonyOS/" JELLYFIN_APP_VERSION "\r\n";
 
     bool hasContentType = false;
     bool hasAccept = false;
