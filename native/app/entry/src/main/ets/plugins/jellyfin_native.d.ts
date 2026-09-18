@@ -35,7 +35,10 @@ declare module 'libjellyfin_native.so' {
     togglePlayed(itemId: string, played: boolean): string;
     getUserItemData(itemId: string): string;
     getUserById(userId: string): string;
-    updateUserConfiguration(configurationJson: string): string;
+    /** 当前用户的媒体库视图（`/Users/{id}/Views`）：Id 就是用户配置里 OrderedViews 等字段引用的值 */
+    getUserViews(): string;
+    /** 只改若干用户配置字段：原生侧 GET 当前配置 → 合并 → POST 完整配置 */
+    patchUserConfiguration(patchJson: string): string;
     searchHints(query: string, limit: number, parentId: string, includeItemTypes: string): string;
     getPlaylists(): string;
     createPlaylist(name: string, itemId: string, mediaType: string): string;
