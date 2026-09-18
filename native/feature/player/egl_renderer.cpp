@@ -51,7 +51,54 @@ unsigned int CompileShader(GLenum type, const char *src, std::string &error)
     return shader;
 }
 
+/**
+ * 降级阶梯的最多步数：每步折半，4 步即 1/16，足够从 4K 落到模拟器能吃的档位，
+ * 又不会把"持续失败"变成无限重试。
+ */
+constexpr int kMaxDegradeSteps = 4;
+/** 降级下限（缓冲宽/高），低于此值就没有画面可言，不再继续降 */
+constexpr int kMinRenderWidth = 320;
+constexpr int kMinRenderHeight = 180;
+
 } // namespace
+
+void EglRenderer::queryRenderGeometry(bool texturePath, int requestedWidth, int requestedHeight,
+                                      int &width, int &height)
+{
+    width = requestedWidth > 0 ? requestedWidth : 0;
+    height = requestedHeight > 0 ? requestedHeight : 0;
+    if (width <= 0 || height <= 0) {
+        // 调用方没给出可用尺寸（surface 几何尚未就绪）：给一个保守的常见档位，
+        // 真正的尺寸会在下一帧每帧重查 surface 时纠正。
+        width = 640;
+        height = 360;
+        return;
+    }
+    if (height <= 0) {
+        height = width * 9 / 16;
+    }
+    if (texturePath) {
+        // OH_NativeImage 的缓冲几何由 XComponent 尺寸决定，平台不接受任意值，
+        // 这里不做主观缩减（TEXTURE 路径本来就跟着组件走）。
+        return;
+    }
+    // window surface：几何可显式指定。不做上限裁剪 —— 吃不下时由降级阶梯发现。
+}
+
+void EglRenderer::applyBufferGeometry(int width, int height)
+{
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    // TEXTURE 路径的缓冲属于 XComponent 纹理，不能用 SET_BUFFER_GEOMETRY 改写；
+    // 只同步查询到的实际几何即可。
+    if (nativeWindow_ != nullptr && nativeImage_ == nullptr) {
+        OH_NativeWindow_NativeWindowHandleOpt(static_cast<OHNativeWindow *>(nativeWindow_),
+                                              SET_BUFFER_GEOMETRY, width, height);
+    }
+    surfaceWidth_ = width;
+    surfaceHeight_ = height;
+}
 
 EglRenderer::~EglRenderer()
 {
@@ -123,7 +170,32 @@ bool EglRenderer::renderRgba(const uint8_t *rgba, int width, int height, std::st
         return false;
     }
     if (eglSwapBuffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) != EGL_TRUE) {
-        error = "eglSwapBuffers 失败（EGL 0x" + std::to_string(eglGetError()) + "，几何 "
+        const EGLint swapErr = eglGetError();
+        // ── 降级阶梯 ─────────────────────────────────────────────────────────
+        // 某些设备的 GL 实现吃不下当前缓冲几何（软件光栅化模拟器实测在 1260x2619 上报
+        // `0x12301`）。原来的做法是"预先写死一个足够小的上限"（640 宽）—— 代价是真机上
+        // 画面被无谓地降到 640 宽（4K/1080p 源全糊）。
+        //
+        // 正确做法是**先按目标几何试，失败再逐级折半**：真机第一档就成功（拿到全分辨率），
+        // 模拟器在失败若干次后落到它能吃下的档位。两条路径都不牺牲画质上限。
+        if (!isTexturePath() && degradeCount_ < kMaxDegradeSteps) {
+            const int newW = std::max(kMinRenderWidth, surfaceWidth_ / 2);
+            const int newH = std::max(kMinRenderHeight,
+                                      static_cast<int>(static_cast<int64_t>(surfaceHeight_)
+                                                       * newW / std::max(1, surfaceWidth_)));
+            if (newW < surfaceWidth_) {
+                degradeCount_++;
+                applyBufferGeometry(newW, newH);
+                // 几何已变：重绘一帧让内容按新视口呈现，而不是把这一帧丢掉（避免黑一帧）
+                std::string retryError;
+                if (drawFrame(rgba, width, height, retryError)
+                    && eglSwapBuffers(static_cast<EGLDisplay>(display_),
+                                      static_cast<EGLSurface>(surface_)) == EGL_TRUE) {
+                    return true;
+                }
+            }
+        }
+        error = "eglSwapBuffers 失败（EGL 0x" + std::to_string(swapErr) + "，几何 "
                 + std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_)
                 + "，初始化时几何 " + geometryAtInit_ + "）";
         return false;
@@ -164,9 +236,6 @@ bool EglRenderer::redrawAndReadback(const uint8_t *rgba, int width, int height,
     return readbackRgba(out, outWidth, outHeight, error);
 }
 
-/** 渲染缓冲最大宽度：软件 GL（模拟器）无法承受全屏尺寸的每帧交换，限制到视频量级 */
-constexpr int32_t kMaxRenderWidth = 640;
-
 /** 上传纹理并绘制一帧（不含 swap 与发布），供 renderRgba 与导出前重绘共用 */
 bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::string &error)
 {
@@ -177,13 +246,17 @@ bool EglRenderer::drawFrame(const uint8_t *rgba, int width, int height, std::str
     eglMakeCurrent(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
                    static_cast<EGLSurface>(surface_), static_cast<EGLContext>(context_));
 
-    // 每帧都重新查询 surface 几何。
+    // 每帧都重新查询 surface 几何（仅 TEXTURE 路径需要）。
     //
     // 为什么不能只在初始化时查一次：宿主会按「视频比例」调整 XComponent 的尺寸
-    // （见 ArkTS 的 PlayerAspect），surface 的缓冲尺寸随之改变；沿用旧尺寸会让
+    // （见 ArkTS 的 PlayerAspect），纹理 surface 的尺寸随之改变；沿用旧尺寸会让
     // glViewport 与顶点缩放都按旧几何计算 —— 表现为切比例后画面被拉伸/位置偏移。
     // eglQuerySurface 只读属性，代价可忽略。
-    {
+    //
+    // window surface 路径**不能**用查询值覆盖：那里的缓冲几何是我们用 `SET_BUFFER_GEOMETRY`
+    // 协商并可能在降级阶梯里折半过的，而部分实现的 `eglQuerySurface` 会回一个无关的默认值
+    // （实测有 0），覆盖后 glViewport 与几何都不再是实际缓冲尺寸。
+    if (nativeImage_ != nullptr) {
         EGLint qw = 0;
         EGLint qh = 0;
         eglQuerySurface(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
@@ -355,22 +428,12 @@ bool EglRenderer::initWithWindow(void *windowPtr, int requestedWidth, int reques
         destroy();
         return false;
     }
-    // 渲染缓冲**不跟随组件全尺寸**：模拟器的 GL 是软件光栅化（日志可见 DGLES
-    // `d_eglSwapBuffers_special ... speed 531k/s`），让它每帧交换 1260x2619（330 万像素）
-    // 会直接失败（实测 eglSwapBuffers 0x12301）。这里按视频尺寸量级限制缓冲（默认 ≤640 宽，
-    // 保持宽高比），由 ArkUI 把该内容放大到 XComponent 尺寸。
-    int32_t w = requestedWidth;
-    int32_t h = requestedHeight;
-    if (w > kMaxRenderWidth) {
-        h = static_cast<int32_t>(static_cast<int64_t>(h) * kMaxRenderWidth / w);
-        w = kMaxRenderWidth;
-    }
-    if (w <= 0 || h <= 0) {
-        w = 640;
-        h = 360;
-    }
-    OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY, w, h);
-    geometryAtInit_ = std::to_string(w) + "x" + std::to_string(h);
+    // 渲染缓冲几何**不再写死上限**：由 `queryRenderGeometry` 按期望尺寸协商，
+    // 真机吃不下时由 `renderRgba` 的降级阶梯逐级折半（见那里的说明）。
+    int w = requestedWidth;
+    int h = requestedHeight;
+    queryRenderGeometry(nativeImage_ != nullptr, requestedWidth, requestedHeight, w, h);
+    applyBufferGeometry(w, h);
 
     EGLSurface surface = eglCreateWindowSurface(display, config,
                                                 reinterpret_cast<EGLNativeWindowType>(window), nullptr);
@@ -388,12 +451,23 @@ bool EglRenderer::initWithWindow(void *windowPtr, int requestedWidth, int reques
         return false;
     }
     context_ = context;
-    eglQuerySurface(display, surface, EGL_WIDTH, &surfaceWidth_);
-    eglQuerySurface(display, surface, EGL_HEIGHT, &surfaceHeight_);
-    if (surfaceWidth_ <= 0 || surfaceHeight_ <= 0) {
-        surfaceWidth_ = w;
-        surfaceHeight_ = h;
+    // 缓冲几何的权威来源分两种情况：
+    // - TEXTURE（OH_NativeImage）路径：几何由 XComponent 纹理决定，只能以平台查询结果为准
+    //   （我们无法指定），因此用 `eglQuerySurface` 覆盖。
+    // - window surface 路径：几何是我们用 `SET_BUFFER_GEOMETRY` 指定的，`eglQuerySurface`
+    //   在部分实现里会回一个无关的默认值（实测有 0），用它覆盖会把协商好的几何抹掉、
+    //   让画面变成"以为全屏其实被缩到默认档"。这里以协商值为准。
+    if (nativeImage_ != nullptr) {
+        EGLint qw = 0;
+        EGLint qh = 0;
+        eglQuerySurface(display, surface, EGL_WIDTH, &qw);
+        eglQuerySurface(display, surface, EGL_HEIGHT, &qh);
+        if (qw > 0 && qh > 0) {
+            surfaceWidth_ = qw;
+            surfaceHeight_ = qh;
+        }
     }
+    geometryAtInit_ = std::to_string(surfaceWidth_) + "x" + std::to_string(surfaceHeight_);
     if (!buildProgram(error)) {
         destroy();
         return false;

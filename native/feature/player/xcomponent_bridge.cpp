@@ -93,10 +93,10 @@ void OnDispatchTouchEvent(OH_NativeXComponent *component, void *window)
     OH_NativeXComponent_TouchEvent touchEvent;
     const int32_t rc = OH_NativeXComponent_GetTouchEvent(component, window, &touchEvent);
     if (rc != 0) {
-        OH_LOG_Print(LOG_APP, LOG_WARN, kLogDomain, kLogTag, "GetTouchEvent rc=%{public}d", rc);
         return;
     }
-    // 将触摸事件存储到共享状态，供 ArkTS 轮询读取
+    // 将触摸事件存储到共享状态，供 ArkTS 轮询读取。
+    // 这里**不做任何日志**：触摸是最热的路径，逐事件打点会污染 hilog 并拖慢输入响应。
     {
         std::lock_guard<std::mutex> lock(g_touchMutex);
         g_latestTouch.type = static_cast<int>(touchEvent.type);
@@ -106,10 +106,6 @@ void OnDispatchTouchEvent(OH_NativeXComponent *component, void *window)
         g_latestTouch.timestamp = static_cast<int64_t>(touchEvent.timeStamp);
         g_latestTouch.valid = true;
     }
-    OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag,
-                 "touch type=%{public}d x=%{public}.1f y=%{public}.1f points=%{public}d",
-                 static_cast<int>(touchEvent.type), touchEvent.x, touchEvent.y,
-                 static_cast<int>(touchEvent.numPoints));
 }
 
 OH_NativeXComponent_Callback g_callback = {
