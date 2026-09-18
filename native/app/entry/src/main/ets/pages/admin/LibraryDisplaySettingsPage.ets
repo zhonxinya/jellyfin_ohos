@@ -290,6 +290,8 @@ struct LibraryDisplaySettingsPage {
               title: '图片保存约定',
               subtitle: '抓到的图片写回媒体目录时用哪套命名规则',
               valueText: imageConventionLabel(this.imageConvention),
+              showIcon: true,
+              icon: $r('sys.symbol.save'),
               showChevron: true,
               onTap: () => {
                 this.sheet = 'convention';

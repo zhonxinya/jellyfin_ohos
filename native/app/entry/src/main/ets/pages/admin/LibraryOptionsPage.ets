@@ -740,6 +740,8 @@ struct LibraryOptionsPage {
               title: '首选元数据语言',
               subtitle: '抓取元数据时优先使用的语言；留空表示沿用服务器默认',
               valueText: languageDisplayName(this.localization, this.languageCode),
+              showIcon: true,
+              icon: $r('sys.symbol.message'),
               showChevron: true,
               onTap: () => {
                 this.sheetFilter = '';
@@ -751,6 +753,8 @@ struct LibraryOptionsPage {
               title: '元数据国家/地区',
               subtitle: '影响分级、发行日期等地区相关字段',
               valueText: countryDisplayName(this.localization, this.countryCode),
+              showIcon: true,
+              icon: $r('sys.symbol.rectangle_stack'),
               showChevron: true,
               onTap: () => {
                 this.sheetFilter = '';
@@ -762,6 +766,8 @@ struct LibraryOptionsPage {
               title: '内嵌字幕',
               subtitle: '允许使用文件里内嵌的字幕类型',
               valueText: embeddedSubtitleLabel(this.embeddedSubtitles),
+              showIcon: true,
+              icon: $r('sys.symbol.textformat'),
               showChevron: true,
               onTap: () => {
                 this.sheet = 'embeddedSubs';

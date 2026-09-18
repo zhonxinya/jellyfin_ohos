@@ -642,29 +642,41 @@ export struct SettingsPage {
 
           this.UserCard()
 
-          // 管理：仅向管理员显示，避免普通用户进入服务器管理页面
+          /*
+           * 服务器管理：仅向管理员显示，避免普通用户进入服务器管理页面。
+           *
+           * 以前 13 条入口塞在一张卡里，从上往下要滑很久才找得到想改的那一项；
+           * 按「内容 / 服务器 / 运行状态」拆成三张卡后，每张都在一屏内可读完。
+           */
           if (AppViewModel.getInstance().isAdmin) {
-            this.SectionCard('管理', 'gearshape', [
-            { icon: 'externaldrive', title: '设备', subtitle: '管理连接到服务器的设备', route: 'pages/admin/DevicesPage' },
-            { icon: 'clock', title: '活动', subtitle: '查看服务器活动日志', route: 'pages/admin/ActivityPage' },
+            this.SectionCard('内容管理', 'folder', [
             { icon: 'folder', title: '媒体库', subtitle: '媒体库管理、显示、元数据与 NFO 设置', route: 'pages/admin/LibrariesAdminPage' },
-            { icon: 'display', title: '\u63a7\u5236\u53f0', subtitle: '\u670d\u52a1\u5668\u4fe1\u606f\u3001\u6570\u636e\u7edf\u8ba1\u4e0e\u64cd\u4f5c', route: 'pages/admin/AdminHubPage' },
-            { icon: 'timer', title: '\u8ba1\u5212\u4efb\u52a1', subtitle: '\u67e5\u770b\u5e76\u7ba1\u7406\u670d\u52a1\u5668\u8ba1\u5212\u4efb\u52a1', route: 'pages/admin/TasksPage' },
-            { icon: 'paintpalette', title: '\u54C1\u724c', subtitle: '\u542f\u52a8\u753b\u9762\u3001\u767b\u5f55\u58f0\u660e\u4e0e\u81ea\u5b9a\u4e49 CSS', route: 'pages/admin/AdminGenericPage', titleParam: '\u54C1\u724C', pathParam: '/System/Configuration/Branding' },
-            { icon: 'person_2', title: '\u7528\u6237', subtitle: '\u6dfb\u52a0\u548c\u7ba1\u7406\u670d\u52a1\u5668\u7528\u6237', route: 'pages/admin/UsersPage' },
-            { icon: 'play_circle', title: '\u64ad\u653e', subtitle: '\u8f6c\u7801\u3001\u6062\u590d\u64ad\u653e\u3001\u6d41\u5a92\u4f53\u4f20\u8f93\u4e0e\u8fdb\u5ea6\u6761\u9884\u89c8\u56fe', route: 'pages/admin/PlaybackSettingsPage' },
-            { icon: 'gearshape', title: '\u5e38\u89c4', subtitle: '\u670d\u52a1\u5668\u540d\u79f0\u3001\u8bed\u8a00\u3001\u8def\u5f84\u4e0e\u6027\u80fd\u9650\u5236', route: 'pages/admin/GeneralSettingsPage' },
-            { icon: 'wifi', title: '\u7f51\u7edc', subtitle: '\u7aef\u53e3\u3001HTTPS\u3001\u8fdc\u7a0b\u8bbf\u95ee\u4e0e\u7f51\u7edc\u53d1\u73b0', route: 'pages/admin/AdminGenericPage', titleParam: '\u7F51\u7EDC', pathParam: '/System/Configuration/Network' },
-            { icon: 'puzzle', title: '\u63d2\u4ef6', subtitle: '\u5df2\u5b89\u88c5\u7684\u670d\u52a1\u5668\u63d2\u4ef6', route: 'pages/admin/PluginsPage' },
-            { icon: 'key', title: 'API \u5bc6\u94a5', subtitle: '\u7ba1\u7406 API \u8bbf\u95ee\u5bc6\u94a5', route: 'pages/admin/ApiKeysPage' },
-            { icon: 'doc_text', title: '\u65e5\u5fd7', subtitle: '\u670d\u52a1\u5668\u65e5\u5fd7\u6587\u4ef6', route: 'pages/admin/LogsPage' },
+            { icon: 'person_2', title: '用户', subtitle: '添加和管理服务器用户', route: 'pages/admin/UsersPage' },
+            { icon: 'play_circle', title: '播放', subtitle: '转码、恢复播放、流媒体传输与进度条预览图', route: 'pages/admin/PlaybackSettingsPage' },
+            { icon: 'puzzle', title: '插件', subtitle: '已安装的服务器插件', route: 'pages/admin/PluginsPage' },
+            ])
+            this.SectionCard('服务器设置', 'gearshape', [
+            { icon: 'display', title: '控制台', subtitle: '服务器信息、数据统计与操作', route: 'pages/admin/AdminHubPage' },
+            { icon: 'gearshape', title: '常规', subtitle: '服务器名称、语言、路径与性能限制', route: 'pages/admin/GeneralSettingsPage' },
+            { icon: 'wifi', title: '网络', subtitle: '端口、HTTPS、远程访问与网络发现', route: 'pages/admin/AdminGenericPage', titleParam: '网络', pathParam: '/System/Configuration/Network' },
+            { icon: 'paintpalette', title: '品牌', subtitle: '启动画面、登录声明与自定义 CSS', route: 'pages/admin/AdminGenericPage', titleParam: '品牌', pathParam: '/System/Configuration/Branding' },
+            { icon: 'key', title: 'API 密钥', subtitle: '管理 API 访问密钥', route: 'pages/admin/ApiKeysPage' },
+            ])
+            this.SectionCard('运行状态', 'timer', [
+            { icon: 'timer', title: '计划任务', subtitle: '查看并管理服务器计划任务', route: 'pages/admin/TasksPage' },
+            { icon: 'clock', title: '活动', subtitle: '查看服务器活动日志', route: 'pages/admin/ActivityPage' },
+            { icon: 'externaldrive', title: '设备', subtitle: '管理连接到服务器的设备', route: 'pages/admin/DevicesPage' },
+            { icon: 'doc_text', title: '日志', subtitle: '服务器日志文件', route: 'pages/admin/LogsPage' },
             ])
           }
 
-          // 本地化（Flutter 为 InfoTile）
-          this.SectionCard('\u672c\u5730\u5316', 'message', [
-            { icon: '', title: '\u663e\u793a\u8bed\u8a00', subtitle: '\u8ddf\u968f\u7cfb\u7edf\uff08\u7b80\u4f53\u4e2d\u6587\uff09', info: true },
-            { icon: '', title: '\u65f6\u533a', subtitle: '\u81ea\u52a8', info: true },
+          /*
+           * 界面语言：本应用目前只有中文界面，这里如实说明，而不是摆一个点了没用的选择器。
+           * （原来还有一行「时区：自动」，但应用并不消费时区设置、日期都按设备本地格式化，
+           *   留着只会让人以为可以配，所以去掉。）
+           */
+          this.SectionCard('界面', 'message', [
+            { icon: '', title: '界面语言', subtitle: '简体中文（本应用目前只提供中文界面）', info: true },
           ])
 
           // 显示（含服务器开关）

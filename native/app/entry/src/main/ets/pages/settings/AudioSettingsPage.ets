@@ -282,6 +282,8 @@ struct AudioSettingsPage {
                     title: '优先音轨语言',
                     subtitle: '播放时优先选这个语言的音轨',
                     valueText: this.savedLanguage(),
+                    showIcon: true,
+                    icon: $r('sys.symbol.message'),
                     showChevron: true,
                     onTap: () => {
                       this.sheetFilter = '';
