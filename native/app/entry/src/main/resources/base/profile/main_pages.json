@@ -34,6 +34,7 @@
     "pages/admin/PlaybackSettingsPage",
     "pages/admin/LogsPage",
     "pages/admin/PluginsPage",
+    "pages/admin/PluginRepositoriesPage",
     "pages/admin/ActivityPage",
     "pages/admin/ApiKeysPage",
     "pages/admin/GeneralSettingsPage",

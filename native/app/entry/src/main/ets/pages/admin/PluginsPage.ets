@@ -7,6 +7,7 @@ import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
 import { LoadingState } from '../../components/LoadingState';
 import { EmptyState } from '../../components/EmptyState';
+import { SettingCell } from '../../components/SettingCell';
 
 interface PluginPackageInfo {
   name: string;
@@ -314,6 +315,18 @@ struct PluginsPage {
             router.back();
           }
         })
+        // 仓库管理入口：插件只能从"已配置的仓库"里装，加第三方仓库原来必须去 Web 控制台
+        SettingCell({
+          title: '插件仓库',
+          subtitle: '管理插件来源仓库（加第三方仓库后才能装到官方仓库之外的插件）',
+          showIcon: true,
+          icon: $r('sys.symbol.puzzle'),
+          showChevron: true,
+          onTap: () => {
+            router.pushUrl({ url: 'pages/admin/PluginRepositoriesPage' });
+          }
+        })
+        .padding({ left: 4, right: 4 })
         if (this.actionMessage.length > 0) {
           Text(this.actionMessage)
             .fontSize(ThemeConstants.LABEL_SMALL)

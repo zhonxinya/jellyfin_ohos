@@ -2332,7 +2332,9 @@ bool IsAllowedAdminPath(const std::string &path)
         "/System/Configuration/metadata", "/System/Configuration/library",
         "/System/Configuration/nfo", "/System/Configuration/trickplay",
         "/Library/VirtualFolders", "/Library/MediaFolders", "/ScheduledTasks",
-        "/Auth/Keys", "/Devices", "/Packages", "/Users/New", "/Users/Configuration"
+        "/Auth/Keys", "/Devices", "/Packages", "/Users/New", "/Users/Configuration",
+        // 插件仓库：`GET /Repositories` 读、`POST /Repositories` 整体替换列表（PackageController）
+        "/Repositories"
     };
     for (const std::string &candidate : exact) {
         if (route == candidate) {
