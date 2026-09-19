@@ -58,6 +58,15 @@ struct MainShell {
    * 页面自己再取一次窗口既多一次异步、也可能拿到不同实例。
    */
   @State private videoTopInsetVp: number = 0;
+  /**
+   * 「视频」页是否处于**主动全屏**（页面按了全屏按钮：横屏 + 铺满）。
+   *
+   * 为什么由外壳持有：底部页签栏是**外壳**画的那一条，页面自己藏不掉。
+   * 页面通过 `@Link` 回写这个信号，外壳据此决定画不画页签栏 —— 收起后
+   * `Tabs`（`layoutWeight(1)`）自然拿到那 56vp，画面真正铺满整屏。
+   * 只在「视频」页签下有意义，且**不持久化**（页签栏是唯一的页签入口，不能启动就没有）。
+   */
+  @State private videoFullscreen: boolean = false;
 
   aboutToAppear(): void {
     AppViewModel.getInstance().onThemeChanged = () => {
@@ -100,6 +109,11 @@ struct MainShell {
    */
   private applyChromeForTab(index: number): void {
     const wantImmersive: boolean = index === kVideoTabIndex;
+    // 离开「视频」页签时收回主动全屏：底部页签栏必须回来，否则用户没有切页签的入口
+    // （页面自己也会在 `onTabIndexChanged` 里收回，这里是外壳侧的兜底，两条路都堵住）
+    if (!wantImmersive) {
+      this.videoFullscreen = false;
+    }
     if (wantImmersive === this.immersiveForVideoTab) {
       return;
     }
@@ -317,7 +331,9 @@ struct MainShell {
                 // （嵌入式组件不会销毁，否则会在"设置"页里继续放声音）
                 activeTab: this.shellTabIndex,
                 // 沉浸式下工具层按挖孔内缩（视频层仍然铺满）
-                topInsetVp: this.videoTopInsetVp
+                topInsetVp: this.videoTopInsetVp,
+                // 主动全屏信号（双向）：页面按全屏按钮 → 外壳收起底部页签栏，画面铺满整屏
+                fullscreenActive: $videoFullscreen
               })
             }
             .tabBar('视频')
@@ -337,14 +353,19 @@ struct MainShell {
             this.applyChromeForTab(index);
           })
 
-          Row() {
-            this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
-            this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
-            this.TabItem(2, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
+          // 主动全屏时整条页签栏收起（`Tabs` 是 layoutWeight(1)，自然拿到这 56vp）。
+          // 用 `if` 而不是 `opacity(0)`：透明的页签按钮**仍然可点**，
+          // "藏起来却还吃触摸"是本项目已经踩过的一类 bug（见 ShortVideoPage 的工具行说明）。
+          if (!this.videoFullscreen) {
+            Row() {
+              this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
+              this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
+              this.TabItem(2, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
+            }
+            .width('100%')
+            .height(ThemeConstants.TAB_BAR_HEIGHT)
+            .backgroundColor(this.colors().cardBackground)
           }
-          .width('100%')
-          .height(ThemeConstants.TAB_BAR_HEIGHT)
-          .backgroundColor(this.colors().cardBackground)
         }
         .width('100%')
         .height('100%')
