@@ -94,6 +94,40 @@ public:
     /** 已解出的视频帧数 */
     int64_t framesDecoded() const;
 
+    /** 拉帧当前"卡在哪一步"（诊断用；见 .cpp 的 Stage 说明） */
+    enum class Stage {
+        Idle = 0,
+        ReceiveFrame,   // avcodec_receive_frame（帧级并行时这里可能在等解码线程）
+        ReadPacket,     // av_read_frame（含 RangeCache 取流）
+        SendPacket,     // avcodec_send_packet
+        Scale,          // sws_scale（YUV→RGBA）
+    };
+
+    /**
+     * 当前阶段快照：**专门给宿主的看门狗用**。
+     *
+     * 为什么需要：软解"某次拉帧永不返回"时（设备实测 HEVC 1080p 解到第 10 帧后卡死），
+     * 上层只能看到"20 秒没回帧"，却拿不到任何"卡在哪"的信息 —— 没有调试器就只能猜。
+     * 解码线程在进入每个阶段前把阶段号与起始时刻写进原子变量，宿主可以在**另一次调用**
+     * （UI 线程上的诊断接口）里安全地读到"它此刻卡在哪个系统调用上、卡了多久"。
+     */
+    struct StageSnapshot {
+        Stage stage = Stage::Idle;
+        /** 当前阶段已持续毫秒数（stage==Idle 时为 0） */
+        int64_t stageMs = 0;
+        /** 本次拉帧已持续毫秒数 */
+        int64_t callMs = 0;
+        /** 本次拉帧已读到的包数 / 被解码器拒绝的包数 */
+        int packetsRead = 0;
+        int sendRejects = 0;
+        /** 已解出的帧数 / 已取流字节数（与 RangeCache 共享） */
+        int64_t frames = 0;
+        int64_t bytesFetched = 0;
+    };
+
+    /** 读取阶段快照（可从任意线程调用，内部只用原子读写） */
+    StageSnapshot stageSnapshot() const;
+
     /**
      * 解码器实际使用的线程数（0 表示由解码器自行决定）。
      *
@@ -101,6 +135,18 @@ public:
      * 日志里带上这个数字，设备上就能一眼确认 `thread_count = 0`（自动）是否生效。
      */
     int decoderThreads() const;
+
+    /**
+     * 实际选中的解码器名（如 `libdav1d` / `hevc` / `av1`）。
+     *
+     * 为什么暴露出来：AV1 走哪个解码器**决定了能不能出帧**（见 .cpp 里 PickVideoDecoder 的
+     * 长注释——FFmpeg 自带的 `av1` 解码器在无硬件加速的构建里恒返回 ENOSYS）。
+     * 日志与播放页提示带上它，设备上就能一眼确认"是 dav1d 在解，还是那个解不出帧的"。
+     */
+    const std::string &decoderName() const;
+
+    /** 选择解码器时的说明（AV1 是否拿到 dav1d），用于诊断日志 */
+    const std::string &decoderNote() const;
 
 private:
     struct Impl;

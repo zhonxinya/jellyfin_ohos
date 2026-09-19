@@ -176,6 +176,26 @@ if(FFMPEG_LINK_DIR)
     )
     target_link_libraries(jellyfin_native PUBLIC ff_${FF_LIB})
   endforeach()
+  # ── libdav1d（AV1 软解码器，libavcodec 的 DT_NEEDED 依赖）──────────────────
+  # 为什么必须显式链接：libavcodec.so 的 DT_NEEDED 里有 `libdav1d.so.7`，
+  # 运行期由动态链接器从 HAP 的 libs 目录解析；构建期把它一起链上，
+  # 一是让链接器能校验这个依赖确实存在（缺库时立刻报错，而不是装到设备上才崩），
+  # 二是保证 `entry/libs/<abi>/libdav1d.so` 被当作本模块的依赖一并打进 HAP。
+  # 头文件用仓库内 third_party/dav1d/include（随仓库提交），
+  # 交叉编译与部署见 scripts/build_dav1d_ohos.sh。
+  if(EXISTS "${FFMPEG_LINK_DIR}/libdav1d.so")
+    add_library(dav1d SHARED IMPORTED)
+    set_target_properties(dav1d PROPERTIES
+      IMPORTED_LOCATION "${FFMPEG_LINK_DIR}/libdav1d.so"
+    )
+    target_include_directories(jellyfin_native PRIVATE "${THIRD_PARTY_ROOT}/dav1d/include")
+    target_link_libraries(jellyfin_native PUBLIC dav1d)
+    message(STATUS "AV1 软解：已链接 libdav1d（${FFMPEG_LINK_DIR}）")
+  else()
+    message(WARNING "AV1 软解：未找到 ${FFMPEG_LINK_DIR}/libdav1d.so —— 本构建的 AV1 只能走"
+                    "FFmpeg 自带 av1 解码器（无硬件加速时恒解不出帧）。"
+                    "请运行 scripts/build_dav1d_ohos.sh ${OHOS_ARCH}")
+  endif()
   message(STATUS "FFmpeg 软解码：已链接（${FFMPEG_LINK_DIR}，ABI=${OHOS_ARCH}）")
 else()
   message(STATUS "FFmpeg 软解码：未找到 ABI=${OHOS_ARCH} 的预编译库，本次构建不启用"

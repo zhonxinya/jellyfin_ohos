@@ -96,7 +96,9 @@ Invoke-CompileAndRun -Name "test_player_engine" -Sources @(
 Invoke-CompileAndRun -Name "test_range_cache" -Sources @(
     (Join-Path $Core "tests\test_range_cache.cpp"),
     (Join-Path $RepoRoot "native\feature\player\range_cache.cpp"),
-    (Join-Path $RepoRoot "native\feature\player\range_fetcher.cpp")
+    (Join-Path $RepoRoot "native\feature\player\range_fetcher.cpp"),
+    # 诊断日志注入点（RangeCache 会用它打印慢取流/慢加锁）；未注入时为空实现
+    (Join-Path $RepoRoot "native\feature\player\player_log.cpp")
 )
 
 # 媒体库管理：请求构造（query 编码 / 请求体形状）+ 响应归一化（纯函数，不依赖网络客户端）
@@ -104,6 +106,12 @@ Invoke-CompileAndRun -Name "test_library_admin_api" -Sources @(
     (Join-Path $Core "tests\test_library_admin_api.cpp"),
     (Join-Path $Core "api\library_admin_api.cpp"),
     (Join-Path $Core "url_util.cpp")
+)
+
+# DeviceProfile：客户端能力声明（决定服务端会不会转码；av1 必须在直接播放列表之外）
+Invoke-CompileAndRun -Name "test_device_profile" -Sources @(
+    (Join-Path $Core "tests\test_device_profile.cpp"),
+    (Join-Path $Core "api\device_profile.cpp")
 )
 
 Write-Host "All native core tests finished." -ForegroundColor Green

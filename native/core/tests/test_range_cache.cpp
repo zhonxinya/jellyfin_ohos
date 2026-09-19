@@ -371,6 +371,75 @@ void TestStopPrefetchIsIdempotent()
                "，等待后=" + std::to_string(server.RequestCount()));
 }
 
+/**
+ * 回归：**缓存里塞满"远处的块"时，正在读的那一块不能被淘汰**。
+ *
+ * 设备实测的故障现场（HEVC 1080p，MP4 的 moov 在文件末尾）：
+ *   ① 解复用器先跳到文件末尾读索引 → `pos_` 抬到 673MB 一带，缓存被远块填满；
+ *   ② 回头顺序读开头时，缓存里没有任何"pos_ 之前的块" → 旧实现走 `chunks_.begin()`
+ *      分支，而 begin() 恰好是**刚取回来的、正在读的第 0 块** → 立刻被淘汰；
+ *   ③ 读不到 → 再取 → 再淘汰 …… 实测一次播放发出上千个 Range 请求、
+ *      某次拉帧 20 秒不返回（上层看门狗判"软解卡死"）。
+ * 这里用 1 字节/块的极小粒度复现同一结构：先把位置推到很远处的块上，再回到开头读。
+ */
+void TestEvictionNeverDropsTheChunkBeingRead()
+{
+    FakeServer server;
+    server.content = MakeContent(256 * 1024);
+    jellyfin::player::SetRangeFetcher(server.Fetcher());
+
+    // chunk = 1024B；缓存上限 12 块（见 RangeCache::maxChunks_）
+    jellyfin::player::RangeCache cache("https://example.test/media.mp4", 1024);
+    cache.probe();                       // 取回第 0 块（模拟"读文件头"）
+    const int afterProbe = server.RequestCount();
+
+    // ① 模拟"跳到文件末尾读 moov"：在远离开头的位置散点读，把缓存塞满远块
+    //    （散点是为了每块各自形成一个缓存分块，共 13 块 > 上限 12）
+    std::string error;
+    std::vector<uint8_t> buf(256);
+    for (int i = 0; i < 13; ++i) {
+        cache.seek(200 * 1024 + i * 2048);
+        cache.read(buf.data(), static_cast<int>(buf.size()), error);
+    }
+    const int afterFarReads = server.RequestCount();
+
+    // ② 回到开头连续读：这正是设备上"moov 在文件末尾的 MP4"的访问顺序
+    cache.seek(0);
+    bool contentOk = true;
+    int reads = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int n = cache.read(buf.data(), static_cast<int>(buf.size()), error);
+        if (n != static_cast<int>(buf.size())) {
+            contentOk = false;
+            break;
+        }
+        ++reads;
+        for (int k = 0; k < n; ++k) {
+            const char want = static_cast<char>('A' + (((i * buf.size()) + static_cast<size_t>(k)) % 26));
+            if (buf[static_cast<size_t>(k)] != want) {
+                contentOk = false;
+                break;
+            }
+        }
+        if (!contentOk) {
+            break;
+        }
+    }
+    const int afterBackReads = server.RequestCount();
+    cache.stopPrefetch();
+
+    // 4 次 256B 读取全落在第 0 块内：只允许 1 次取流（旧实现会因为
+    // "刚存的块立刻被淘汰"而每次读都重取，甚至一次都读不出来）
+    Expect(contentOk,
+           "从文件末尾回到开头读，内容仍然正确",
+           "成功读取次数=" + std::to_string(reads));
+    Expect(afterBackReads - afterFarReads <= 1,
+           "回到开头读取不会反复重取同一块（淘汰策略不得丢掉正在读的块）",
+           "远处读之后请求数=" + std::to_string(afterFarReads) +
+               "，回到开头后=" + std::to_string(afterBackReads) +
+               "（probe 后=" + std::to_string(afterProbe) + "）");
+}
+
 int main()
 {
     std::cout << "== RangeCache 主机单测 ==\n";
@@ -384,6 +453,7 @@ int main()
     TestPrefetchFillsAheadOfReader();
     TestPrefetchBeyondWindowStillReads();
     TestStopPrefetchIsIdempotent();
+    TestEvictionNeverDropsTheChunkBeingRead();
 
     if (gFailures == 0) {
         std::cout << "All range cache tests passed\n";

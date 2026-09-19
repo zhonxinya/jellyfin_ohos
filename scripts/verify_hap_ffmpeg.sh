@@ -10,7 +10,7 @@
 # 检查内容：
 #   1) 期望的每个 ABI 下都有 libjellyfin_native.so；
 #   2) 它的 DT_NEEDED 里所有 libav*/libsw* 依赖，都能在同一个 ABI 目录里找到同名文件
-#      （动态链接器按 DT_NEEDED 的**精确名字**查找，例如 libavcodec.so.61，
+#      （动态链接器按 DT_NEEDED 的**精确名字**查找，例如 libavcodec.so.62，
 #        少一个名字就等于运行期加载失败）；
 #   3) 每个 libav*/libsw* 的 ELF 机器字与该 ABI 相符（arm64-v8a ⇒ AArch64，x86_64 ⇒ X86-64）；
 #   4) 不该出现的 ABI 目录不存在（发布用的 arm64 精简包不得夹带 x86_64 载荷）。
@@ -35,6 +35,9 @@ EXPECTED_ABIS=("$@")
 READELF="${READELF:-readelf}"
 UNZIP="${UNZIP:-unzip}"
 FFMPEG_LIBS=(libavformat libavcodec libavutil libswscale libswresample)
+# AV1 软解依赖的 dav1d（libavcodec 的 DT_NEEDED 里有 libdav1d.so.7）。
+# 少了它，AV1 内容会在设备上"回退软解后一直黑屏"——同样是"能装能跑但少了半个引擎"。
+DAV1D_LIB=libdav1d
 
 fail=0
 note() { printf '    %s\n' "$*"; }
@@ -91,6 +94,18 @@ for abi in "${EXPECTED_ABIS[@]}"; do
         note "$(printf '%-28s %10s 字节' "$soname" "$size")"
     done
 
+    # 1b) libdav1d：libavcodec 需要它（精确 SONAME），缺了 AV1 直接黑屏
+    dav1d_soname="$("$READELF" -d "$dir/libavcodec.so" 2>/dev/null \
+                   | sed -n 's/.*NEEDED.*\[\(libdav1d\.so\.[0-9]*\)\]/\1/p' | head -n1)"
+    if [ -z "$dav1d_soname" ]; then
+        err "libs/$abi/libavcodec.so 没有链接 libdav1d（本构建的 AV1 软解解不出帧，见"
+        err "  native/third_party/dav1d 与 scripts/build_dav1d_ohos.sh —— 需要 --enable-libdav1d 重编 FFmpeg）"
+    elif [ ! -f "$dir/$dav1d_soname" ]; then
+        err "libs/$abi/$dav1d_soname 缺失（libavcodec 需要它，运行期加载会失败）"
+    else
+        note "$(printf '%-28s %10s 字节' "$dav1d_soname" "$(stat -c%s "$dir/$dav1d_soname" 2>/dev/null || stat -f%z "$dir/$dav1d_soname")")"
+    fi
+
     # 2) DT_NEEDED 依赖闭包：libav*/libsw* 必须都能在包内找到
     for so in "$dir"/lib*.so*; do
         [ -f "$so" ] || continue
@@ -99,7 +114,7 @@ for abi in "${EXPECTED_ABIS[@]}"; do
         while read -r needed; do
             [ -n "$needed" ] || continue
             case "$needed" in
-                libav*|libsw*|libc++_shared.so)
+                libav*|libsw*|libdav1d*|libc++_shared.so)
                     if [ ! -f "$dir/$needed" ]; then
                         err "$base 需要 $needed，但 libs/$abi/ 里没有（运行期加载会失败）"
                     fi ;;
@@ -109,7 +124,7 @@ for abi in "${EXPECTED_ABIS[@]}"; do
 
     # 3) 架构自检：库的机器字必须与 ABI 相符
     if [ -n "$expect_machine" ]; then
-        for so in "$dir"/libav*.so "$dir"/libav*.so.*; do
+        for so in "$dir"/libav*.so "$dir"/libav*.so.* "$dir"/libdav1d.so "$dir"/libdav1d.so.*; do
             [ -f "$so" ] || continue
             machine="$("$READELF" -h "$so" 2>/dev/null | sed -n 's/^ *Machine: *//p' | head -n1)"
             case "$machine" in
@@ -117,7 +132,7 @@ for abi in "${EXPECTED_ABIS[@]}"; do
                 *) err "$(basename "$so") 的 ELF 机器字是「${machine:-未知}」，与 ABI $abi 不符" ;;
             esac
         done
-        note "（架构自检：libav* 均为 $expect_machine）"
+        note "（架构自检：libav*/libdav1d 均为 $expect_machine）"
     fi
 
     # 4) 顺带证明 native 库确实链接了 FFmpeg（JELLYFIN_HAS_FFMPEG 生效）

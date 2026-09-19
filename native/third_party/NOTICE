@@ -22,6 +22,26 @@ Upstream: https://github.com/nlohmann/json
 TODO: keep LICENSE.MIT alongside the header when packaging distributions.
 
 -------------------------------------------------------------------------------
+dav1d（AV1 软解码）
+-------------------------------------------------------------------------------
+Status: **源码已内置**（native/third_party/dav1d/source/，未经修改的上游源码树），
+        由本仓库脚本交叉编译为共享库并打进 HAP：
+        scripts/build_dav1d_ohos.sh
+        （编译产物已随仓库提交，克隆后构建应用直接链接；仅当指纹失效——源码树或脚本
+          变化——时才会重编译，见 native/third_party/README.md 的 dav1d 一节）
+版本:   dav1d 1.5.1
+       下载地址: https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz
+许可证: BSD-2-Clause（见 native/third_party/dav1d/source/COPYING）
+上游:   https://code.videolan.org/videolan/dav1d
+用途:   AV1 软解码。FFmpeg 以 --enable-libdav1d 编译，`libavcodec.so` 的 DT_NEEDED 依赖
+        `libdav1d.so.7`；播放侧对 AV1 显式优先选它（FFmpeg 自带的 `av1` 解码器在本构建里
+        一帧都解不出来，根因见 native/feature/player/README.md 的「AV1 软解」）
+源码:   native/third_party/dav1d/source/（随仓库提交，未经修改的上游源码）
+构建产物: native/app/entry/libs/<abi>/libdav1d.so、libdav1d.so.7
+          ABI: arm64-v8a（含汇编）、x86_64（纯 C，本环境无 nasm）
+编译指纹: native/third_party/dav1d/build-stamp-<abi>.txt
+
+-------------------------------------------------------------------------------
 libcurl
 -------------------------------------------------------------------------------
 Status: not yet vendored
@@ -39,10 +59,15 @@ Status: **源码已内置**（native/third_party/ffmpeg/source/，未经修改�
           仅当指纹失效——源码树或脚本变化——时 CMake 才会自动调用该脚本，
           见 native/app/entry/src/main/cpp/CMakeLists.txt 的 FFmpeg 段与
           native/third_party/README.md）
-版本:   FFmpeg 7.1
-       对应上游源码包 ffmpeg-7.1.tar.xz
-       sha256 = 40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
-       下载地址: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+版本:   FFmpeg 8.0
+       内置的是上游 n8.0 标签的源码归档（版本号记录在 RELEASE 文件）
+       下载地址: https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n8.0.tar.gz
+       sha256 = dd4030dbfdc34d9ff255a116bdd1caade42500ac2981efa27f8b151cc54c7b9e
+       （官方发行包 https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz，11384428 字节，库源码等价）
+       为什么是 8.0: 鸿蒙编解码支持（--enable-ohcodec，libavcodec/ohdec.c）是 8.0 才加入的；
+       启用后 libavcodec 会动态依赖系统的 libnative_media_vdec/codecbase/core.so
+       （OpenHarmony 的 AVCodec 框架），即"经 FFmpeg 使用设备编解码器"。
+       详见 docs/ffmpeg-8-ohcodec.md
 许可证: LGPL-2.1-or-later
        （构建时已 `--disable-gpl` 语义下的配置：未启用任何 GPL 组件；
          如需确认，可用 `ffmpeg -buildconf` 或检查 configure 日志 --enable-gpl 未出现）
