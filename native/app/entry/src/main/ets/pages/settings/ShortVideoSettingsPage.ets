@@ -9,7 +9,8 @@ import { EmptyState } from '../../components/EmptyState';
 import { LoadingState } from '../../components/LoadingState';
 import { JsonUtil } from '../../common/JsonUtil';
 import { UiState } from '../../common/UiState';
-import { ShortVideoPrefs } from '../../common/ShortVideoPrefs';
+import { ShortVideoPrefs, kShortVideoQualities, ShortVideoQuality } from '../../common/ShortVideoPrefs';
+import { SettingRadioRow } from '../../components/SettingRadioRow';
 import { parseBoldSegments, TextSegment } from '../../common/RichText';
 
 /** 媒体库集合类型 → 展示文案（与 `LibrariesAdminPage` 的口径一致） */
@@ -64,11 +65,19 @@ export struct ShortVideoSettingsPage {
   @State private errorMsg: string = '';
   @State private libraries: LibraryRow[] = [];
   @State private selectedIds: string[] = [];
+  /**
+   * 清晰度档位 id（= 服务器转码质量）。
+   *
+   * 放 @State 而不是每次现读偏好：单选行的选中态要跟着点按即时变化
+   * （写偏好是同步的，但"现读"拿不到刷新时机）。
+   */
+  @State private qualityId: string = 'auto';
   @State private toast: string = '';
   private toastTimerId: number = -1;
 
   aboutToAppear(): void {
     this.selectedIds = ShortVideoPrefs.loadLibraryIds();
+    this.qualityId = ShortVideoPrefs.loadQualityId();
     this.loadLibraries();
   }
 
@@ -140,6 +149,21 @@ export struct ShortVideoSettingsPage {
     this.selectedIds = ShortVideoPrefs.withToggled(this.selectedIds, row.id, on);
     ShortVideoPrefs.saveLibraryIds(this.selectedIds);
     this.showToast(on ? `已加入短视频：${row.name}` : `已移出短视频：${row.name}`);
+  }
+
+  /**
+   * 选中一档清晰度（点即保存，无"确定"按钮 —— 与开关类设置同一套期望）。
+   *
+   * 提示里带上"下一批起生效"：清晰度是**请求播放地址时**的参数，
+   * 已经在播的这一条是拿旧参数起的，不重开不会变 —— 不说清楚用户会以为设置没生效。
+   */
+  private onPickQuality(q: ShortVideoQuality): void {
+    if (q.id === this.qualityId) {
+      return;
+    }
+    this.qualityId = q.id;
+    ShortVideoPrefs.saveQualityId(q.id);
+    this.showToast(`清晰度：${q.label}（下一条起生效）`);
   }
 
   private showToast(text: string): void {
@@ -242,6 +266,46 @@ export struct ShortVideoSettingsPage {
                 .width('100%')
                 .textAlign(TextAlign.Center)
                 .padding({ left: 16, right: 16, bottom: 24 })
+            }
+
+            // ── 清晰度（服务器转码质量）──────────────────────────────────
+            // 为什么放在这一页：它和"刷什么内容"是同一条动线上的设置 ——
+            // 短视频流是**移动网络下最吃流量**的用法，用户需要一个"别给我放 4K 原盘"的开关。
+            SectionCard({ title: '清晰度（服务器转码）', showHeaderIcon: true,
+              icon: $r('sys.symbol.aspectratio') }) {
+              Column() {
+                // `**强制转码**` 同样拆片段渲染（ArkUI 的 Text 不认 markdown）
+                Flex({ wrap: FlexWrap.Wrap }) {
+                  ForEach(parseBoldSegments('「自动」以外的档位会**强制服务端转码**到所选清晰度：'
+                    + '清晰度可控、流量可预期，代价是起播多等一小会儿。'),
+                    (seg: TextSegment, index: number) => {
+                      Text(seg.text)
+                        .fontSize(ThemeConstants.META_SMALL)
+                        .fontWeight(seg.bold ? FontWeight.Bold : FontWeight.Normal)
+                        .fontColor(seg.bold ? this.colors().textPrimary : this.colors().textSecondary)
+                    }, (seg: TextSegment, index: number) => `q_${index}_${seg.text}`)
+                }
+                .width('100%')
+                .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+                ForEach(kShortVideoQualities, (q: ShortVideoQuality, index: number) => {
+                  Column() {
+                    if (index > 0) {
+                      Divider()
+                        .color(this.colors().divider)
+                        .strokeWidth(0.5)
+                        .margin({ left: 16, right: 16 })
+                    }
+                    SettingRadioRow({
+                      selected: this.qualityId === q.id,
+                      title: q.label,
+                      subtitle: q.subtitle,
+                      onTap: () => { this.onPickQuality(q); }
+                    })
+                  }
+                  .width('100%')
+                }, (q: ShortVideoQuality) => `${q.id}-${this.qualityId === q.id}`)
+              }
+              .width('100%')
             }
           }
           .width('100%')

@@ -2,6 +2,7 @@ import router from '@ohos.router';
 import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
 import window from '@ohos.window';
+import hilog from '@ohos.hilog';
 import common from '@ohos.app.ability.common';
 import { BusinessError } from '@ohos.base';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
@@ -15,13 +16,23 @@ import { UiState } from '../common/UiState';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { ShortVideoPrefs, kShortVideoBatchSize } from '../common/ShortVideoPrefs';
-import { formatSeconds } from '../common/format';
+import { formatSeconds, stripMarkup } from '../common/format';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
 
 /** 「视频」页在外壳底部页签中的下标（媒体库 / 视频 / 设置） */
 const kVideoTabIndex: number = 1;
+
+/**
+ * 诊断日志域与标签。
+ *
+ * 为什么短视频页也要留痕：这一页的失败模式几乎都是"看不见的"——
+ * 取流失败、编码不支持、转码流起播卡住、手势被浮层吃掉，画面上都只表现为
+ * "停在某一帧"。设备实测（模拟器 + hilog）是唯一能把它们区分开的途径。
+ */
+const LOG_DOMAIN: number = 0x0000;
+const LOG_TAG: string = 'JellyfinShortVideo';
 
 /**
  * 单条播放失败后自动跳过下一条的等待时间（毫秒）。
@@ -44,14 +55,26 @@ const kSoftPullMinGapMs: number = 8;
 /** 双击两侧的跳转步长（与播放页同一口径：±10 秒） */
 const kSkipStepMs: number = 10000;
 
-/** 双击判定窗口（与播放页一致：300ms 与系统双击间隔阈值一致） */
-const kDoubleTapMs: number = 300;
+/**
+ * 双击判定窗口（毫秒）。
+ *
+ * 350 而不是播放页的 300：设备实测用 `uitest uiInput doubleClick` 注入的两次点按间隔
+ * 约 304ms（日志时间戳实测），300 的窗口会把它们判成两次单击 —— 真机上"双击慢一点"
+ * 也会同样失效。放宽到 350 才能覆盖"人手没那么快"的情况。
+ */
+const kDoubleTapMs: number = 350;
 
-/** 单击动作延后执行的时间：给"第二次点按"留出判定窗口，避免双击时先闪一下暂停 */
-const kSingleTapDelayMs: number = 260;
+/**
+ * 单击动作延后执行的时间。
+ *
+ * **必须大于 `kDoubleTapMs`**：单击是"暂停/继续"，如果它先于双击判定执行，
+ * 一次双击就会先暂停、再快进 10 秒 —— 用户看到的是"双击之后画面停了"。
+ * 设备实测踩到过这个坑（260 < 304 时，双击被拆成"暂停 + 继续"）。
+ */
+const kSingleTapDelayMs: number = 380;
 
 /** 双击跳转提示的停留时间 */
-const kSeekHintMs: number = 900;
+const kSeekHintMs: number = 1200;
 
 /**
  * 起播看门狗：超过这么久还没出画面就当作这条播不了。
@@ -152,6 +175,22 @@ export struct ShortVideoPage {
   @State private durationMs: number = 0;
   /** 当前条目播放失败的原因（非空即显示失败浮层 + 自动跳过倒计时） */
   @State private playbackError: string = '';
+  /**
+   * 当前这一条的播放方式（`DirectPlay` / `DirectStream` / `Transcode`）。
+   *
+   * 为什么要显示出来：用户选了「720p」却还在放原画、或服务端转码失败退回直连时，
+   * **画面上看不出任何区别** —— 这是"设置到底生效没有"的唯一可见证据。
+   */
+  @State private playMethod: string = '';
+  /**
+   * 本条是否已经试过"转码流失败 → 改直连"这一次回退。
+   *
+   * 服务器转码本身可能失败（例如本机 Jellyfin 的 ffmpeg 拿不稳 AV1 extradata，
+   * 转码任务一启动就退出，分片接口 500）。不给回退的话用户看到的是"永久转圈"。
+   */
+  private transcodeFallbackTried: boolean = false;
+  /** 当前播放地址是不是 HLS（`.m3u8`）—— 转码流的判据之一（另一个是 playMethod） */
+  private lastUrlWasHls: boolean = false;
   /** 是否已滑到列表末尾且**再也取不到新内容**（末尾给"换一批"，不假装永远刷不完） */
   @State private reachedEnd: boolean = false;
   /** 正在准备当前条目（取流 / 建播放器 / 缓冲）：显示转圈，避免"点了没反应"的观感 */
@@ -621,19 +660,31 @@ export struct ShortVideoPage {
     this.paused = false;
     this.positionMs = 0;
     this.durationMs = 0;
+    this.playMethod = '';
+    this.transcodeFallbackTried = false;
     if (item === null) {
       this.preparing = false;
       return;
     }
     this.preparing = true;
     this.startPrepareWatchdog();
-    const raw: string = await JellyfinNative.playerOpen(item.id, '{}');
+    // 播放参数按"设置里的清晰度"走：具体分辨率档位会让服务端转码，
+    // 「自动」则由服务端按本机能力决定直连还是转码（见 ShortVideoPrefs.playbackOptionsJson）。
+    const options: string = ShortVideoPrefs.playbackOptionsJson();
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'playCurrent item=%{public}s quality=%{public}s',
+      item.id, ShortVideoPrefs.qualityShortLabel());
+    const raw: string = await JellyfinNative.playerOpen(item.id, options);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.onItemFailed(result.message.length > 0 ? `获取播放地址失败：${result.message}` : '获取播放地址失败');
       return;
     }
     const playUrl: string = JsonUtil.getString(result.data as ESObject, 'playUrl', '');
+    // 原生侧把最终采用的播放方式写在 playMethod 上（DirectPlay / DirectStream / Transcode）
+    this.playMethod = JsonUtil.getString(result.data as ESObject, 'playMethod', '');
+    this.lastUrlWasHls = playUrl.includes('.m3u8');
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'playCurrent method=%{public}s hls=%{public}s',
+      this.playMethod, this.lastUrlWasHls ? '1' : '0');
     if (playUrl.length === 0) {
       this.onItemFailed('服务器没有给出播放地址');
       return;
@@ -674,6 +725,13 @@ export struct ShortVideoPage {
           this.videoW = player.width;
           this.videoH = player.height;
         }
+        // 设备实测（模拟器）：部分流在 `prepared` 阶段 `AVPlayer.duration` 仍是 0，
+        // 于是进度条恒为 0、`已看 / 总时长` 读数根本不出现。
+        // 这里如实留痕，便于判断"时长到底是谁给的"（服务端元数据还是播放器）。
+        hilog.info(LOG_DOMAIN, LOG_TAG,
+          'prepared duration=%{public}d size=%{public}dx%{public}d metaDuration=%{public}d',
+          Math.round(player.duration), player.width, player.height,
+          Math.round(this.itemDurationMs()));
         try {
           // 视频面已按画面比例设过尺寸 ⇒ 同比例的 FIT 不会拉伸；
           // 若拿不到画面尺寸（videoW/H 仍为 0，面暂时铺满），FIT_CROP 至少保证不出现黑边。
@@ -700,6 +758,7 @@ export struct ShortVideoPage {
       } else if (state === 'error') {
         // 实测顺序：`stateChange='error'` 常常先于 `error` 事件到达，此时还拿不到错误码。
         // 文案因此给"人话 + 下一步"，而不是一个光秃秃的"播放出错"。
+        hilog.warn(LOG_DOMAIN, LOG_TAG, 'stateChange=error method=%{public}s', this.playMethod);
         this.onItemFailed('本机无法播放该内容（可能是硬解不支持）');
       }
     });
@@ -797,8 +856,19 @@ export struct ShortVideoPage {
     this.playCurrent();
   }
 
-  /** 条目播放失败：就地软解 → 提示 + 自动跳过（见 kAutoSkipMs） */
+  /** 条目播放失败：转码流→直连回退 → 就地软解 → 提示 + 自动跳过（见 kAutoSkipMs） */
   private onItemFailed(message: string): void {
+    hilog.warn(LOG_DOMAIN, LOG_TAG, 'onItemFailed method=%{public}s msg=%{public}s',
+      this.playMethod, message);
+    // ── 服务器转码流失败 → 改直连再试一次 ─────────────────────────────────
+    // 服务端转码本身可能失败（ffmpeg 起不来 / 分片 500），此时换直连往往能放
+    // （本机硬解或软解都行）。只试一次，避免在两条坏路之间来回弹。
+    if (!this.transcodeFallbackTried && this.isTranscodeStream()) {
+      this.transcodeFallbackTried = true;
+      hilog.warn(LOG_DOMAIN, LOG_TAG, '转码流失败，回退直连播放');
+      this.playCurrentDirect();
+      return;
+    }
     this.playbackError = message;
     this.preparing = false;
     this.clearPrepareWatchdog();
@@ -814,6 +884,66 @@ export struct ShortVideoPage {
     }
     // 软解也不行（如本构建未链接 FFmpeg）：退回"提示 + 自动跳过"，不把用户卡住
     this.startAutoSkip();
+  }
+
+  /** 当前这一条是不是"服务器转码流"（HLS/m3u8，或原生侧报的 Transcode） */
+  private isTranscodeStream(): boolean {
+    return this.playMethod === 'Transcode' || this.lastUrlWasHls;
+  }
+
+  /**
+   * 用**直连参数**重开当前这一条（转码流失败后的回退，也用于软解兜底）。
+   *
+   * 与 `playCurrent` 的差别只有播放参数：去掉 DeviceProfile、关掉转码，
+   * 让服务端回到 `/Videos/{id}/stream?static=true`。
+   */
+  private async playCurrentDirect(): Promise<void> {
+    const item: MediaItem | null = this.currentItem();
+    this.cancelAutoSkip();
+    this.stopSoftPlayback();
+    this.stopProgressTicker();
+    this.releasePlayer();
+    this.playbackError = '';
+    this.videoReady = false;
+    this.paused = false;
+    this.positionMs = 0;
+    this.durationMs = 0;
+    this.playMethod = 'DirectPlay';
+    this.lastUrlWasHls = false;
+    if (item === null) {
+      this.preparing = false;
+      return;
+    }
+    this.preparing = true;
+    this.startPrepareWatchdog();
+    const raw: string = await JellyfinNative.playerOpen(item.id, ShortVideoPrefs.directOptionsJson());
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      this.onItemFailed(result.message.length > 0 ? `获取播放地址失败：${result.message}` : '获取播放地址失败');
+      return;
+    }
+    const playUrl: string = JsonUtil.getString(result.data as ESObject, 'playUrl', '');
+    const method: string = JsonUtil.getString(result.data as ESObject, 'playMethod', '');
+    if (method.length > 0) {
+      this.playMethod = method;
+    }
+    if (playUrl.length === 0) {
+      this.onItemFailed('服务器没有给出播放地址');
+      return;
+    }
+    try {
+      this.avPlayer = await media.createAVPlayer();
+    } catch (err) {
+      this.onItemFailed('创建播放器失败');
+      return;
+    }
+    this.playingItemId = item.id;
+    this.attachPlayerHandlers(this.avPlayer);
+    try {
+      this.avPlayer.url = playUrl;
+    } catch (err) {
+      this.onItemFailed('设置播放地址失败');
+    }
   }
 
   /** 起播看门狗：到点还没出画面就按"这条播不了"处理（否则用户会一直盯着黑屏转圈） */
@@ -868,9 +998,12 @@ export struct ShortVideoPage {
     this.playbackError = '';   // 软解接管后不再显示"本机无法播放"
     this.cancelAutoSkip();
     const seekSec: number = this.positionMs / 1000;
-    // softPlayOpen 是**异步**接口（内部要取 PlaybackInfo + 探测容器），必须 await
+    // softPlayOpen 是**异步**接口（内部要取 PlaybackInfo + 探测容器），必须 await。
+    // 参数走**直连**（见 ShortVideoPrefs.directOptionsJson）：本工程的 FFmpeg 是
+    // `--disable-network` 构建的，打不开 HLS 分片流，带 DeviceProfile 只会拿到 m3u8。
     const raw: string = await JellyfinNative.softPlayOpen(item.id, this.surfaceId, this.surfaceW,
-                                                         this.surfaceH, 'surface', '{}');
+                                                         this.surfaceH, 'surface',
+                                                         ShortVideoPrefs.directOptionsJson());
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null ||
         !JsonUtil.getBoolean(result.data as ESObject, 'ok', false)) {
@@ -1069,6 +1202,8 @@ export struct ShortVideoPage {
     if (isDoubleTap) {
       this.cancelPendingTap();
       const forward: boolean = x >= width / 2;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'doubleTap x=%{public}d forward=%{public}s',
+        Math.round(x), forward ? '1' : '0');
       this.skipBy(forward ? kSkipStepMs : -kSkipStepMs);
       this.showSeekHint(forward);
       // 双击后不再把第二次抬手当成新一轮单击的起点
@@ -1080,6 +1215,8 @@ export struct ShortVideoPage {
     this.cancelPendingTap();
     this.singleTapTimerId = setTimeout(() => {
       this.singleTapTimerId = -1;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'singleTap x=%{public}d paused=%{public}s',
+        Math.round(x), this.paused ? '1' : '0');
       this.togglePause();
     }, kSingleTapDelayMs);
   }
@@ -1095,6 +1232,8 @@ export struct ShortVideoPage {
   private showSeekHint(forward: boolean): void {
     this.clearSeekHintTimer();
     this.seekHint = forward ? '快进 10 秒' : '快退 10 秒';
+    // 留痕：提示只显示 1 秒多，靠截图/布局抓取验证会漏（设备实测里就漏过）
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'seekHint %{public}s', this.seekHint);
     this.seekHintTimerId = setTimeout(() => {
       this.seekHintTimerId = -1;
       this.seekHint = '';
@@ -1126,12 +1265,14 @@ export struct ShortVideoPage {
       return;
     }
     let target: number = Math.max(0, this.positionMs + deltaMs);
-    if (this.durationMs > 0) {
-      target = Math.min(target, Math.max(0, this.durationMs - 500));
+    const total: number = this.effectiveDurationMs();
+    if (total > 0) {
+      target = Math.min(target, Math.max(0, total - 500));
     }
     if (this.softActive) {
       JellyfinNative.softPlaySeek(target / 1000);
       this.positionMs = target;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'seek(soft) -> %{public}dms', Math.round(target));
       return;
     }
     const player: media.AVPlayer | null = this.avPlayer;
@@ -1143,6 +1284,10 @@ export struct ShortVideoPage {
       state === 'completed') {
       player.seek(target);
       this.positionMs = target;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'seek -> %{public}dms state=%{public}s',
+        Math.round(target), state);
+    } else {
+      hilog.warn(LOG_DOMAIN, LOG_TAG, 'seek 被丢弃：state=%{public}s', state);
     }
   }
 
@@ -1423,11 +1568,33 @@ export struct ShortVideoPage {
 
   /** 进度百分比（0..1）；时长未知时为 0 */
   private progressRatio(): number {
-    if (this.durationMs <= 0) {
+    const total: number = this.effectiveDurationMs();
+    if (total <= 0) {
       return 0;
     }
-    const r: number = this.positionMs / this.durationMs;
+    const r: number = this.positionMs / total;
     return Math.min(1, Math.max(0, r));
+  }
+
+  /**
+   * 当前条目的**元数据时长**（毫秒）。
+   *
+   * 为什么需要它：设备实测（模拟器）发现部分流在 `prepared` 阶段
+   * `AVPlayer.duration` 仍是 0，于是进度条恒为 0、`已看 / 总时长` 读数根本不出现 ——
+   * 而这条信息服务端早就给了（`RunTimeTicks`，取数时已随 `Fields` 一并请求）。
+   */
+  private itemDurationMs(): number {
+    const item: MediaItem | null = this.currentItem();
+    if (item === null || item.runTimeTicks <= 0) {
+      return 0;
+    }
+    // Jellyfin 的 ticks 是 100ns：ms = ticks / 10000
+    return Math.floor(item.runTimeTicks / 10000);
+  }
+
+  /** 可用的总时长：播放器给的优先，拿不到就用元数据（见 itemDurationMs） */
+  private effectiveDurationMs(): number {
+    return this.durationMs > 0 ? this.durationMs : this.itemDurationMs();
   }
 
   /** 当前条目是否正在页内播放（决定封面是否让位给视频） */
@@ -1469,6 +1636,42 @@ export struct ShortVideoPage {
   }
 
   /**
+   * 顶部徽标文案：`清晰度设置 · 实际播放方式`。
+   *
+   * 例：`720p · 转码`（服务端转码生效）、`自动 · 直连`（服务端认为可直接播放）、
+   * `自动 · 直连串流`（DirectStream）。设置与实际不一致时（服务端没转码/转码失败回退）
+   * 一眼就能看出来，不必去翻日志。
+   */
+  private qualityBadge(): string {
+    const setting: string = ShortVideoPrefs.qualityShortLabel();
+    // 软解优先：页内软解接管后，"实际方式"就是本机解码 —— 不能还显示解析出来的
+    // 转码/直连（设备实测：软解接管后徽标仍写着"直连"，与画面来源不符）。
+    if (this.softActive) {
+      return `${setting} · 本机软解`;
+    }
+    let actual: string = '准备中';
+    if (this.playMethod === 'Transcode') {
+      actual = '转码';
+    } else if (this.playMethod === 'DirectStream') {
+      actual = '直连串流';
+    } else if (this.playMethod === 'DirectPlay') {
+      actual = '直连';
+    }
+    return `${setting} · ${actual}`;
+  }
+
+  /**
+   * 简介：去掉 HTML 标签再显示。
+   *
+   * 为什么必须处理：Jellyfin 的 `Overview` 常常带 HTML（实测某条 B 站视频的简介是
+   * `<a href="https://www.bilibili.com/video/BV...">BV...</a><br/><br/>-`），
+   * 直接渲染就会把标签当成正文显示出来 —— 设备实测截图里那一行非常刺眼。
+   */
+  private overviewText(item: MediaItem): string {
+    return stripMarkup(item.overview);
+  }
+
+  /**
    * 元信息行：`2023 · 8.1 分 · 1:32:10 · 剧情 / 悬疑`
    *
    * 用 `MediaItem.metaLine()` 的年/评分/时长，再补一段类型（短视频用户往往先看类型）。
@@ -1506,11 +1709,15 @@ export struct ShortVideoPage {
         placeholderIcon: 'movie',
         fillMode: true
       })
-      // 压暗：环境背景是"底"，不能比画面本身更抢眼
+      // 压暗：环境背景是"底"，不能比画面本身更抢眼。
+      //
+      // 用 `scrim`（深色主题 53% 黑）而不是 `scrimHeavy`（80%）：设备实测
+      // （截图像素采样）显示 80% 遮罩下留白区亮度只有 13/255 —— 看上去仍是一条黑边，
+      // 等于"环境背景"白做；53% 下同一区域的结构清晰可见，又不与画面抢注意力。
       Column()
         .width('100%')
         .height('100%')
-        .backgroundColor(this.colors().scrimHeavy)
+        .backgroundColor(this.colors().scrim)
     }
     .width('100%')
     .height('100%')
@@ -1536,6 +1743,16 @@ export struct ShortVideoPage {
             .fontColor(this.colors().onOverlayMuted)
             .padding({ left: 8, right: 8, top: 2, bottom: 2 })
             .backgroundColor(this.colors().overlayControl)
+            .borderRadius(ThemeConstants.BADGE_RADIUS)
+          // 清晰度 / 播放方式：用户选了「720p」到底生效没有，画面上只有这里能看出来
+          // （转码流是 HLS，走硬件解码；直连则可能是本机硬解或软解）
+          Text(this.qualityBadge())
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.isTranscodeStream()
+              ? this.colors().onBrand : this.colors().onOverlayMuted)
+            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+            .backgroundColor(this.isTranscodeStream()
+              ? this.colors().brandPrimary : this.colors().overlayControl)
             .borderRadius(ThemeConstants.BADGE_RADIUS)
         }
         .alignItems(VerticalAlign.Center)
@@ -1586,27 +1803,77 @@ export struct ShortVideoPage {
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 右侧操作栏的一个按钮（圆形图标 + 一行小字） */
+  /**
+   * 右侧操作栏的一个按钮（圆形图标 + 一行小字）。
+   *
+   * ⚠️ 参数只收**稳定标识**（`kind` = 按钮种类、`itemId` = 条目 id），
+   * 图标 / 文案 / 选中态一律在**函数体内**由页面状态算出来。
+   *
+   * 为什么必须这样（设备实测踩到的坑）：`@Builder` 的参数是**按值传递**的，
+   * 参数表达式只在调用那一刻求值一次 —— 若把 `this.isFavoriteId(item.id)` 这类
+   * **状态派生值**当参数传进来，"点收藏"之后服务端状态确实变了（toast 也弹了）
+   * 但按钮的图标与文字永远停在旧值（实测：点了收藏仍显示「收藏」）。
+   * 写在函数体里则每个属性都有自己的状态依赖，状态一变就重算。
+   */
   @Builder
-  RailButton(icon: Resource, label: string, selected: boolean, onTap: () => void) {
+  RailButton(kind: string, itemId: string, onTap: () => void) {
     Column({ space: 5 }) {
       Button({ type: ButtonType.Circle, stateEffect: false }) {
-        SymbolGlyph(icon)
+        SymbolGlyph(this.railIcon(kind, itemId))
           .fontSize(ThemeConstants.ICON_XLARGE)
-          .fontColor([selected ? this.colors().onBrand : this.colors().onOverlay])
+          .fontColor([this.railSelected(kind, itemId)
+            ? this.colors().onBrand : this.colors().onOverlay])
       }
       .width(46)
       .height(46)
       .padding(0)
-      .backgroundColor(selected ? this.colors().brandPrimary : this.colors().overlayControl)
+      .backgroundColor(this.railSelected(kind, itemId)
+        ? this.colors().brandPrimary : this.colors().overlayControl)
       .onClick(() => { onTap(); })
 
-      Text(label)
+      Text(this.railLabel(kind, itemId))
         .fontSize(ThemeConstants.LABEL_SMALL)
         .fontColor(this.colors().onOverlayMuted)
         .maxLines(1)
     }
     .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 操作栏按钮的图标（按种类 + 当前状态算） */
+  private railIcon(kind: string, itemId: string): Resource {
+    if (kind === 'favorite') {
+      return this.isFavoriteId(itemId) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star');
+    }
+    if (kind === 'played') {
+      return this.isPlayedId(itemId)
+        ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.checkmark');
+    }
+    if (kind === 'detail') {
+      return $r('sys.symbol.info_circle');
+    }
+    return $r('sys.symbol.arrow_2_circlepath');
+  }
+
+  /** 操作栏按钮的文案 */
+  private railLabel(kind: string, itemId: string): string {
+    if (kind === 'favorite') {
+      return this.isFavoriteId(itemId) ? '已收藏' : '收藏';
+    }
+    if (kind === 'played') {
+      return this.isPlayedId(itemId) ? '已看' : '标记已看';
+    }
+    return kind === 'detail' ? '详情' : '换一批';
+  }
+
+  /** 操作栏按钮是否处于选中态（收藏 / 已看 两类才有） */
+  private railSelected(kind: string, itemId: string): boolean {
+    if (kind === 'favorite') {
+      return this.isFavoriteId(itemId);
+    }
+    if (kind === 'played') {
+      return this.isPlayedId(itemId);
+    }
+    return false;
   }
 
   /**
@@ -1646,7 +1913,7 @@ export struct ShortVideoPage {
       }
       .width('100%')
       .height('100%')
-      .hitTestBehavior(HitTestMode.None)
+      .hitTestBehavior(HitTestMode.Transparent)
 
       // 底部渐变：标题/元信息的可读性底（与播放页同一套 scrim 令牌）
       Column() {
@@ -1661,7 +1928,7 @@ export struct ShortVideoPage {
       }
       .width('100%')
       .height('100%')
-      .hitTestBehavior(HitTestMode.None)
+      .hitTestBehavior(HitTestMode.Transparent)
 
       // 手势层：单击暂停/继续、双击两侧 ±10 秒。
       //
@@ -1744,8 +2011,8 @@ export struct ShortVideoPage {
                 .width('100%')
             }
 
-            if (item.overview.length > 0) {
-              Text(item.overview)
+            if (this.overviewText(item).length > 0) {
+              Text(this.overviewText(item))
                 .fontSize(ThemeConstants.META_SMALL)
                 .fontColor(this.colors().onOverlayMuted)
                 .maxLines(2)
@@ -1757,24 +2024,12 @@ export struct ShortVideoPage {
           .layoutWeight(1)
 
           // 操作栏：收藏 / 已看 / 详情 / 换一批
+          // （只传种类与条目 id，状态在 RailButton 内部读 —— 见该 Builder 的说明）
           Column({ space: 14 }) {
-            this.RailButton(
-              this.isFavoriteId(item.id) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'),
-              this.isFavoriteId(item.id) ? '已收藏' : '收藏',
-              this.isFavoriteId(item.id),
-              () => { this.toggleFavorite(item); })
-
-            this.RailButton(
-              this.isPlayedId(item.id) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.checkmark'),
-              this.isPlayedId(item.id) ? '已看' : '标记已看',
-              this.isPlayedId(item.id),
-              () => { this.togglePlayed(item); })
-
-            this.RailButton($r('sys.symbol.info_circle'), '详情', false,
-              () => { this.openDetail(item); })
-
-            this.RailButton($r('sys.symbol.arrow_2_circlepath'), '换一批', false,
-              () => { this.loadFeed(); })
+            this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
+            this.RailButton('played', item.id, () => { this.togglePlayed(item); })
+            this.RailButton('detail', item.id, () => { this.openDetail(item); })
+            this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
           }
           .width(kRailWidthVp - 24)
           .alignItems(HorizontalAlign.Center)
@@ -1800,10 +2055,10 @@ export struct ShortVideoPage {
   @Builder
   BottomProgress() {
     Column() {
-      if (this.durationMs > 0) {
+      if (this.effectiveDurationMs() > 0) {
         Row() {
           Blank()
-          Text(`${formatSeconds(Math.floor(this.positionMs / 1000))} / ${formatSeconds(Math.floor(this.durationMs / 1000))}`)
+          Text(`${formatSeconds(Math.floor(this.positionMs / 1000))} / ${formatSeconds(Math.floor(this.effectiveDurationMs() / 1000))}`)
             .fontSize(ThemeConstants.LABEL_SMALL)
             .fontColor(this.colors().onOverlayMuted)
         }
@@ -1819,7 +2074,10 @@ export struct ShortVideoPage {
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.End)
-    .hitTestBehavior(HitTestMode.None)
+    // `Transparent` 而不是 `None`：设备实测里 `None` 的浮层**会把落在它身上的点按吃掉**
+    // （暂停浮层挡住画面中部时，"再点一下继续"完全没反应）。
+    // `Transparent` 的语义是"自身与子节点响应，且不阻塞兄弟节点"，正是浮层需要的。
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 中央"正在准备"：取流/建播放器期间给一个明确的进度感 */
@@ -1837,7 +2095,7 @@ export struct ShortVideoPage {
     .padding({ left: 20, right: 20, top: 16, bottom: 16 })
     .backgroundColor(this.colors().overlayControlStrong)
     .borderRadius(ThemeConstants.CARD_RADIUS)
-    .hitTestBehavior(HitTestMode.None)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 暂停提示：中央一个大播放图标（点画面即继续） */
@@ -1863,7 +2121,7 @@ export struct ShortVideoPage {
         .backgroundColor(this.colors().overlayControlStrong)
         .borderRadius(ThemeConstants.BADGE_RADIUS)
     }
-    .hitTestBehavior(HitTestMode.None)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 双击跳转的瞬时提示 */
@@ -1882,7 +2140,7 @@ export struct ShortVideoPage {
     .backgroundColor(this.colors().overlayControlStrong)
     .borderRadius(26)
     .alignItems(VerticalAlign.Center)
-    .hitTestBehavior(HitTestMode.None)
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 本条播不了：如实说明 + 去播放页 + 自动跳过倒计时 */
