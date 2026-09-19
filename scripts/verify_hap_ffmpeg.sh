@@ -10,7 +10,7 @@
 # 检查内容：
 #   1) 期望的每个 ABI 下都有 libjellyfin_native.so；
 #   2) 它的 DT_NEEDED 里所有 libav*/libsw* 依赖，都能在同一个 ABI 目录里找到同名文件
-#      （动态链接器按 DT_NEEDED 的**精确名字**查找，例如 libavcodec.so.61，
+#      （动态链接器按 DT_NEEDED 的**精确名字**查找，例如 libavcodec.so.62，
 #        少一个名字就等于运行期加载失败）；
 #   3) 每个 libav*/libsw* 的 ELF 机器字与该 ABI 相符（arm64-v8a ⇒ AArch64，x86_64 ⇒ X86-64）；
 #   4) 不该出现的 ABI 目录不存在（发布用的 arm64 精简包不得夹带 x86_64 载荷）。

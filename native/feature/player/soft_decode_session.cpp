@@ -112,21 +112,63 @@ int64_t BridgeSeek(void *opaque, int64_t offset, int whence)
  * dav1d（BSD-2-Clause）是独立的多线程 AV1 解码器，也是服务端与桌面播放器实际在用的那个；
  * 交叉编译与部署见 `scripts/build_dav1d_ohos.sh`。
  */
-const AVCodec *PickVideoDecoder(AVCodecID id, std::string &note)
+struct DecoderChoice {
+    const AVCodec *codec = nullptr;
+    /** 选择理由（进日志，便于在设备上确认"到底谁在解"） */
+    std::string note;
+    /** 是否为 OpenHarmony AVCodec（ohcodec）解码器：打开时需要 allow_sw，见 openUrl */
+    bool ohCodec = false;
+};
+
+/**
+ * 选择视频解码器。优先级：
+ *  ① **H.264 / HEVC → `h264_oh` / `hevc_oh`**（OpenHarmony AVCodec，设备侧硬解）
+ *     —— FFmpeg 8.0 起上游提供（`--enable-ohcodec`，走 OH_AVCodec NDK）。
+ *     本机实测：libavcodec 会 DT_NEEDED `libnative_media_vdec.so` 等三个系统库。
+ *     设备上没有该编码的硬件编解码器时，ohdec 会按 `allow_sw=1` 退回**系统软件**编解码器
+ *     （见 openUrl 的选项），因此模拟器/老设备也能走通，只是不算硬解。
+ *  ② **AV1 → `libdav1d`**：FFmpeg 自带的 `av1` 解码器在没有硬件加速的构建里恒返回
+ *     ENOSYS、一帧都解不出来（根因见下方长注释与 README），必须用 dav1d。
+ *     （上游目前**没有** AV1 的 ohcodec 解码器：ohcodec.h 只映射 H.264/HEVC。）
+ *  ③ 其余编码 → FFmpeg 自带解码器（如 vp9 / mpeg4 / wmv3）。
+ */
+DecoderChoice PickVideoDecoder(AVCodecID id)
 {
+    DecoderChoice choice;
+    if (id == AV_CODEC_ID_H264 || id == AV_CODEC_ID_HEVC) {
+        // ⚠ 名字容易记错（本工程实测踩过）：configure 里的**组件名**是 `h264_oh` / `hevc_oh`，
+        // 但运行时 FFCodec 的 `.p.name` 是 `h264_ohcodec` / `hevc_ohcodec`
+        // （见上游 libavcodec/ohdec.c 的 DECLARE_OHCODEC_VDEC 宏：`.p.name = #short_name "_ohcodec"`）。
+        // `avcodec_find_decoder_by_name()` 匹配的是后者 —— 用组件名会返回 nullptr，
+        // 于是"编译进了硬解却永远选不到"，且表面上一切正常（只是悄悄退回自带解码器）。
+        const char *ohName = (id == AV_CODEC_ID_H264) ? "h264_ohcodec" : "hevc_ohcodec";
+        const AVCodec *oh = avcodec_find_decoder_by_name(ohName);
+        if (oh != nullptr) {
+            choice.codec = oh;
+            choice.ohCodec = true;
+            choice.note = std::string(ohName) + "（OpenHarmony AVCodec，设备硬解）";
+            return choice;
+        }
+        choice.note = "本构建没有 ohcodec 解码器（需 FFmpeg 8.0 + --enable-ohcodec）";
+    }
     if (id == AV_CODEC_ID_AV1) {
         const AVCodec *dav1d = avcodec_find_decoder_by_name("libdav1d");
         if (dav1d != nullptr) {
-            note = "AV1 → libdav1d";
-            return dav1d;
+            choice.codec = dav1d;
+            choice.note += (choice.note.empty() ? "" : "；") + std::string("AV1 → libdav1d");
+            return choice;
         }
-        note = "AV1 → 自带 av1 解码器（本构建没有 libdav1d，很可能解不出帧）";
+        choice.note += (choice.note.empty() ? "" : "；") +
+                       std::string("AV1 → 自带 av1 解码器（本构建没有 libdav1d，很可能解不出帧）");
     }
     const AVCodec *fallback = avcodec_find_decoder(id);
-    if (fallback != nullptr && note.empty()) {
-        note = fallback->name;
+    if (fallback != nullptr) {
+        if (choice.note.empty()) {
+            choice.note = fallback->name;
+        }
     }
-    return fallback;
+    choice.codec = fallback;
+    return choice;
 }
 
 } // namespace
@@ -271,12 +313,14 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
     impl_->width = par->width;
     impl_->height = par->height;
 
-    const AVCodec *codec = PickVideoDecoder(par->codec_id, impl_->decoderNote);
+    DecoderChoice choice = PickVideoDecoder(par->codec_id);
+    const AVCodec *codec = choice.codec;
     if (codec == nullptr) {
         error = "本构建不含该视频解码器：" + impl_->codec;
         close();
         return false;
     }
+    impl_->decoderNote = choice.note;
     impl_->decoderName = codec->name;
     impl_->dec = avcodec_alloc_context3(codec);
     if (impl_->dec == nullptr || avcodec_parameters_to_context(impl_->dec, par) < 0) {
@@ -292,8 +336,43 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
     // 能拿到接近线性的多核加速）。两者都必须在 `avcodec_open2()` **之前**设置。
     impl_->dec->thread_count = 0;
     impl_->dec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    if (avcodec_open2(impl_->dec, codec, nullptr) < 0) {
-        error = "打开视频解码器失败：" + impl_->codec;
+
+    // ── OpenHarmony 解码器（ohcodec）需要 allow_sw ─────────────────────────
+    // `h264_oh` / `hevc_oh` 默认**只找硬件**编解码器（OH_AVCodec_GetCapabilityByCategory
+    // (mime, false, HARDWARE)），找不到就直接报 "Failed to get hardware codec" 打不开。
+    // 打开 allow_sw 后，设备没有硬解时会退回系统的**软件**编解码器 ——
+    // 这样模拟器与不带该编码硬解的设备也能走通（性能不如硬解，但可用性优先）。
+    AVDictionary *openOpts = nullptr;
+    if (choice.ohCodec) {
+        av_dict_set(&openOpts, "allow_sw", "1", 0);
+    }
+    int openRc = avcodec_open2(impl_->dec, codec, &openOpts);
+    const int firstOpenRc = openRc;
+    av_dict_free(&openOpts);
+    if (openRc < 0 && choice.ohCodec) {
+        // ohcodec 打不开（该设备连系统软编解码器都没有、或系统服务不可用）：
+        // 退回 FFmpeg 自带解码器，别让播放直接失败。
+        avcodec_free_context(&impl_->dec);
+        const AVCodec *fallback = avcodec_find_decoder(par->codec_id);
+        if (fallback != nullptr) {
+            impl_->dec = avcodec_alloc_context3(fallback);
+            if (impl_->dec != nullptr && avcodec_parameters_to_context(impl_->dec, par) >= 0) {
+                impl_->dec->thread_count = 0;
+                impl_->dec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+                openRc = avcodec_open2(impl_->dec, fallback, nullptr);
+                if (openRc >= 0) {
+                    impl_->decoderName = fallback->name;
+                    // 带上**原始失败原因**（FFmpeg 的错误串）：否则设备上只能看到"打开失败"，
+                    // 分不清是"没有该编码的系统编解码器"还是"bitstream filter 缺失"。
+                    // FFmpeg 更详细的日志由 player_log.cpp 的 av_log 桥转发到 hilog。
+                    impl_->decoderNote = std::string("ohcodec 打开失败（") + AvErrorStr(firstOpenRc) +
+                                         "），已退回 " + std::string(fallback->name);
+                }
+            }
+        }
+    }
+    if (openRc < 0) {
+        error = "打开视频解码器失败：" + impl_->codec + "（" + impl_->decoderName + "）";
         close();
         return false;
     }

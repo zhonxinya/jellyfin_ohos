@@ -15,11 +15,15 @@
 
 ## 依赖
 
-1. **FFmpeg 7.1 共享库**（LGPL-2.1+，动态链接）：
+1. **FFmpeg 8.0 共享库**（LGPL-2.1+，动态链接）：
    `libavformat` `libavcodec` `libavutil` `libswscale` `libswresample`
    预编译产物**随仓库提交**：`native/app/entry/libs/{x86_64,arm64-v8a}/`（克隆后直接可用）
    需要刷新时的交叉编译脚本：`scripts/build_ffmpeg_ohos.sh`（x86_64 / arm64-v8a）
    公开头文件：`native/third_party/ffmpeg/include`；许可与分发要求见 `native/third_party/NOTICE`
+   **为什么是 8.0**：鸿蒙编解码（OH_AVCodec）支持 `--enable-ohcodec` 是 8.0 才有的
+   （7.1 没有），它会带来 `h264_ohcodec` / `hevc_ohcodec` 两个解码器，
+   并让 `libavcodec.so` 依赖 `libnative_media_vdec/codecbase/core.so` ——
+   详见 `docs/ffmpeg-8-ohcodec.md`
 2. **dav1d 1.5.1 共享库**（BSD-2-Clause，动态链接）——**AV1 软解靠它**：
    `libdav1d.so`（`libavcodec.so` 的 `DT_NEEDED` 依赖 `libdav1d.so.7`）
    源码内置：`native/third_party/dav1d/source`；交叉编译脚本：`scripts/build_dav1d_ohos.sh`
@@ -262,6 +266,9 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   `avcodec_send_packet` 对**每一个包**返回 `-38 Function not implemented`，
   600 个包 → **0 帧**。
 
+  > 该逻辑在 FFmpeg **8.0**（本工程当前版本）里仍然存在，上游 master 亦然：
+  > 升级 FFmpeg 不会顺便修好 AV1，**dav1d 仍是 AV1 软解的唯一选择**。
+
   修法：内置并交叉编译 **dav1d**（`scripts/build_dav1d_ohos.sh`），FFmpeg 以
   `--enable-libdav1d` 重建，`SoftDecodeSession` 对 AV1 **显式优先**
   `avcodec_find_decoder_by_name("libdav1d")`（见 `PickVideoDecoder()`）。
@@ -308,5 +315,22 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   本模块读不了 —— 因此宿主要在"转码流播放失败"时**不要**回退软解，而应先改走直连
   （去掉 `DeviceProfile` 重新请求），直连失败后再交给软解。本工程的做法见
   `docs/av1-and-transcoding.md` 第 5.2 节。
+- **鸿蒙编解码器（ohcodec）的三个必知细节**（都是本轮实测踩出来/验证过的）
+  1. **运行时名与组件名不一样**：configure 里是 `h264_oh` / `hevc_oh`，但
+     `avcodec_find_decoder_by_name()` 要查 **`h264_ohcodec` / `hevc_ohcodec`**
+     （上游 `ohdec.c` 的 `DECLARE_OHCODEC_VDEC` 宏把 `.p.name` 拼成 `#short_name "_ohcodec"`）。
+     用组件名查找只会得到 nullptr，而且**表面上一切正常**（悄悄退回自带解码器）。
+  2. **必须打开 `allow_sw=1`**：`*_ohcodec` 默认只找**硬件**编解码器，找不到就直接打不开
+     （`Failed to get hardware codec`）。打开后设备没有硬解时会退回系统软编解码器。
+  3. **必须启用 `h264_mp4toannexb` / `hevc_mp4toannexb` 两个 bitstream filter**：
+     ohdec 的 FFCodec 里 `.bsfs = "..."`，MP4 的长度前缀格式要转成 Annex-B 才能交给
+     `OH_AVCodec`。本工程 FFmpeg 是 `--disable-bsfs` 构建，所以这两个必须单独 `--enable-bsf=`。
+  输出有 **buffer 模式**（默认，NV12 普通 CPU 帧，现有 `swscale → RGBA → EGL` 链不用改）
+  与 **surface 模式**（`AV_HWDEVICE_TYPE_OHCODEC` + native_window，零拷贝，尚未接入）。
+- **FFmpeg 的日志必须桥接到宿主日志**（`player_log.cpp` 里装 `av_log_set_callback`）：
+  否则"解码器打不开"这种故障，FFmpeg 只会把原因写进自己的日志 —— 设备上只能看到
+  "打开失败"四个字，分不清是"设备没有该编码的编解码器"还是"bsf 缺失"。
+  装上桥之后日志长这样（本轮就是靠它定位到模拟器没有 HEVC 的鸿蒙编解码器）：
+  `ffmpeg[warn] Failed to get hardware codec video/hevc, try software backend`。
 - **许可**：FFmpeg 为 LGPL-2.1+，dav1d 为 BSD-2-Clause，均必须动态链接并随包提供许可与
   源码获取方式（见 `native/third_party/NOTICE`）。

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 #
-# 从**仓库内的 FFmpeg 源码**为 HarmonyOS/OpenHarmony 交叉编译 FFmpeg（软解码用）。
+# 从**仓库内的 FFmpeg 源码**为 HarmonyOS/OpenHarmony 交叉编译 FFmpeg（解码用）。
 #
-# 源码位置：native/third_party/ffmpeg/source/ （随仓库提交的 FFmpeg 7.1 原始源码）
+# 源码位置：native/third_party/ffmpeg/source/ （随仓库提交的 FFmpeg 8.0 原始源码）
+#
+# **为什么是 8.0**：鸿蒙**硬解**支持（`--enable-ohcodec`，即 libavcodec/ohdec.c /
+# libavcodec/ohcodec.c，走 OpenHarmony 的 AVCodec NDK）是上游在 **FFmpeg 8.0** 才加入的；
+# 7.1/7.0 里没有这套东西（本仓库此前内置的正是 7.1）。
+# 启用后 libavcodec 会多出 `h264_oh` / `hevc_oh` 两个解码器，并 DT_NEEDED 三个系统库：
+# `libnative_media_vdec.so` / `libnative_media_codecbase.so` / `libnative_media_core.so`。
+# 播放侧对 H.264/HEVC 优先选它们（见 native/feature/player/soft_decode_session.cpp）。
 # 产物位置（均随仓库提交，克隆后无需重新编译即可构建）：
 #   native/app/entry/libs/<abi>/*.so            共享库（x86_64 + arm64-v8a，各 5 个库 × 2 个名字）
 #   native/third_party/ffmpeg/include/          公开头文件
@@ -11,7 +18,8 @@
 # 设计要点：
 # - **共享库**（LGPL-2.1+ 要求动态链接；同时避免与 GPL 组件冲突）
 # - 只保留解码所需组件：libavformat / libavcodec / libavutil / libswscale / libswresample
-#   关闭 encoders / muxers / filters / avdevice / postproc / programs / doc（显著减小体积）
+#   关闭 encoders / muxers / filters / avdevice / programs / doc（显著减小体积）
+#   注：`--disable-postproc` 在 8.0 已不存在（libpostproc 被上游移除），脚本里已去掉
 # - **--disable-network**：不使用 FFmpeg 自带的 http/tls 协议栈。
 #   取流由本工程 `native/core` 的 HTTP 客户端（含 mbedTLS，支持 https）完成，
 #   再通过自定义 AVIOContext 喂给 libavformat —— 这样 https 与 Jellyfin 鉴权头都能复用既有实现。
@@ -38,11 +46,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORK_ROOT="${FFMPEG_WORK_ROOT:-$(dirname "$REPO_ROOT")/_ffmpeg-build}"
 OUT_ROOT="${2:-${FFMPEG_OUT_ROOT:-$WORK_ROOT/out}}"
 
-FFMPEG_VERSION="7.1"
+FFMPEG_VERSION="8.0"
 # AV1 软解依赖的 dav1d（源码同样内置，见 native/third_party/dav1d/）
 DAV1D_VERSION="1.5.1"
-# 上游发行包校验值，用于溯源（本仓库直接内置其解压后的源码树）
-FFMPEG_SRC_TARBALL_SHA256="40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6"
+# 上游源码校验值，用于溯源（本仓库直接内置其解压后的源码树）。
+# 来源：上游 n8.0 标签的源码归档 https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n8.0.tar.gz
+#       sha256 = dd4030dbfdc34d9ff255a116bdd1caade42500ac2981efa27f8b151cc54c7b9e
+#       （官方发行包 ffmpeg-8.0.tar.xz 为 11384428 字节；两者库源码等价，
+#         发行包多一个 VERSION 文件，故脚本的版本校验同时接受 RELEASE 与 VERSION，
+#         版本号本身由 RELEASE → libavutil/ffversion.h 决定。）
+FFMPEG_SRC_TARBALL_SHA256="dd4030dbfdc34d9ff255a116bdd1caade42500ac2981efa27f8b151cc54c7b9e"
 SRC_DIR="$REPO_ROOT/native/third_party/ffmpeg/source"
 
 # ── 定位 HarmonyOS 命令行工具链 ───────────────────────────────────────────────
@@ -92,11 +105,15 @@ die() { echo "错误：$*" >&2; exit 1; }
 # 因此检查关键文件是否齐全（上游发行包 sha256 见上方常量，用于溯源）。
 [ -d "$SRC_DIR" ] || die "找不到内置 FFmpeg 源码：$SRC_DIR"
 [ -x "$SRC_DIR/configure" ] || die "FFmpeg 源码树不完整：缺少可执行的 configure（$SRC_DIR）"
-for required in Makefile VERSION libavcodec/allcodecs.c libavformat/allformats.c libavutil/avutil.h; do
+# 版本文件：官方发行包是 VERSION，上游 git 标签归档是 RELEASE（二者内容都是 "8.0"）
+for required in Makefile libavcodec/allcodecs.c libavformat/allformats.c libavutil/avutil.h; do
     [ -f "$SRC_DIR/$required" ] || die "FFmpeg 源码树不完整：缺少 $required"
 done
-[ "$(cat "$SRC_DIR/VERSION")" = "$FFMPEG_VERSION" ] \
-    || die "内置 FFmpeg 版本与预期不符：期望 $FFMPEG_VERSION，实际 $(cat "$SRC_DIR/VERSION")"
+[ -f "$SRC_DIR/VERSION" ] || [ -f "$SRC_DIR/RELEASE" ] \
+    || die "FFmpeg 源码树不完整：缺少 VERSION/RELEASE（无法确定版本）"
+[ "$(cat "$SRC_DIR/VERSION" 2>/dev/null)" = "$FFMPEG_VERSION" ] \
+    || [ "$(cat "$SRC_DIR/RELEASE" 2>/dev/null)" = "$FFMPEG_VERSION" ] \
+    || die "内置 FFmpeg 版本与预期不符：期望 $FFMPEG_VERSION，实际 VERSION=$(cat "$SRC_DIR/VERSION" 2>/dev/null) RELEASE=$(cat "$SRC_DIR/RELEASE" 2>/dev/null)"
 echo "源码：$SRC_DIR（FFmpeg $FFMPEG_VERSION，$(find "$SRC_DIR" -type f | wc -l) 个文件）"
 
 # ── 是否需要重建 ──────────────────────────────────────────────────────────────
@@ -232,7 +249,13 @@ EOF
     # **av1 与 libdav1d 两个都留着**：客户端优先用 libdav1d（AV1 软解只有它能出帧，见
     # scripts/build_dav1d_ohos.sh 顶部说明），自带 av1 解码器保留给"有硬件加速的构建"，
     # 并且让 `avcodec_find_decoder` 在 dav1d 缺席时仍有回退对象（会明确报错，而不是静默黑屏）。
-    local decoders="h264,hevc,mpeg2video,mpeg4,msmpeg4v3,vc1,wmv3,vp8,vp9,av1,libdav1d,theora,flv,mjpeg,prores,\
+    # h264_oh / hevc_oh（运行时名 h264_ohcodec / hevc_ohcodec）：走 OpenHarmony AVCodec
+    # （设备硬解），见文件头说明。
+    # 它们**依赖 `h264_mp4toannexb` / `hevc_mp4toannexb` 这两个 bitstream filter**
+    # （ohdec 的 FFCodec 里 `.bsfs = "h264_mp4toannexb"`：MP4 的 avcC/hevC 长度前缀格式
+    #   必须转成 Annex-B 才能交给 OH_AVCodec）。因此 configure 里虽然 `--disable-bsfs`，
+    # 但必须把这两个单独打开 —— 否则 select 到 ohcodec 也会在解码时失败。
+    local decoders="h264,hevc,h264_oh,hevc_oh,mpeg2video,mpeg4,msmpeg4v3,vc1,wmv3,vp8,vp9,av1,libdav1d,theora,flv,mjpeg,prores,\
 aac,aac_latm,ac3,eac3,dca,truehd,mlp,flac,mp3,opus,vorbis,alac,pcm_s16le,pcm_s24le,pcm_bluray,pcm_dvd,pcm_f32le,\
 subrip,ass,ssa,dvd_subtitle,hdmv_pgs_subtitle,webvtt,text"
     local demuxers="matroska,mov,mp4,mpegts,mpegps,avi,flv,asf,ogg,wav,flac,mp3,webm_dash_manifest,\
@@ -256,6 +279,7 @@ hls,concat,image2,srt,ass,webvtt_raw,sup,pgs"
         --extra-ldflags="--sysroot=$SYSROOT -L$sysroot_lib -Wl,-rpath-link,$sysroot_lib" \
         --pkg-config="$SCRIPT_DIR/pkg-config-shim.sh" \
         --enable-libdav1d \
+        --enable-ohcodec \
         --enable-shared \
         --disable-static \
         --enable-pic \
@@ -264,11 +288,11 @@ hls,concat,image2,srt,ass,webvtt_raw,sup,pgs"
         --disable-doc \
         --disable-network \
         --disable-avdevice \
-        --disable-postproc \
         --disable-avfilter \
         --disable-encoders \
         --disable-muxers \
         --disable-bsfs \
+        --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
         --disable-filters \
         --disable-devices \
         --disable-hwaccels \
@@ -306,6 +330,13 @@ hls,concat,image2,srt,ass,webvtt_raw,sup,pgs"
     #   third_party/ffmpeg/build-stamp-<abi>.txt → 指纹（随仓库提交；下次构建据此跳过重编译）
     if [ "${FFMPEG_SKIP_DEPLOY:-0}" != "1" ]; then
         mkdir -p "$libs_dir" "$inc_dir"
+        # 先清掉上一次部署的 FFmpeg 库：升级 FFmpeg 时 SONAME 会变
+        # （7.1 → 8.0：libavcodec.so.61 → .62、libavutil.so.59 → .60 …），
+        # 不清的话旧库会一直躺在 libs/<abi>/ 里被打进 HAP（体积白涨、且永远不会被加载）。
+        # 注意只删 FFmpeg 自己的库：libdav1d.so* 由 scripts/build_dav1d_ohos.sh 管，别动。
+        rm -f "$libs_dir"/libavformat.so* "$libs_dir"/libavcodec.so* \
+              "$libs_dir"/libavutil.so* "$libs_dir"/libswscale.so* \
+              "$libs_dir"/libswresample.so*
         # -L 跟随符号链接，落盘为真实文件；只部署**两个**名字：
         #   libX.so        → 构建期链接用（CMake 的 IMPORTED_LOCATION 指向它）
         #   libX.so.<major> → **运行时 SONAME**，动态链接器按 DT_NEEDED 里的这个名字查找

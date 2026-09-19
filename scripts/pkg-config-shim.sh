@@ -36,14 +36,31 @@ for arg in "$@"; do
         --atleast-version=*|--atleast-pkgconfig-version=*) atleast="${arg#*=}" ;;
         --exact-version=*) exact="${arg#*=}" ;;
         --*) ;;                       # 其它开关一律忽略
-        # FFmpeg 的 `require_pkg_config libdav1d "dav1d >= 0.5.0" ...` 会把版本约束
-        # 拆成三个参数（dav1d / >= / 0.5.0）传进来，这里按 pkg-config 的语法吸收掉
+        # 版本约束有两种传法，都要吸收掉（case 按顺序匹配，所以通配要排在最后）：
+        #   ① FFmpeg 7.1：`require_pkg_config libdav1d "dav1d >= 0.5.0" ...` 经 shell 拆成
+        #      三个参数（dav1d / >= / 0.5.0）→ 先记下比较符，下一个参数作为版本；
+        #   ② FFmpeg 8.0：`test_cmd $pkg_config --exists --print-errors "$pkg_version"`
+        #      **加引号**，整串 "dav1d >= 0.5.0" 作为**一个**参数进来 → 直接拆成三段。
         ">="|"="|">"|"<="|"<") pending_op="$arg" ;;
+        *[\<\>\=]*)
+            spec_name="$(printf '%s' "$arg" | awk '{print $1}')"
+            spec_op="$(printf '%s' "$arg" | awk '{print $2}')"
+            spec_ver="$(printf '%s' "$arg" | awk '{print $3}')"
+            if [ -n "$spec_name" ] && [ -n "$spec_op" ] && [ -n "$spec_ver" ]; then
+                packages+=("$spec_name")
+                case "$spec_op" in
+                    ">="|"=") atleast="$spec_ver" ;;
+                    *) ;;              # > / < / <= 极少用；不阻断配置，交给编译期验证
+                esac
+            else
+                packages+=("$arg")
+            fi
+            ;;
         *)
             if [ -n "$pending_op" ]; then
                 case "$pending_op" in
                     ">="|"=") atleast="$arg" ;;
-                    ">"|"<"|"<=") ;;   # 极少用；不阻断配置，交给编译期验证
+                    ">"|"<"|"<=") ;;   # 同上：不阻断配置
                 esac
                 pending_op=""
             else

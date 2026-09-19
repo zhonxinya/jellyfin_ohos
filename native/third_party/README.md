@@ -1,7 +1,7 @@
 # Third-party native dependencies
 
 This tree vendors **nlohmann/json** (header-only) for Jellyfin API JSON parsing,
-**mbedTLS** for `https://` transport, **FFmpeg 7.1** for software video decode, and
+**mbedTLS** for `https://` transport, **FFmpeg 8.0** for software video decode, and
 **dav1d 1.5.1** for AV1 software decode (linked into FFmpeg as the `libdav1d` decoder).
 
 ## HTTPS (mbedTLS)
@@ -25,14 +25,14 @@ Fetch/update mbedTLS:
 
 ## FFmpeg (source vendored, compiled into the app)
 
-FFmpeg **7.1** is vendored **as source** and compiled into the app; software decode is a working
+FFmpeg **8.0** is vendored **as source** and compiled into the app; software decode is a working
 playback backend (used as the fallback when the system `AVPlayer` cannot hardware-decode the stream).
 
 Layout:
 
 | Path | Contents | In git? |
 |---|---|---|
-| `native/third_party/ffmpeg/source/` | Pristine upstream FFmpeg 7.1 source tree (8540 files, ~101 MB) | yes |
+| `native/third_party/ffmpeg/source/` | Pristine upstream FFmpeg 8.0 source tree (9912 files, ~108 MB; 上游 n8.0 标签归档，版本在 `RELEASE`) | yes |
 | `native/third_party/ffmpeg/include/` | Public headers consumed by this project | yes |
 | `native/app/entry/libs/arm64-v8a/` | Runtime `.so` for **real HarmonyOS phones** | yes (prebuilt) |
 | `native/app/entry/libs/x86_64/` | Runtime `.so` for the DevEco emulator | yes (prebuilt) |
@@ -124,18 +124,26 @@ this project's own HTTP client (mbedTLS + Jellyfin auth) via a custom `AVIOConte
 **exact** name recorded at link time, not by the unversioned alias. Verified with `readelf -d`:
 
 ```
-libavformat.so   SONAME libavformat.so.61   NEEDED libavcodec.so.61, libavutil.so.59, libz.so, libc.so
-libavcodec.so    SONAME libavcodec.so.61    NEEDED libswresample.so.5, libavutil.so.59, libz.so, libc.so
-libavutil.so     SONAME libavutil.so.59     NEEDED libc.so
-libswscale.so    SONAME libswscale.so.8     NEEDED libavutil.so.59, libc.so
-libswresample.so SONAME libswresample.so.5  NEEDED libavutil.so.59, libc.so
+# FFmpeg 8.0（7.1 → 8.0 升级后 SONAME 全部进位）
+libavformat.so   SONAME libavformat.so.62   NEEDED libavcodec.so.62, libavutil.so.60, libz.so, libc.so
+libavcodec.so    SONAME libavcodec.so.62    NEEDED libswresample.so.6, libavutil.so.60, libdav1d.so.7,
+                                                   libnative_media_vdec.so, libnative_media_codecbase.so,
+                                                   libnative_media_core.so, libz.so, libc.so
+libavutil.so     SONAME libavutil.so.60     NEEDED libc.so
+libswscale.so    SONAME libswscale.so.9     NEEDED libavutil.so.60, libc.so
+libswresample.so SONAME libswresample.so.6  NEEDED libavutil.so.60, libc.so
 ```
 
-So both `libavcodec.so` (for `-lavcodec`) and `libavcodec.so.61` (for the loader) must be real
+`libavcodec.so` 里那几个 `libnative_media_*.so` 就是**鸿蒙编解码框架**（OH_AVCodec）——
+它们来自 `--enable-ohcodec`，是"FFmpeg 能走设备硬解"的标志；详细说明见
+`docs/ffmpeg-8-ohcodec.md`。**升级 FFmpeg 时部署脚本会先删掉旧的 `libav*.so.*`**，
+避免新旧两套 SONAME 同时躺在 `libs/<abi>/` 里被打进 HAP。
+
+So both `libavcodec.so` (for `-lavcodec`) and `libavcodec.so.62` (for the loader) must be real
 files: **HAP packaging does not preserve symlinks**, and a symlink would be dropped or
 dereferenced, breaking the load at runtime.
 
-The third copy FFmpeg installs — the full version, `libavcodec.so.61.19.100` — is **not**
+The third copy FFmpeg installs — the full version, e.g. `libavcodec.so.62.x.y` — is **not**
 referenced by any `DT_NEEDED`, so the build script deliberately does not deploy it: shipping it
 would put a second, identical-size copy of every library into every HAP (28.9 MB across both
 ABIs). If you find such files in `libs/<abi>/` from an older build, they can be deleted safely.
@@ -156,8 +164,8 @@ each against the packaged `libs/arm64-v8a/` splits cleanly:
 
 | Resolved from | Libraries |
 |---|---|
-| Inside the HAP | `libavformat.so.61`, `libavcodec.so.61`, `libavutil.so.59`, `libswscale.so.8`, `libswresample.so.5`, `libdav1d.so.7`, `libc++_shared.so` |
-| HarmonyOS system (any device) | `libace_napi.z.so`, `libace_ndk.z.so`, `libhilog_ndk.z.so`, `libdeviceinfo_ndk.z.so`, `libEGL.so`, `libGLESv3.so`, `libnative_window.so`, `libnative_image.so`, `libc.so` |
+| Inside the HAP | `libavformat.so.62`, `libavcodec.so.62`, `libavutil.so.60`, `libswscale.so.9`, `libswresample.so.6`, `libdav1d.so.7`, `libc++_shared.so` |
+| HarmonyOS system (any device) | `libace_napi.z.so`, `libace_ndk.z.so`, `libhilog_ndk.z.so`, `libdeviceinfo_ndk.z.so`, `libEGL.so`, `libGLESv3.so`, `libnative_window.so`, `libnative_image.so`, `libnative_media_vdec.so`, `libnative_media_codecbase.so`, `libnative_media_core.so`, `libc.so` |
 
 Every FFmpeg dependency resolves from within the package, so a phone install carries its own
 FFmpeg and does not rely on anything FFmpeg-related being present on the system.
