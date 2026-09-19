@@ -90,6 +90,22 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 | 常规设置 | `ServerConfiguration` 顶层（服务器名 / 语言 / 元数据目录 / 日志保留 / 慢响应告警 …） | `GET/POST /System/Configuration` | 整份替换，只改列出的字段 |
 | 网络 | `NetworkConfiguration`（key = `network`） | `GET/POST /System/Configuration/network` | 只替换这一段 |
 | 转码 | `EncodingOptions`（key = `encoding`） | `GET/POST /System/Configuration/encoding` | 只替换这一段 |
+
+#### 转码 / 网络两页覆盖到什么程度
+
+- **转码**：`EncodingOptions` 的 37 个字段里做了 **36 个** —— 唯一没做的是
+  `EncoderAppPathDisplay`，那是服务端告诉我们"ffmpeg 在哪"的只读展示项，不是设置。
+  最后一次补齐加的是「增强 NVDEC 解码」（`EnableEnhancedNvdecDecoder`）、
+  「隔行扫描处理」（`DeinterlaceMethod`；服务端只区分 `bwdif`，其它值都按 `yadif`，所以界面只给这两个选项、
+  不假装有"自动"）、「隔行扫描倍帧」（`DeinterlaceDoubleRate`）与「按需提取关键帧的容器」
+  （`AllowOnDemandMetadataBasedKeyframeExtractionForExtensions`，按行编辑）；
+- **网络**：34 个字段里做了 **23 个**。剩下 11 个是 SSDP/UDP 调试（`EnableSSDPTracing`、
+  `SSDPTracingFilter`、`AutoDiscoveryTracing`、`UDPSendCount`、`UDPSendDelay`、`GatewayMonitorPeriod`）、
+  HDHomeRun（`HDHomerunPortRange`）、多套接字绑定（`EnableMultiSocketBinding`）、
+  按请求/按子网发布地址（`EnablePublishedServerUriByRequest`、`PublishedServerUriBySubnet`）
+  与 `TrustAllIP6Interfaces` —— 都是特殊部署或排障项，手机端不做，免得塞成一屏没人敢动的开关。
+  最后一次补齐加的是「证书路径 / 证书密码」（HTTPS 开着却没配证书等于白开）、
+  「UDP 端口范围」与「局域网地址」。
 | 媒体库显示 | `ServerConfiguration`（显示方式 / 图片落盘 / 扫描并发 / 监控延迟） | `GET/POST /System/Configuration` | 整份替换 |
 | 媒体库元数据 | `ServerConfiguration.MetadataOptions[]` | 同左（整份） | 整份替换，但只有这一段会变 |
 | NFO 设置 | `XbmcMetadataOptions`（key = `xbmcmetadata`） | `GET/POST /System/Configuration/xbmcmetadata` | 只替换这一段 |
@@ -314,4 +330,6 @@ GET /System/Configuration/xbmcmetadata      -> 200 {"ReleaseDateFormat":…,"Sav
 | 转码页 | 恒等保存后 `encoding` 段逐字节相同；切「启用限速」→ 只有 `EnableThrottling` 变化；用选择器把硬件加速改成「不启用」→ 服务端 `HardwareAccelerationType` 由 `nvenc` 变成空串、只有这一个字段变化；复原后 37 个字段与原值一致 |
 | 常规设置页 | 14 个字段全部渲染出来且值来自服务端（`UICulture=zh-CN`、`QuickConnectAvailable=true` 等）；恒等保存后整份配置逐字节相同（差异为空） |
 | 播放（服务器）页 | 新页面渲染出「远程播放码率上限」与相关设置入口；恒等保存后整份配置逐字节相同；填 12 → 服务端 `RemoteClientBitrateLimit=12000000`，整份配置只有这一个字段变化；复原后零差异 |
+| 转码页补齐字段 | 「增强 NVDEC 解码 / 隔行扫描处理 / 隔行扫描倍帧 / 按需提取关键帧的容器」四行都渲染出来；恒等保存后 `encoding` 段**逐字节相同**（新字段原样回传没写坏东西）；切「隔行扫描倍帧」→ 服务端 `DeinterlaceDoubleRate` 由 `False` 变 `True`，**只有这一个字段**变化；复原后零差异 |
+| 网络页补齐字段 | 「证书路径 / 证书密码 / UDP 端口范围 / 局域网地址」四行都渲染出来；恒等保存后 `network` 段逐字节相同；把「UDP 端口范围」填成 `5000-5020` → 服务端 `UDPPortRange` 由 `''` 变 `'5000-5020'`、只有这一个字段变化；复原后零差异 |
 

@@ -57,6 +57,16 @@ const PRESETS: Choice[] = [
   new Choice('veryslow', 'veryslow（最慢，体积最小）')
 ];
 
+/**
+ * 隔行扫描处理方式。
+ * 服务端只会区分 `bwdif`（`EncodingHelper` 里显式比较），其它值一律按 `yadif` 处理，
+ * 所以这里只给这两个选项，界面上也不假装有"自动"。
+ */
+const DEINTERLACE_METHODS: Choice[] = [
+  new Choice('yadif', 'yadif（默认，通用）'),
+  new Choice('bwdif', 'bwdif（较新，画质更好但更吃 CPU）')
+];
+
 /** 色调映射算法：直接交给 ffmpeg 的 tonemap 滤镜，值取常用集合 */
 const TONEMAP_ALGOS: Choice[] = [
   new Choice('none', 'none'),
@@ -124,6 +134,7 @@ struct TranscodingSettingsPage {
   @State private intelHevc: boolean = false;
   @State private decodingCodecs: string = '';
   @State private vaapiDevice: string = '';
+  @State private enhancedNvdec: boolean = true;
   // 编码质量
   @State private h264Crf: number = 23;
   @State private h265Crf: number = 28;
@@ -136,6 +147,9 @@ struct TranscodingSettingsPage {
   @State private downMixBoost: number = 2;
   @State private subtitleExtraction: boolean = true;
   @State private muxingQueue: number = 2048;
+  @State private deinterlaceMethod: string = 'yadif';
+  @State private deinterlaceDoubleRate: boolean = false;
+  @State private keyframeExtractExtensions: string = '';
   // 色调映射
   @State private tonemapping: boolean = false;
   @State private tonemapAlgo: string = 'bt2390';
@@ -184,6 +198,11 @@ struct TranscodingSettingsPage {
     this.intelHevc = JsonUtil.getBoolean(this.base, 'EnableIntelLowPowerHevcHwEncoder', false);
     this.decodingCodecs = TranscodingSettingsPage.joinList(this.base, 'HardwareDecodingCodecs');
     this.vaapiDevice = JsonUtil.getString(this.base, 'VaapiDevice', '');
+    this.enhancedNvdec = JsonUtil.getBoolean(this.base, 'EnableEnhancedNvdecDecoder', true);
+    this.deinterlaceMethod = JsonUtil.getString(this.base, 'DeinterlaceMethod', 'yadif');
+    this.deinterlaceDoubleRate = JsonUtil.getBoolean(this.base, 'DeinterlaceDoubleRate', false);
+    this.keyframeExtractExtensions = TranscodingSettingsPage.joinList(this.base,
+      'AllowOnDemandMetadataBasedKeyframeExtractionForExtensions');
 
     this.h264Crf = JsonUtil.getNumber(this.base, 'H264Crf', 23);
     this.h265Crf = JsonUtil.getNumber(this.base, 'H265Crf', 28);
@@ -263,6 +282,11 @@ struct TranscodingSettingsPage {
     set('EnableIntelLowPowerHevcHwEncoder', this.intelHevc);
     set('HardwareDecodingCodecs', TranscodingSettingsPage.splitList(this.decodingCodecs));
     set('VaapiDevice', this.vaapiDevice.trim());
+    set('EnableEnhancedNvdecDecoder', this.enhancedNvdec);
+    set('DeinterlaceMethod', this.deinterlaceMethod);
+    set('DeinterlaceDoubleRate', this.deinterlaceDoubleRate);
+    set('AllowOnDemandMetadataBasedKeyframeExtractionForExtensions',
+      TranscodingSettingsPage.splitList(this.keyframeExtractExtensions));
 
     set('H264Crf', this.h264Crf);
     set('H265Crf', this.h265Crf);
@@ -346,6 +370,9 @@ struct TranscodingSettingsPage {
     if (kind === 'preset') {
       return TranscodingSettingsPage.withCurrent(PRESETS, this.preset);
     }
+    if (kind === 'deinterlace') {
+      return TranscodingSettingsPage.withCurrent(DEINTERLACE_METHODS, this.deinterlaceMethod);
+    }
     if (kind === 'algo') {
       return TranscodingSettingsPage.withCurrent(TONEMAP_ALGOS, this.tonemapAlgo);
     }
@@ -368,6 +395,7 @@ struct TranscodingSettingsPage {
   private sheetTitle(): string {
     if (this.sheet === 'accel') return '硬件加速类型';
     if (this.sheet === 'preset') return '编码预设';
+    if (this.sheet === 'deinterlace') return '隔行扫描处理方式';
     if (this.sheet === 'algo') return '色调映射算法';
     if (this.sheet === 'mode') return '色调映射模式';
     return '色调映射范围';
@@ -376,6 +404,9 @@ struct TranscodingSettingsPage {
   private sheetHint(): string {
     if (this.sheet === 'accel') return '要与服务器上的显卡/驱动匹配；选错会导致转码失败（服务端会回落到软编）。';
     if (this.sheet === 'preset') return '越慢的预设压缩率越高、CPU 占用越大；这一项会原样传给 ffmpeg。';
+    if (this.sheet === 'deinterlace') {
+      return '只对隔行扫描的片源生效（老电视剧、录播常见）；服务端只区分 bwdif，其它值都按 yadif 处理。';
+    }
     if (this.sheet === 'algo') return 'HDR 转 SDR 时使用的曲线，bt2390 通常效果最好。';
     if (this.sheet === 'mode') return 'auto 由 ffmpeg 决定；max/rgb 分别按最大分量与 RGB 计算。';
     return 'auto 由 ffmpeg 决定；tv = 有限范围（16–235），pc = 全范围（0–255）。';
@@ -386,6 +417,8 @@ struct TranscodingSettingsPage {
       this.accelType = value;
     } else if (this.sheet === 'preset') {
       this.preset = value;
+    } else if (this.sheet === 'deinterlace') {
+      this.deinterlaceMethod = value;
     } else if (this.sheet === 'algo') {
       this.tonemapAlgo = value;
     } else if (this.sheet === 'mode') {
@@ -453,6 +486,7 @@ struct TranscodingSettingsPage {
   private currentValueOf(kind: string): string {
     if (kind === 'accel') return this.accelType;
     if (kind === 'preset') return this.preset;
+    if (kind === 'deinterlace') return this.deinterlaceMethod;
     if (kind === 'algo') return this.tonemapAlgo;
     if (kind === 'mode') return this.tonemapMode;
     return this.tonemapRange;
@@ -652,6 +686,11 @@ struct TranscodingSettingsPage {
                       this.decodingCodecs = value;
                     })
                   Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.ToggleRow('增强 NVDEC 解码', 'NVIDIA 显卡上使用增强版 NVDEC 解码器（部分驱动需要关闭）',
+                    this.enhancedNvdec, (value: boolean) => {
+                      this.enhancedNvdec = value;
+                    })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
                   this.TextRow('VAAPI 设备', '仅 VAAPI 用得到（例如 /dev/dri/renderD128）',
                     this.vaapiDevice, '/dev/dri/renderD128',
                     (value: string) => {
@@ -730,6 +769,30 @@ struct TranscodingSettingsPage {
                     this.muxingQueue, false,
                   (value: number) => {
                       this.muxingQueue = value;
+                    })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  SettingCell({
+                    title: '隔行扫描处理',
+                    subtitle: '只对隔行片源生效（老剧、录播）',
+                    valueText: labelOf(DEINTERLACE_METHODS, this.deinterlaceMethod),
+                    showIcon: true,
+                    icon: $r('sys.symbol.aspectratio'),
+                    showChevron: true,
+                    onTap: () => {
+                      this.sheet = 'deinterlace';
+                    }
+                  })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.ToggleRow('隔行扫描倍帧', '按两倍帧率输出（更顺滑，也更吃性能）',
+                    this.deinterlaceDoubleRate, (value: boolean) => {
+                      this.deinterlaceDoubleRate = value;
+                    })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.ListRow('按需提取关键帧的容器',
+                    '这些容器里的视频会从元数据里找关键帧，而不是整段扫一遍，每行一个（例如 mkv）',
+                    this.keyframeExtractExtensions, 'mkv',
+                    (value: string) => {
+                      this.keyframeExtractExtensions = value;
                     })
                 }
                 .width('100%')
