@@ -73,6 +73,10 @@ struct MainShell {
     window.getLastWindow(getContext(this) as common.UIAbilityContext).then((win: window.Window) => {
       this.windowRef = win;
       this.applyChromeForTab(this.shellTabIndex);
+      // 系统底部导航条的底色跟着应用走（部分机型/窗口模式下系统条是不透明的，
+      // 不改颜色就会在页签行下面压出一条异色横带）。真正让底部连成一整块的是
+      // build() 里的 expandSafeArea —— 见本文件 build() 开头与 WindowFullscreen.styleNavigationBarWith。
+      WindowFullscreen.styleNavigationBarWith(win, this.colors().cardBackground);
     }).catch(() => {
       // 取不到窗口时「视频」页仍可用，只是不沉浸（不做静默假设）
     });
@@ -86,6 +90,8 @@ struct MainShell {
    */
   onPageShow(): void {
     this.applyChromeForTab(this.shellTabIndex);
+    // 系统栏刚被还回来（播放页/别的沉浸式页面退出）：底色必须按本页主题重新染一次
+    WindowFullscreen.styleNavigationBarWith(this.windowRef, this.colors().cardBackground);
   }
 
   /**
@@ -103,7 +109,9 @@ struct MainShell {
       // 系统栏隐藏后仍要避让挖孔：insets 的 visible 判定在 WindowFullscreen 里统一处理
       this.videoTopInsetVp = WindowFullscreen.insets(this.windowRef, false).top;
     } else {
-      WindowFullscreen.exit(this.windowRef);
+      // 退出沉浸式：还原系统栏时**必须同时**把底部导航条染回页签行的底色，
+      // 否则系统栏一出现就露出默认白底，底部页签行下面又多出一条白带（见 styleNavigationBarWith）
+      WindowFullscreen.exit(this.windowRef, this.colors().cardBackground);
       this.videoTopInsetVp = 0;
     }
   }
@@ -262,94 +270,108 @@ struct MainShell {
   }
 
   build() {
-    Stack() {
-      Column() {
-        // 「视频」页不显示外壳顶栏（沉浸式视频流）。
-        //
-        // 为什么：该页的心智是"打开就刷"，顶栏的抽屉/搜索入口在这条动线上用不上，
-        // 而 56vp 的顶栏是从画面里直接扣掉的 —— 竖屏手机上这接近可见高度的 1/10。
-        // 页面自己的浮层工具行已经提供「方向 / 设置」入口，底部页签仍可切换到别的页。
-        if (this.shellTabIndex !== kVideoTabIndex) {
-          AppTopBar({
-            title: 'Jellyfin',
-            showBack: true,
-            backIcon: $r('sys.symbol.list_bullet'),
-            onBackTap: () => {
-              this.drawerOpen = true;
-            },
-            action: () => {
-              this.TopBarActions();
+    // 外壳根容器把页面底色**向下铺到屏幕底边**（`expandSafeArea` 到 BOTTOM），底色用底部页签行的颜色。
+    //
+    // 为什么：应用窗口本身是铺满整屏的，但**系统底部导航条不属于窗口安全区** —— 应用不在那一条里画东西时，
+    // 露出的就是系统底（浅色机型上是纯白）。于是同一个底部页签行：「媒体库」「设置」页下面是
+    // "56vp 页签行 + 28vp 白条"，「视频」页沉浸式下是"56vp 页签行 + 28vp 应用深色底" ——
+    // 两处看起来页签行高度不一致（模拟器 127.0.0.1:5555 实测：窗口内容止于 y=2750，
+    // 白/深色分界正好在 y=2750，也就是 `SCBGestureNavBar` 的顶边）。
+    // 铺满之后三个页签下的底部是同一块连续底色，页签行的内容位置完全不变（只是背景多铺了 28vp）。
+    Column() {
+      Stack() {
+        Column() {
+          // 「视频」页不显示外壳顶栏（沉浸式视频流）。
+          //
+          // 为什么：该页的心智是"打开就刷"，顶栏的抽屉/搜索入口在这条动线上用不上，
+          // 而 56vp 的顶栏是从画面里直接扣掉的 —— 竖屏手机上这接近可见高度的 1/10。
+          // 页面自己的浮层工具行已经提供「方向 / 设置」入口，底部页签仍可切换到别的页。
+          if (this.shellTabIndex !== kVideoTabIndex) {
+            AppTopBar({
+              title: 'Jellyfin',
+              showBack: true,
+              backIcon: $r('sys.symbol.list_bullet'),
+              onBackTap: () => {
+                this.drawerOpen = true;
+              },
+              action: () => {
+                this.TopBarActions();
+              }
+            })
+          }
+
+          Tabs({ barPosition: BarPosition.End, index: this.shellTabIndex }) {
+            TabContent() {
+              HomePage({ themeTick: $themeTick })
             }
+            .tabBar($r('app.string.tab_library'))
+
+            // 「视频」页：短视频模式的承载页。内容来自设置里勾选的短视频媒体库（见
+            // pages/settings/ShortVideoSettingsPage），因此它既不属于"媒体库浏览"，
+            // 也不属于"设置"，独立成一个页签。
+            TabContent() {
+              ShortVideoPage({
+                themeTick: $themeTick,
+                refreshTick: this.videoTabTick,
+                // 页签下标传进去：离开「视频」页时页面自己要暂停播放
+                // （嵌入式组件不会销毁，否则会在"设置"页里继续放声音）
+                activeTab: this.shellTabIndex,
+                // 沉浸式下工具层按挖孔内缩（视频层仍然铺满）
+                topInsetVp: this.videoTopInsetVp
+              })
+            }
+            .tabBar('视频')
+
+            TabContent() {
+              SettingsPage({ themeTick: $themeTick, embedded: true,
+                settingsTick: this.settingsTabTick })
+            }
+            .tabBar($r('app.string.nav_settings'))
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .barMode(BarMode.Fixed)
+          .barHeight(0)
+          .onChange((index: number) => {
+            this.shellTabIndex = index;
+            this.applyChromeForTab(index);
           })
-        }
 
-        Tabs({ barPosition: BarPosition.End, index: this.shellTabIndex }) {
-          TabContent() {
-            HomePage({ themeTick: $themeTick })
+          Row() {
+            this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
+            this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
+            this.TabItem(2, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
           }
-          .tabBar($r('app.string.tab_library'))
-
-          // 「视频」页：短视频模式的承载页。内容来自设置里勾选的短视频媒体库（见
-          // pages/settings/ShortVideoSettingsPage），因此它既不属于"媒体库浏览"，
-          // 也不属于"设置"，独立成一个页签。
-          TabContent() {
-            ShortVideoPage({
-              themeTick: $themeTick,
-              refreshTick: this.videoTabTick,
-              // 页签下标传进去：离开「视频」页时页面自己要暂停播放
-              // （嵌入式组件不会销毁，否则会在"设置"页里继续放声音）
-              activeTab: this.shellTabIndex,
-              // 沉浸式下工具层按挖孔内缩（视频层仍然铺满）
-              topInsetVp: this.videoTopInsetVp
-            })
-          }
-          .tabBar('视频')
-
-          TabContent() {
-            SettingsPage({ themeTick: $themeTick, embedded: true,
-              settingsTick: this.settingsTabTick })
-          }
-          .tabBar($r('app.string.nav_settings'))
-        }
-        .layoutWeight(1)
-        .width('100%')
-        .barMode(BarMode.Fixed)
-        .barHeight(0)
-        .onChange((index: number) => {
-          this.shellTabIndex = index;
-          this.applyChromeForTab(index);
-        })
-
-        Row() {
-          this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
-          this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
-          this.TabItem(2, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
-        }
-        .width('100%')
-        .height(ThemeConstants.TAB_BAR_HEIGHT)
-        .backgroundColor(this.colors().cardBackground)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor(this.colors().pageBackground)
-
-      if (this.drawerOpen) {
-        Row() {
-          this.NavigationDrawer()
-          Blank()
-            .layoutWeight(1)
-            .height('100%')
-            .backgroundColor(this.colors().scrimHeavy)
-            .onClick(() => {
-              this.drawerOpen = false;
-            })
+          .width('100%')
+          .height(ThemeConstants.TAB_BAR_HEIGHT)
+          .backgroundColor(this.colors().cardBackground)
         }
         .width('100%')
         .height('100%')
+        .backgroundColor(this.colors().pageBackground)
+
+        if (this.drawerOpen) {
+          Row() {
+            this.NavigationDrawer()
+            Blank()
+              .layoutWeight(1)
+              .height('100%')
+              .backgroundColor(this.colors().scrimHeavy)
+              .onClick(() => {
+                this.drawerOpen = false;
+              })
+          }
+          .width('100%')
+          .height('100%')
+        }
       }
+      .width('100%')
+      .height('100%')
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.colors().cardBackground)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
 
   @Builder
