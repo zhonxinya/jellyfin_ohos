@@ -9,6 +9,7 @@ import { SectionCard } from '../../components/SectionCard';
 import { SettingCell } from '../../components/SettingCell';
 import { LoadingState } from '../../components/LoadingState';
 import { EmptyState } from '../../components/EmptyState';
+import { TimeFormat } from '../../common/TimeFormat';
 
 /** 一页取多少条（服务端不传 limit 时默认也是 100） */
 const PAGE_SIZE = 50;
@@ -89,28 +90,10 @@ function severityColor(colors: ThemeColors, severity: string): string {
 }
 
 /**
- * 把服务端的 UTC ISO 时间转成设备本地时间。
- *
- * 服务端给的是 7 位小数的 ISO（`2026-09-18T23:23:02.2072103Z`），
- * 而 `Date.parse` 只认 3 位小数，所以先把小数截到 3 位；解析失败就退回原字符串
- * （宁可不转，也不要显示一个错的时间）。
+ * 服务端 UTC ISO → 设备本地时间（实现见 `common/TimeFormat.ets`，控制台几页共用）。
  */
 function formatTime(iso: string): string {
-  if (iso.length === 0) {
-    return '';
-  }
-  let normalized: string = iso;
-  const dot: number = iso.indexOf('.');
-  if (dot > 0 && iso.endsWith('Z')) {
-    normalized = `${iso.substring(0, dot)}.${iso.substring(dot + 1, dot + 4)}Z`;
-  }
-  const ms: number = Date.parse(normalized);
-  if (Number.isNaN(ms)) {
-    return iso;
-  }
-  const d: Date = new Date(ms);
-  const pad = (n: number): string => n < 10 ? `0${n}` : `${n}`;
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return TimeFormat.short(iso);
 }
 
 /**

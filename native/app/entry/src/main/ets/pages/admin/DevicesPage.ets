@@ -7,6 +7,7 @@ import { AppViewModel } from '../../viewmodel/AppViewModel';
 import { PageHeader } from '../../components/PageHeader';
 import { LoadingState } from '../../components/LoadingState';
 import { EmptyState } from '../../components/EmptyState';
+import { TimeFormat } from '../../common/TimeFormat';
 
 interface DeviceInfo {
   id: string;
@@ -61,6 +62,14 @@ struct DevicesPage {
       const device: DeviceInfo = parseDevice(items[i]);
       if (device.id.length > 0) parsed.push(device);
     }
+    // 按最后活动时间倒序：设备会越攒越多（每次装应用都会注册一台），
+    // 想找的那台几乎总是最近在用的那台。ISO（UTC）按字典序比较就是按时间比较。
+    parsed.sort((a: DeviceInfo, b: DeviceInfo) => {
+      if (a.lastActivity === b.lastActivity) {
+        return a.name < b.name ? -1 : 1;
+      }
+      return a.lastActivity < b.lastActivity ? 1 : -1;
+    });
     this.devices = parsed;
     this.status = parsed.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
   }
@@ -117,7 +126,7 @@ struct DevicesPage {
             .width('100%')
         }
         if (device.lastActivity.length > 0) {
-          Text(`最后活动：${device.lastActivity}`)
+          Text(`最后活动：${TimeFormat.full(device.lastActivity)}`)
             .fontSize(ThemeConstants.META_SMALL)
             .fontColor(this.colors().textSecondary)
             .width('100%')
@@ -171,6 +180,11 @@ struct DevicesPage {
             EmptyState({ message: '当前没有已注册设备' })
           }
         } else {
+          Text(`共 ${this.devices.length} 台设备（按最后活动时间排列）`)
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textSecondary)
+            .width('100%')
+            .padding({ left: 16, right: 16, bottom: 6 })
           List({ space: 8 }) {
             ForEach(this.devices, (device: DeviceInfo) => {
               ListItem() {
