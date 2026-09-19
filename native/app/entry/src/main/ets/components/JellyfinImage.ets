@@ -27,6 +27,15 @@ export struct JellyfinImage {
   @Prop cornerRadius: number = 12;
   @Prop objectFit: ImageFit = ImageFit.Cover;
   @Prop placeholderIcon: string = 'movie';
+  /**
+   * 铺满模式：宽高按 `100%` 走，而不是 `imgWidth`/`imgHeight` 的固定值。
+   *
+   * 为什么需要：短视频页要拿封面当**环境背景**（铺满整屏、压暗后垫在视频四周，
+   * 把竖屏上看横片时的两条黑边换成"画面延伸"），而这块区域的尺寸只有运行期才知道
+   * （横竖屏还不同），固定像素塞不进去。
+   * 默认 `false`：老调用点（网格/列表/详情页海报）行为完全不变。
+   */
+  @Prop fillMode: boolean = false;
   @State private loadFailed: boolean = false;
   @State private loading: boolean = true;
   /** 本地缓存文件路径（file:// URI）；为空表示尚未就绪 */
@@ -81,6 +90,20 @@ export struct JellyfinImage {
     return $r('sys.symbol.video');
   }
 
+  /**
+   * 宽度/高度：铺满模式取 `100%`，否则取固定值。
+   *
+   * 用带 `Length` 返回类型的方法而不是在调用处写三元：ArkTS 对 `number | string` 的
+   * 隐式联合有严格检查，收敛在一处（与 ShortVideoPage.videoBoxWidth 同一写法）。
+   */
+  private boxWidth(): Length {
+    return this.fillMode ? '100%' : this.imgWidth;
+  }
+
+  private boxHeight(): Length {
+    return this.fillMode ? '100%' : this.imgHeight;
+  }
+
   @Builder
   Placeholder() {
     Column() {
@@ -95,8 +118,8 @@ export struct JellyfinImage {
           .fontColor([this.colors().textTertiary])
       }
     }
-    .width(this.imgWidth)
-    .height(this.imgHeight)
+    .width(this.boxWidth())
+    .height(this.boxHeight())
     .borderRadius(this.cornerRadius)
     .backgroundColor(this.colors().surfacePressed)
     .justifyContent(FlexAlign.Center)
@@ -106,8 +129,8 @@ export struct JellyfinImage {
     Stack() {
       if (this.localUri.length > 0 && !this.loadFailed) {
         Image(this.localUri)
-          .width(this.imgWidth)
-          .height(this.imgHeight)
+          .width(this.boxWidth())
+          .height(this.boxHeight())
           .borderRadius(this.cornerRadius)
           .objectFit(this.objectFit)
           .onComplete(() => {
@@ -124,7 +147,7 @@ export struct JellyfinImage {
         this.Placeholder()
       }
     }
-    .width(this.imgWidth)
-    .height(this.imgHeight)
+    .width(this.boxWidth())
+    .height(this.boxHeight())
   }
 }

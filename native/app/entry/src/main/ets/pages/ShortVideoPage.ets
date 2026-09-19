@@ -15,33 +15,25 @@ import { UiState } from '../common/UiState';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { ShortVideoPrefs, kShortVideoBatchSize } from '../common/ShortVideoPrefs';
+import { formatSeconds } from '../common/format';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
 
-/** 「视频」页在外壳底部页签中的下标（MainShell：媒体库 / 视频 / 设置） */
+/** 「视频」页在外壳底部页签中的下标（媒体库 / 视频 / 设置） */
 const kVideoTabIndex: number = 1;
 
 /**
- * 「视频」页 —— 短视频模式的承载页（底部导航第三个页签）。
- *
- * 为什么单独做一个导航页而不是塞进媒体库页：
- * 短视频的心智是"打开就刷"，与"进库 → 找片子 → 进详情 → 播放"是两条完全不同的动线；
- * 混在一个页面里会让两侧都变复杂。这里只做一件事：把**设置里勾选的短视频媒体库**
- * 随机抽出来，竖屏满屏逐条呈现，上下滑动切换（本轮先做到"浏览 + 点播"，
- * 页内自动连播在后续迭代里接）。
- *
- * 与媒体库页的关系：媒体库页是"按库/按类型浏览"，这里是"跨库随机流"，
- * 因此它不需要自己的 PageHeader（外壳 `MainShell` 已提供顶栏）。
- */
-/**
  * 单条播放失败后自动跳过下一条的等待时间（毫秒）。
  *
- * 短视频流的体验前提是"一直在放"：某一条硬解不支持（如模拟器上的 HEVC）、
- * 或取流失败时，停在原地等用户点一下就等于流程断了。因此如实提示 4 秒后自动跳过，
- * 同时给出「软解播放」入口（那条内容并非不可看，只是本机硬解解不了）。
+ * 短视频流的体验前提是"一直在放"：某一条硬解、软解都拿不下来（取流失败、编码不支持）时，
+ * 停在原地等用户点一下就等于流程断了。因此如实提示后自动跳过，
+ * 同时给出「去播放页」入口（那里有更完整的软解/转码回退）。
  */
 const kAutoSkipMs: number = 4000;
+
+/** 自动跳过倒计时的刷新间隔：文案要一秒一跳，不能是一个静态的"4 秒后跳过" */
+const kSkipTickMs: number = 1000;
 
 /** 进度上报节流（与播放页一致：5 秒一次 + 关键节点补发） */
 const kReportIntervalMs: number = 5000;
@@ -49,6 +41,67 @@ const kReportIntervalMs: number = 5000;
 /** 页内软解的拉帧下限间隔（与播放页同一套自调度思路：上一帧完成即排下一帧） */
 const kSoftPullMinGapMs: number = 8;
 
+/** 双击两侧的跳转步长（与播放页同一口径：±10 秒） */
+const kSkipStepMs: number = 10000;
+
+/** 双击判定窗口（与播放页一致：300ms 与系统双击间隔阈值一致） */
+const kDoubleTapMs: number = 300;
+
+/** 单击动作延后执行的时间：给"第二次点按"留出判定窗口，避免双击时先闪一下暂停 */
+const kSingleTapDelayMs: number = 260;
+
+/** 双击跳转提示的停留时间 */
+const kSeekHintMs: number = 900;
+
+/**
+ * 起播看门狗：超过这么久还没出画面就当作这条播不了。
+ *
+ * 为什么需要：取流卡住或编码不支持时，`AVPlayer` 有"既不进 playing、也不报 error"的
+ * 静默状态（转码流起播、弱网时都遇到过）。没有看门狗的话，用户看到的是一块黑屏 + 转圈，
+ * 而且**永远不会自己好** —— 这与"刷"的心智直接冲突。
+ */
+const kPrepareTimeoutMs: number = 15000;
+
+/**
+ * 距离列表末尾还剩几条时就去取下一批。
+ *
+ * 为什么不是"滑到底再取"：滑到底才开始请求，中间必然出现一段空白等待；
+ * 提前几条取，用户感知上就是"刷不完"。
+ */
+const kAppendAhead: number = 4;
+
+/**
+ * 手势遮罩的"非画面区"尺寸（vp）—— 落在这些区域里的点按不当作"点画面暂停/双击快进"。
+ *
+ * 为什么需要：工具行与操作栏的按钮是叠在画面上的浮层，浮层容器（透明、铺满整屏）
+ * 与手势层是**兄弟节点**，一次点按会同时到达两者（因此浮层容器用
+ * `HitTestMode.Transparent` 而不是默认值，否则按钮点不动）。也就是说"点按钮会不会顺带
+ * 暂停"必须由手势层按坐标自己判断 —— 位置判定与事件顺序无关，比"按钮按下时打标记"可靠。
+ */
+const kTopChromeVp: number = 64;
+const kBottomChromeVp: number = 108;
+const kRailWidthVp: number = 84;
+const kRailHeightVp: number = 380;
+
+/**
+ * 「视频」页 —— 短视频模式的承载页（底部导航第二个页签）。
+ *
+ * 心智与动线：短视频是"打开就刷"，与"进库 → 找片子 → 进详情 → 播放"是两条完全不同的
+ * 动线；混在一个页面里会让两侧都变复杂。这里只做一件事：把**设置里勾选的短视频媒体库**
+ * 随机抽出来，一屏一条、竖屏满屏连播，上下滑动切换、点画面暂停、双击两侧 ±10 秒。
+ *
+ * 视觉（本轮美化）：
+ * - **画面铺满整屏**：外壳在「视频」页不再画自己的顶栏（见 `MainShell.build`），
+ *   工具行/操作栏做成压在画面上的浮层（顶部/底部渐变 scrim 保证文字可读），
+ *   页面不再是"顶栏 + 工具行 + 一小块画面"的三明治结构；
+ * - **环境背景**：竖屏是 20:9 的窄长屏，横片按"适应"缩放后四周本来是两条纯黑边；
+ *   现在把当前封面铺满、压暗后垫在视频面之下，观感上是"一整块画面"而不是"黑框"；
+ * - **右侧操作栏**：收藏 / 已看 / 详情 / 换一批 收到右手边的竖排圆形按钮里，
+ *   底部只留标题与元信息（此前是两个大按钮 + 页码挤在文字旁边）；
+ * - **底部进度**：细进度线 + `已看 / 总时长`，能看出"还剩多少"。
+ *
+ * 弹幕式连播的实现要点见各方法注释（页内 AVPlayer + FFmpeg 软解回退 + 无限流追加）。
+ */
 @Component
 export struct ShortVideoPage {
   @Link themeTick: number;
@@ -66,8 +119,8 @@ export struct ShortVideoPage {
   /**
    * 沉浸式全屏下工具层要避让的顶部像素（vp）。
    *
-   * 「视频」页默认全屏沉浸式：**画面铺满整屏**，但工具栏/标题不能被挖孔或状态栏压住，
-   * 因此只有叠在画面上的那一层按这个值内缩。
+   * 「视频」页默认全屏沉浸式（外壳已隐藏系统栏）：**画面铺满整屏**，
+   * 但工具行不能被挖孔或状态栏压住，因此浮层按这个值内缩。
    */
   @Prop topInsetVp: number = 0;
 
@@ -86,8 +139,7 @@ export struct ShortVideoPage {
   // 为什么必须页内播放而不是"点一下跳播放页"：短视频的心智是**连续**刷 ——
   // 每条都要退回上一页再点开，动线立刻就断了。这里给「视频」页自己一个
   // XComponent + AVPlayer：滑到哪条就自动播哪条，播完自动下一条，单击暂停/继续。
-  // 硬解不支持的内容不在本页硬扛（软解要 EGL + 原生桥，播放页才是它的家）：
-  // 如实提示并给「软解播放」入口，4 秒后自动跳过。
+  // 硬解不支持的内容在本页用 FFmpeg 软解接着播（见 startSoftPlayback）。
   /** XComponent 控制器：surface 就绪后取 surfaceId 交给 AVPlayer */
   private surfaceController: XComponentController = new XComponentController();
   private surfaceId: string = '';
@@ -100,11 +152,65 @@ export struct ShortVideoPage {
   @State private durationMs: number = 0;
   /** 当前条目播放失败的原因（非空即显示失败浮层 + 自动跳过倒计时） */
   @State private playbackError: string = '';
-  /** 是否已滑到列表末尾（末尾不再自动循环，给"换一批"入口） */
+  /** 是否已滑到列表末尾且**再也取不到新内容**（末尾给"换一批"，不假装永远刷不完） */
   @State private reachedEnd: boolean = false;
+  /** 正在准备当前条目（取流 / 建播放器 / 缓冲）：显示转圈，避免"点了没反应"的观感 */
+  @State private preparing: boolean = false;
+  /** 自动跳过倒计时的剩余毫秒（0 = 不显示倒计时） */
+  @State private skipLeftMs: number = 0;
+  /** 双击快进的瞬时提示（非空即显示） */
+  @State private seekHint: string = '';
+  /**
+   * 已收藏 / 已看的条目 id。
+   *
+   * 为什么用页面级 @State 而不是直接改 `MediaItem` 上的字段：`MediaItem` 是普通类实例，
+   * 改字段不会触发渲染；把"哪些 id 是收藏/已看"放进 @State 数组后，
+   * 按钮上读到它的那些属性（图标、配色、文案）会在操作完成后自行刷新。
+   */
+  @State private favoriteIds: string[] = [];
+  @State private playedIds: string[] = [];
   private progressTimerId: number = -1;
   /** 当前这次暂停是否由"切走页签"造成（决定切回时是否自动续播） */
   private pausedByTabSwitch: boolean = false;
+  /** 起播看门狗（见 kPrepareTimeoutMs） */
+  private prepareWatchdogId: number = -1;
+  /** 自动跳过倒计时定时器 */
+  private skipTickId: number = -1;
+  /** 双击提示的收起定时器 */
+  private seekHintTimerId: number = -1;
+  /** 是否已把窗口设为常亮（成对调用，离页要还原） */
+  private screenOnApplied: boolean = false;
+  /**
+   * 取数代次：每次"换一批/重新加载"自增。
+   *
+   * 为什么需要：追加下一批是异步的（逐库请求），期间用户可能点了「换一批」把列表换成
+   * 新的一批；不校验代次的话，追加请求返回后会把**上一批**的内容接到新列表后面。
+   */
+  private feedGeneration: number = 0;
+  /** 追加请求在途（避免连续滑动时并发拉同一批） */
+  private appending: boolean = false;
+  /**
+   * "正在为末尾补内容"（渲染用）。
+   *
+   * 为什么需要它：滑到末尾时先给 `reachedEnd`、再异步去取下一批，如果直接按
+   * `reachedEnd` 渲染，取数那几百毫秒里会先闪一下「这批已经看完了」——
+   * 而这批其实还没完。这个标记是 @State，取数结束才让「看完了」露出来。
+   */
+  @State private appendPending: boolean = false;
+  /** 追加已经取不到新内容（服务端确实没有更多了），不再反复请求 */
+  private exhausted: boolean = false;
+  /**
+   * 最近一次批量取数的错误信息。
+   *
+   * 为什么用字段而不是"出参字符串"：ArkTS 的 string 是按值传递的，早先版本把错误
+   * 写进出参变量，调用方拿到的永远是空串 —— 结果是"取数失败"被当成"库里没有内容"，
+   * 该给「重试」的时候给了「去设置」。
+   */
+  private batchError: string = '';
+  /** 双击判定状态（与播放页同一套：单击延后执行，双击会取消待执行的单击） */
+  private lastTapUpAt: number = 0;
+  private lastTapX: number = 0;
+  private singleTapTimerId: number = -1;
 
   // ─────────────────────── 横屏观看 ───────────────────────
   //
@@ -112,7 +218,7 @@ export struct ShortVideoPage {
   // （可用区域从 20:9 的窄长变成宽屏），因此除了跟随传感器，还要给一个显式锁定入口
   // （躺卧观看时传感器会被机身姿态反复打断）。窗口实例与方向都复用播放页那套
   // `WindowFullscreen`，不另起一套平台调用。
-  /** 窗口实例（方向控制需要） */
+  /** 窗口实例（方向控制 / 屏幕常亮都需要） */
   private windowRef: window.Window | null = null;
   /** 方向选择：跟随系统 / 横屏 / 竖屏 */
   @State private orientation: PlayerOrientation = 'auto';
@@ -150,7 +256,6 @@ export struct ShortVideoPage {
   @State private landscape: boolean = false;
   /** 页内软解的解码目标宽度（对齐协商出的渲染缓冲） */
   private softDecodeMaxWidth: number = 0;
-  private skipTimerId: number = -1;
   private lastReportAt: number = 0;
 
   aboutToAppear(): void {
@@ -160,8 +265,12 @@ export struct ShortVideoPage {
   aboutToDisappear(): void {
     this.stopProgressTicker();
     this.cancelAutoSkip();
+    this.clearPrepareWatchdog();
+    this.cancelPendingTap();
+    this.hideSeekHint();
     this.stopSoftPlayback();
     this.releasePlayer();
+    this.applyScreenOn(false);
   }
 
   /**
@@ -172,6 +281,8 @@ export struct ShortVideoPage {
    */
   onTabIndexChanged(): void {
     if (this.activeTab !== kVideoTabIndex) {
+      // 离开本页不再需要屏幕常亮（用户在看别的页面）
+      this.applyScreenOn(false);
       if (this.softActive) {
         // 软解：切走即停帧循环（回来自会自动续上，见下面 else 分支）
         this.stopSoftPullLoop();
@@ -189,6 +300,7 @@ export struct ShortVideoPage {
       if (!this.paused) {
         this.startSoftPullLoop();
         this.startProgressTicker();
+        this.applyScreenOn(true);
       }
       return;
     }
@@ -196,6 +308,7 @@ export struct ShortVideoPage {
       this.pausedByTabSwitch = false;
       try {
         this.avPlayer.play();
+        this.applyScreenOn(true);
       } catch (err) {
         // 播放器可能已不可用：下一次滑动会重建
       }
@@ -237,8 +350,10 @@ export struct ShortVideoPage {
     return AppViewModel.getInstance().colors();
   }
 
+  // ─────────────────────────── 取数 ───────────────────────────
+
   /**
-   * 拉取一批短视频条目。
+   * 换一批：重新随机取数并从头开始刷。
    *
    * 取数策略：**每个已选媒体库各取一批、再合并**，而不是"一次请求多个库"——
    * Jellyfin 的 `/Items` 只接受单个 `ParentId`（多选父级要拼 `Ids` 且语义不同），
@@ -251,41 +366,40 @@ export struct ShortVideoPage {
       this.status = UiState.EMPTY;
       this.items = [];
       this.currentIndex = 0;
+      this.stopPlaybackForEmptyFeed();
       return;
     }
+    // 作废在途的追加请求（见 feedGeneration 的说明），并允许重新追加
+    this.feedGeneration = this.feedGeneration + 1;
+    this.appending = false;
+    this.appendPending = false;
+    this.exhausted = false;
     this.loadedLibraryIds = libraryIds;
     this.status = this.items.length > 0 ? UiState.REFRESHING : UiState.LOADING;
     this.refreshing = true;
     this.errorMsg = '';
     this.libraryNames = await this.resolveLibraryNames(libraryIds);
 
-    const collected: MediaItem[] = [];
-    let firstError: string = '';
-    for (let i = 0; i < libraryIds.length; i++) {
-      const batch: MediaItem[] = await this.fetchLibraryBatch(libraryIds[i], firstError);
-      if (batch.length === 0 && firstError.length === 0) {
-        continue;
-      }
-      for (let j = 0; j < batch.length; j++) {
-        collected.push(batch[j]);
-      }
-    }
+    // 换一批：不去重"上一批已经出现过的条目"（否则刷过的越多、可换的越少）
+    const collected: MediaItem[] = await this.collectBatch(libraryIds, false);
     this.refreshing = false;
     if (collected.length === 0) {
       // 全空有两种可能：所选库里确实没有视频，或请求失败。失败要如实报错（可重试），
       // 空则给"这批库里没有内容"的引导 —— 两者的下一步动作完全不同。
-      if (firstError.length > 0) {
+      if (this.batchError.length > 0) {
         this.status = UiState.ERROR;
-        this.errorMsg = firstError;
+        this.errorMsg = this.batchError;
       } else {
         this.status = UiState.EMPTY;
       }
       this.items = [];
       this.currentIndex = 0;
+      this.stopPlaybackForEmptyFeed();
       return;
     }
     // 逐库内已是随机序；这里再整体洗一次，避免"总是先放第一个库的内容"
     this.items = this.shuffle(collected);
+    this.syncUserDataFlags(this.items);
     this.currentIndex = 0;
     this.reachedEnd = false;
     this.status = UiState.SUCCESS;
@@ -293,8 +407,53 @@ export struct ShortVideoPage {
     this.playCurrent();
   }
 
-  /** 单个媒体库取一批条目；失败时把首个错误写进 outError 并返回空数组（不让整页失败） */
-  private async fetchLibraryBatch(libraryId: string, outError: string): Promise<MediaItem[]> {
+  /**
+   * 逐库取一批条目并合并。
+   *
+   * @param dedupeAgainstCurrent 是否剔除"列表里已有的条目"：
+   *        追加下一批时必须去重（否则随机取数会把看过的那几条再塞回来，
+   *        "刷不完"就变成了"反复刷同几条"）；而「换一批」**不能**去重 ——
+   *        那样会把用户已经刷过的内容全部排除，刷得越多、可换的越少。
+   *
+   * 失败不会让整页失败：某个库报错时记下错误、继续取其它库；错误信息写进
+   * `batchError` 供调用方判断"空"是"没内容"还是"取不到"。
+   */
+  private async collectBatch(libraryIds: string[],
+                             dedupeAgainstCurrent: boolean): Promise<MediaItem[]> {
+    this.batchError = '';
+    const out: MediaItem[] = [];
+    for (let i = 0; i < libraryIds.length; i++) {
+      const batch: MediaItem[] = await this.fetchLibraryBatch(libraryIds[i]);
+      for (let j = 0; j < batch.length; j++) {
+        if (this.hasItemId(out, batch[j].id)) {
+          continue;
+        }
+        if (dedupeAgainstCurrent && this.hasItemId(this.items, batch[j].id)) {
+          continue;
+        }
+        out.push(batch[j]);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 列表被清空（没配库 / 取数失败 / 取不到内容）时把播放彻底收掉。
+   *
+   * 为什么必须显式收：状态切到「空态/错误态」后视频层（XComponent）不再参与构建，
+   * 但 AVPlayer/软解会话**不会**因此停止 —— 用户会看到错误页却仍听到上一条的声音。
+   */
+  private stopPlaybackForEmptyFeed(): void {
+    this.cancelAutoSkip();
+    this.clearPrepareWatchdog();
+    this.stopProgressTicker();
+    this.stopSoftPlayback();
+    this.releasePlayer();
+    this.preparing = false;
+  }
+
+  /** 单个媒体库取一批条目（失败时登记 `batchError` 并返回空数组） */
+  private async fetchLibraryBatch(libraryId: string): Promise<MediaItem[]> {
     const query: ItemsQueryOptions = new ItemsQueryOptions();
     query.parentId = libraryId;
     query.startIndex = 0;
@@ -303,17 +462,105 @@ export struct ShortVideoPage {
     query.includeItemTypes = 'Movie,Episode,Video,MusicVideo';
     query.sortBy = 'Random';
     query.recursive = true;
-    query.fields = 'Overview,PrimaryImageAspectRatio,RunTimeTicks,ProductionYear';
+    // 元信息按"卡片上真的要显示什么"取：简介、年份、时长、分级、类型、系列名。
+    // 多要字段会让响应变大，少要则卡片上只能是空白（例如没有分级就只能不画那个徽标）。
+    query.fields = 'Overview,PrimaryImageAspectRatio,RunTimeTicks,ProductionYear,'
+      + 'OfficialRating,Genres,SeriesName';
     query.enableUserData = true;
     const raw: string = await JellyfinNative.queryItems(query.toJson());
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
-      if (outError.length === 0) {
-        outError = result.message.length > 0 ? result.message : '取短视频内容失败';
+      if (this.batchError.length === 0) {
+        this.batchError = result.message.length > 0 ? result.message : '取短视频内容失败';
       }
       return [];
     }
     return MediaItem.fromArray(JsonUtil.extractItems(result.data));
+  }
+
+  /**
+   * 追加下一批（无限流的实现）。
+   *
+   * @param playIndex 追加成功后要起播的下标（-1 = 只是后台预取，不起播）
+   * @returns 新追加的条数（0 表示确实没有新内容了）
+   */
+  private async appendMore(playIndex: number): Promise<number> {
+    if (this.appending || this.exhausted) {
+      return 0;
+    }
+    const libraryIds: string[] = this.loadedLibraryIds.length > 0
+      ? this.loadedLibraryIds : ShortVideoPrefs.loadLibraryIds();
+    if (libraryIds.length === 0) {
+      this.exhausted = true;
+      return 0;
+    }
+    this.appending = true;
+    this.appendPending = true;
+    const generation: number = this.feedGeneration;
+    // 追加必须去重：见 collectBatch 的说明
+    const collected: MediaItem[] = await this.collectBatch(libraryIds, true);
+    this.appending = false;
+    this.appendPending = false;
+    // 期间用户点了「换一批」：这批内容属于上一代列表，直接丢弃
+    if (generation !== this.feedGeneration) {
+      return 0;
+    }
+    if (collected.length === 0) {
+      // 取不到新内容：可能是库里就这么多，也可能是这一轮请求失败。
+      // 两者都不该让"刷"卡死 —— 有错误就再给一次机会（不置 exhausted），
+      // 没错误说明服务端确实没有更多了。
+      this.exhausted = this.batchError.length === 0;
+      return 0;
+    }
+    const more: MediaItem[] = this.shuffle(collected);
+    this.items = this.items.concat(more);
+    this.syncUserDataFlags(more);
+    if (playIndex >= 0) {
+      if (playIndex < this.items.length) {
+        this.reachedEnd = false;
+        this.currentIndex = playIndex;
+        this.playCurrent();
+      } else {
+        this.reachedEnd = true;
+      }
+    }
+    return more.length;
+  }
+
+  /** 快到位了就提前取下一批（后台进行，不影响正在播的这条） */
+  private prefetchIfNearEnd(): void {
+    if (this.exhausted || this.appending) {
+      return;
+    }
+    if (this.currentIndex + kAppendAhead < this.items.length) {
+      return;
+    }
+    this.appendMore(-1);
+  }
+
+  private hasItemId(list: MediaItem[], id: string): boolean {
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].id === id) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 把条目自带的收藏/已看状态收进页面级 @State（进新一批时调用） */
+  private syncUserDataFlags(list: MediaItem[]): void {
+    const favorites: string[] = this.favoriteIds.slice();
+    const played: string[] = this.playedIds.slice();
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].isFavorite && favorites.indexOf(list[i].id) < 0) {
+        favorites.push(list[i].id);
+      }
+      if (list[i].isPlayed && played.indexOf(list[i].id) < 0) {
+        played.push(list[i].id);
+      }
+    }
+    this.favoriteIds = favorites;
+    this.playedIds = played;
   }
 
   /** 已选媒体库的名称（取服务器视图列表；取不到就退化为空，不影响出内容） */
@@ -360,7 +607,7 @@ export struct ShortVideoPage {
    * 播当前这一条：取播放地址 → 建 AVPlayer → 绑 surface → prepare → play。
    *
    * 每一步都可能失败（取流、建播放器、编码不支持…），失败统一走 `onItemFailed`：
-   * **提示 + 给软解入口 + 自动跳过**，不让"刷"停下来。
+   * **就地软解 → 提示 + 自动跳过**，不让"刷"停下来。
    */
   private async playCurrent(): Promise<void> {
     const item: MediaItem | null = this.currentItem();
@@ -375,8 +622,11 @@ export struct ShortVideoPage {
     this.positionMs = 0;
     this.durationMs = 0;
     if (item === null) {
+      this.preparing = false;
       return;
     }
+    this.preparing = true;
+    this.startPrepareWatchdog();
     const raw: string = await JellyfinNative.playerOpen(item.id, '{}');
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
@@ -436,7 +686,10 @@ export struct ShortVideoPage {
       } else if (state === 'playing') {
         this.videoReady = true;
         this.paused = false;
+        this.preparing = false;
+        this.clearPrepareWatchdog();
         this.startProgressTicker();
+        this.applyScreenOn(true);
         this.reportProgress(false);
       } else if (state === 'paused') {
         this.paused = true;
@@ -455,7 +708,7 @@ export struct ShortVideoPage {
         return;
       }
       // 5400106 = 编码不支持（如模拟器上的 HEVC）；801 = 能力不支持。
-      // 这类内容并非不可看 —— 播放页有 FFmpeg 软解回退，因此提示里给出入口。
+      // 这类内容并非不可看 —— 本页紧接着会自动改走 FFmpeg 软解（见 onItemFailed）。
       const hint: string = (err.code === 5400106 || err.code === 801)
         ? '本机硬解不支持该编码' : `播放器错误(code=${err.code})`;
       this.onItemFailed(hint);
@@ -515,23 +768,40 @@ export struct ShortVideoPage {
     this.stopProgressTicker();
   }
 
-  /** 上/下一条（delta = ±1）；越界即"到底了" */
+  /**
+   * 上/下一条（delta = ±1）；越界即"到末尾"。
+   *
+   * 与上一版的差别：不再在末尾直接停住，而是**先试着再取一批**（追加成功后从下一条继续），
+   * 只有确实取不到新内容时才显示「看完了」。
+   */
   private advance(delta: number): void {
     const next: number = this.currentIndex + delta;
-    if (next < 0 || next >= this.items.length) {
+    if (next < 0) {
+      return;
+    }
+    if (next >= this.items.length) {
       this.stopProgressTicker();
       this.releasePlayer();
-      this.reachedEnd = delta > 0;
+      this.preparing = false;
+      // 先给出「看完了 / 换一批」：追加成功时它会自己收起（见 appendMore），
+      // 追加失败（弱网、服务端抽风）时用户也有明确的下一步，而不是停在一块死画面上。
+      // 这一步不能用 `!this.appending` 之类的判定去挡 —— `appending` 是普通字段，
+      // 不参与渲染刷新，写了也永远读到旧值。
+      this.reachedEnd = true;
+      this.appendMore(next);
       return;
     }
     this.reachedEnd = false;
     this.currentIndex = next;
+    this.prefetchIfNearEnd();
     this.playCurrent();
   }
 
-  /** 条目播放失败：提示 + 自动跳过（见 kAutoSkipMs） */
+  /** 条目播放失败：就地软解 → 提示 + 自动跳过（见 kAutoSkipMs） */
   private onItemFailed(message: string): void {
     this.playbackError = message;
+    this.preparing = false;
+    this.clearPrepareWatchdog();
     this.stopProgressTicker();
     this.releasePlayer();
     this.cancelAutoSkip();
@@ -543,10 +813,48 @@ export struct ShortVideoPage {
       return;
     }
     // 软解也不行（如本构建未链接 FFmpeg）：退回"提示 + 自动跳过"，不把用户卡住
-    this.skipTimerId = setTimeout(() => {
-      this.skipTimerId = -1;
-      this.advance(1);
-    }, kAutoSkipMs);
+    this.startAutoSkip();
+  }
+
+  /** 起播看门狗：到点还没出画面就按"这条播不了"处理（否则用户会一直盯着黑屏转圈） */
+  private startPrepareWatchdog(): void {
+    this.clearPrepareWatchdog();
+    this.prepareWatchdogId = setTimeout(() => {
+      this.prepareWatchdogId = -1;
+      if (!this.videoReady && this.playbackError.length === 0 && this.avPlayer !== null) {
+        this.onItemFailed('这条内容迟迟没能起播');
+      }
+    }, kPrepareTimeoutMs);
+  }
+
+  private clearPrepareWatchdog(): void {
+    if (this.prepareWatchdogId >= 0) {
+      clearTimeout(this.prepareWatchdogId);
+      this.prepareWatchdogId = -1;
+    }
+  }
+
+  /** 失败后的自动跳过：倒计时一秒一跳，归零即下一条 */
+  private startAutoSkip(): void {
+    this.cancelAutoSkip();
+    this.skipLeftMs = kAutoSkipMs;
+    this.skipTickId = setInterval(() => {
+      const left: number = this.skipLeftMs - kSkipTickMs;
+      if (left <= 0) {
+        this.cancelAutoSkip();
+        this.advance(1);
+        return;
+      }
+      this.skipLeftMs = left;
+    }, kSkipTickMs);
+  }
+
+  private cancelAutoSkip(): void {
+    if (this.skipTickId >= 0) {
+      clearInterval(this.skipTickId);
+      this.skipTickId = -1;
+    }
+    this.skipLeftMs = 0;
   }
 
   /** 就地软解：打开会话 → 按当前位置起播 → 自调度拉帧 */
@@ -556,6 +864,7 @@ export struct ShortVideoPage {
       return;
     }
     this.softActive = true;
+    this.preparing = true;
     this.playbackError = '';   // 软解接管后不再显示"本机无法播放"
     this.cancelAutoSkip();
     const seekSec: number = this.positionMs / 1000;
@@ -568,11 +877,9 @@ export struct ShortVideoPage {
       const why: string = result.data !== null
         ? JsonUtil.getString(result.data as ESObject, 'error', '软解打开失败') : '软解打开失败';
       this.softActive = false;
+      this.preparing = false;
       this.playbackError = `本机无法播放该内容（${why}）`;
-      this.skipTimerId = setTimeout(() => {
-        this.skipTimerId = -1;
-        this.advance(1);
-      }, kAutoSkipMs);
+      this.startAutoSkip();
       return;
     }
     // ── EGL 渲染器必须在**本线程（UI 线程）**初始化 ────────────────────────
@@ -610,12 +917,10 @@ export struct ShortVideoPage {
       const renderErr: string = initResult.ok && initResult.data !== null
         ? JsonUtil.getString(initResult.data as ESObject, 'renderError', '') : initResult.message;
       this.softActive = false;
+      this.preparing = false;
       this.playbackError = `软解画面无法上屏${renderErr.length > 0 ? '：' + renderErr : ''}`;
       JellyfinNative.softPlayClose();
-      this.skipTimerId = setTimeout(() => {
-        this.skipTimerId = -1;
-        this.advance(1);
-      }, kAutoSkipMs);
+      this.startAutoSkip();
       return;
     }
     this.playingItemId = item.id;
@@ -627,9 +932,11 @@ export struct ShortVideoPage {
       JellyfinNative.softPlaySeek(seekSec);
     }
     this.videoReady = true;
+    this.preparing = false;
     this.paused = false;
     this.startSoftPullLoop();
     this.startProgressTicker();
+    this.applyScreenOn(true);
   }
 
   /** 页内软解的帧循环：自调度（上一帧完成即排下一帧），与播放页同一套思路 */
@@ -707,11 +1014,232 @@ export struct ShortVideoPage {
     }
   }
 
-  private cancelAutoSkip(): void {
-    if (this.skipTimerId >= 0) {
-      clearTimeout(this.skipTimerId);
-      this.skipTimerId = -1;
+  // ─────────────────────── 点按手势（单击暂停 / 双击 ±10s）───────────────────────
+  //
+  // 与播放页同一套口径：单击**延后**执行，双击会取消待执行的单击
+  // （否则双击快进时画面会先暂停一下，用户看到的是"闪了一下"）。
+
+  /**
+   * 卡片上的触摸：只处理"抬手"，且只处理落在**画面区**里的抬手。
+   *
+   * 为什么按坐标过滤：工具行/操作栏是叠在画面上的浮层，与手势层是兄弟节点，
+   * 一次点按会同时到达两者（浮层容器用 HitTestMode.Transparent 才能点得动按钮）。
+   * 因此"点按钮"与"点画面"必须由这里按位置分开（见 kTopChromeVp / kBottomChromeVp）。
+   */
+  private onCardTouch(event: TouchEvent): void {
+    const touches: TouchObject[] = event.touches;
+    if (touches.length !== 1) {
+      return;
     }
+    if (event.type !== TouchType.Up) {
+      return;
+    }
+    const touch: TouchObject = touches[0];
+    if (this.inChromeZone(touch.x, touch.y)) {
+      return;
+    }
+    this.handleTapUp(touch.x);
+  }
+
+  /** 触摸点是否落在浮层控件（工具行 / 操作栏 / 底部信息）所占的区域里 */
+  private inChromeZone(x: number, y: number): boolean {
+    if (y < kTopChromeVp + this.topInsetVp) {
+      return true;
+    }
+    if (this.areaH <= 0 || this.areaW <= 0) {
+      return false;
+    }
+    if (y > this.areaH - kBottomChromeVp) {
+      return true;
+    }
+    // 右侧操作栏：竖排在右下角，比底部信息区更高
+    return x > this.areaW - kRailWidthVp && y > this.areaH - kRailHeightVp;
+  }
+
+  /**
+   * 一次"抬手"到达：判定单击（暂停/继续）还是双击（两侧快进/快退）。
+   *
+   * 与播放页一致：单击必须**延后**执行，否则双击时画面会先暂停一下。
+   */
+  private handleTapUp(x: number): void {
+    const now: number = Date.now();
+    const width: number = this.areaW > 0 ? this.areaW : 360;
+    const isDoubleTap: boolean = (now - this.lastTapUpAt) < kDoubleTapMs
+      && Math.abs(x - this.lastTapX) < width / 3;
+    if (isDoubleTap) {
+      this.cancelPendingTap();
+      const forward: boolean = x >= width / 2;
+      this.skipBy(forward ? kSkipStepMs : -kSkipStepMs);
+      this.showSeekHint(forward);
+      // 双击后不再把第二次抬手当成新一轮单击的起点
+      this.lastTapUpAt = 0;
+      return;
+    }
+    this.lastTapUpAt = now;
+    this.lastTapX = x;
+    this.cancelPendingTap();
+    this.singleTapTimerId = setTimeout(() => {
+      this.singleTapTimerId = -1;
+      this.togglePause();
+    }, kSingleTapDelayMs);
+  }
+
+  private cancelPendingTap(): void {
+    if (this.singleTapTimerId >= 0) {
+      clearTimeout(this.singleTapTimerId);
+      this.singleTapTimerId = -1;
+    }
+  }
+
+  /** 双击的瞬时提示（"快进 10 秒"这类文字反馈，比只看进度跳动更容易确认手势生效） */
+  private showSeekHint(forward: boolean): void {
+    this.clearSeekHintTimer();
+    this.seekHint = forward ? '快进 10 秒' : '快退 10 秒';
+    this.seekHintTimerId = setTimeout(() => {
+      this.seekHintTimerId = -1;
+      this.seekHint = '';
+    }, kSeekHintMs);
+  }
+
+  private clearSeekHintTimer(): void {
+    if (this.seekHintTimerId >= 0) {
+      clearTimeout(this.seekHintTimerId);
+      this.seekHintTimerId = -1;
+    }
+  }
+
+  /** 收起提示（定时器与文案一起清；离页时用） */
+  private hideSeekHint(): void {
+    this.clearSeekHintTimer();
+    this.seekHint = '';
+  }
+
+  /**
+   * 相对跳转（±10 秒）：硬解与软解两条路径都要支持。
+   *
+   * 软解只接受"排队"式 seek（原生侧记录目标，由下一次拉帧在解码线程执行），
+   * 硬解则要求播放器处于 prepared/playing/paused/completed 之一 —— 状态不对时直接丢弃，
+   * 避免抛 `5400102` 把一次误触变成一条错误提示。
+   */
+  private skipBy(deltaMs: number): void {
+    if (this.playbackError.length > 0 || this.items.length === 0) {
+      return;
+    }
+    let target: number = Math.max(0, this.positionMs + deltaMs);
+    if (this.durationMs > 0) {
+      target = Math.min(target, Math.max(0, this.durationMs - 500));
+    }
+    if (this.softActive) {
+      JellyfinNative.softPlaySeek(target / 1000);
+      this.positionMs = target;
+      return;
+    }
+    const player: media.AVPlayer | null = this.avPlayer;
+    if (player === null) {
+      return;
+    }
+    const state: string = player.state;
+    if (state === 'prepared' || state === 'playing' || state === 'paused' ||
+      state === 'completed') {
+      player.seek(target);
+      this.positionMs = target;
+    }
+  }
+
+  // ─────────────────────── 条目操作（收藏 / 已看 / 详情）───────────────────────
+
+  /**
+   * 收藏 / 取消收藏当前条目。
+   *
+   * 为什么要在短视频页做：刷到喜欢的内容时，用户的下一步动作就是"收起来"，
+   * 而此前只能点进详情页再操作 —— 那一下就把"刷"的动线打断了。
+   */
+  private async toggleFavorite(item: MediaItem): Promise<void> {
+    const next: boolean = !this.isFavoriteId(item.id);
+    const result: NativeResult =
+      JellyfinNative.parseResult(await JellyfinNative.toggleFavorite(item.id, next));
+    if (!result.ok) {
+      this.toast(result.message.length > 0 ? `收藏失败：${result.message}` : '收藏失败（服务端未接受）');
+      return;
+    }
+    const ids: string[] = this.favoriteIds.slice();
+    const at: number = ids.indexOf(item.id);
+    if (next && at < 0) {
+      ids.push(item.id);
+    } else if (!next && at >= 0) {
+      ids.splice(at, 1);
+    }
+    this.favoriteIds = ids;
+    this.toast(next ? '已加入我的最爱' : '已取消收藏');
+  }
+
+  /** 标记已看 / 未看（服务端 `Played`），同样即时反馈 */
+  private async togglePlayed(item: MediaItem): Promise<void> {
+    const next: boolean = !this.isPlayedId(item.id);
+    const result: NativeResult =
+      JellyfinNative.parseResult(await JellyfinNative.togglePlayed(item.id, next));
+    if (!result.ok) {
+      this.toast(result.message.length > 0 ? `标记失败：${result.message}` : '标记失败（服务端未接受）');
+      return;
+    }
+    const ids: string[] = this.playedIds.slice();
+    const at: number = ids.indexOf(item.id);
+    if (next && at < 0) {
+      ids.push(item.id);
+    } else if (!next && at >= 0) {
+      ids.splice(at, 1);
+    }
+    this.playedIds = ids;
+    this.toast(next ? '已标记为已播放' : '已标记为未播放');
+  }
+
+  private isFavoriteId(id: string): boolean {
+    return this.favoriteIds.indexOf(id) >= 0;
+  }
+
+  private isPlayedId(id: string): boolean {
+    return this.playedIds.indexOf(id) >= 0;
+  }
+
+  /** 操作结果用 toast 反馈（成功与失败都要可见，失败原因直接给用户看） */
+  private toast(message: string): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 2000 });
+    } catch (err) {
+      // toast 不可用不影响功能本身
+    }
+  }
+
+  /** 进入条目详情页（保留详情页里的完整操作） */
+  private openDetail(item: MediaItem): void {
+    if (item.id.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/DetailPage',
+      params: { itemId: item.id, title: item.displayTitle() }
+    });
+  }
+
+  /** 去播放页看这一条（那里有更完整的转码/软解回退与字幕、音轨能力） */
+  private openInPlayer(item: MediaItem): void {
+    this.cancelPendingTap();
+    this.cancelAutoSkip();
+    if (item.id.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/PlayerPage',
+      params: {
+        itemId: item.id,
+        title: item.displayTitle(),
+        startPositionMs: Math.floor(this.positionMs)
+      }
+    });
+  }
+
+  private openSettings(): void {
+    router.pushUrl({ url: 'pages/settings/ShortVideoSettingsPage' });
   }
 
   /**
@@ -731,37 +1259,30 @@ export struct ShortVideoPage {
     return '跟随系统';
   }
 
+  private orientationIcon(): Resource {
+    if (this.orientation === 'landscape') {
+      return $r('sys.symbol.rectangle_ratio_16_to_9');
+    }
+    if (this.orientation === 'portrait') {
+      return $r('sys.symbol.rectangle_ratio_9_to_16');
+    }
+    return $r('sys.symbol.screen_rotation');
+  }
+
   /** 循环切换方向（跟随系统 → 横屏 → 竖屏 → 跟随系统） */
-  private cycleOrientation(): void {
+  private async cycleOrientation(): Promise<void> {
     const next: PlayerOrientation = this.orientation === 'auto'
       ? 'landscape' : (this.orientation === 'landscape' ? 'portrait' : 'auto');
     this.orientation = next;
-    if (this.windowRef === null) {
-      window.getLastWindow(getContext(this) as common.UIAbilityContext).then((win: window.Window) => {
-        this.windowRef = win;
-        WindowFullscreen.setOrientation(this.windowRef, next);
-      }).catch(() => {
-        // 取不到窗口：方向设置失败，但短视频页仍可用（跟随系统）
-      });
+    const win: window.Window | null = await this.ensureWindowRef();
+    if (win === null) {
+      // 取不到窗口：方向设置失败，但短视频页仍可用（跟随系统）
       return;
     }
-    WindowFullscreen.setOrientation(this.windowRef, next);
+    WindowFullscreen.setOrientation(win, next);
   }
 
-  /** 失败浮层的「软解播放」：转到播放页（那里有 FFmpeg 软解回退） */
-  private openInPlayer(item: MediaItem): void {    this.cancelAutoSkip();
-    if (item.id.length === 0) {
-      return;
-    }
-    router.pushUrl({
-      url: 'pages/PlayerPage',
-      params: {
-        itemId: item.id,
-        title: item.displayTitle(),
-        startPositionMs: Math.floor(item.playbackPositionTicks / 10000)
-      }
-    });
-  }
+  // ─────────────────────── 进度上报与窗口状态 ───────────────────────
 
   /** 进度：1 秒刷新界面读数，5 秒节流上报服务端（与播放页同一套节流口径） */
   private startProgressTicker(): void {
@@ -828,6 +1349,44 @@ export struct ShortVideoPage {
     this.lastReportAt = 0;
   }
 
+  /** 取窗口实例（方向控制、屏幕常亮共用；取不到时相关能力静默降级） */
+  private async ensureWindowRef(): Promise<window.Window | null> {
+    if (this.windowRef !== null) {
+      return this.windowRef;
+    }
+    try {
+      this.windowRef = await window.getLastWindow(getContext(this) as common.UIAbilityContext);
+      return this.windowRef;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * 播放时保持屏幕常亮。
+   *
+   * 为什么需要：短视频是"长时间只看不摸屏幕"的用法，系统息屏时间一到画面就黑掉，
+   * 而用户的手并没有碰屏幕 —— 观感上就是"看着看着断了"。播放页早有这个处理
+   * （`setWindowKeepScreenOn`），短视频页此前漏了。
+   */
+  private async applyScreenOn(on: boolean): Promise<void> {
+    if (on === this.screenOnApplied) {
+      return;
+    }
+    const win: window.Window | null = await this.ensureWindowRef();
+    if (win === null) {
+      return;
+    }
+    try {
+      await win.setWindowKeepScreenOn(on);
+      this.screenOnApplied = on;
+    } catch (err) {
+      // 常亮失败不影响播放，只是不生效
+    }
+  }
+
+  // ─────────────────────── 画面比例与读数 ───────────────────────
+
   /** 屏幕像素密度（px / vp）—— 「原始」比例换算用（与播放页同一口径） */
   private density(): number {
     try {
@@ -876,13 +1435,14 @@ export struct ShortVideoPage {
     return index === this.currentIndex && this.videoReady && this.playbackError.length === 0;
   }
 
-  /** 兼容旧入口：FeedCard 的按钮仍复用播放页导航（详情/软解都走它） */
-  private playItem(item: MediaItem): void {
-    this.openInPlayer(item);
-  }
-
-  private openSettings(): void {
-    router.pushUrl({ url: 'pages/settings/ShortVideoSettingsPage' });
+  /**
+   * 环境背景是否要出现。
+   *
+   * 只在**真的出画面了**才出现：还没起播时，卡片自己那张铺满的封面才是"底"，
+   * 两者同时存在会白解一张整屏图（内存与解码都是浪费）。
+   */
+  private ambientVisible(): boolean {
+    return this.videoReady && this.playbackError.length === 0 && this.currentItem() !== null;
   }
 
   private currentItem(): MediaItem | null {
@@ -892,205 +1452,563 @@ export struct ShortVideoPage {
     return this.items[this.currentIndex];
   }
 
-  /** 顶部一行：内容来源 + 换一批 + 设置入口（贴在顶栏下方，随页面滚动无关） */
+  /** 封面取横图优先（Backdrop），没有就退化为竖图（Primary） */
+  private coverUrl(item: MediaItem, width: number): string {
+    return item.imageUrl(width, item.backdropTag.length > 0 ? 'Backdrop' : 'Primary');
+  }
+
+  /** 当前条目的封面地址（环境背景用；没有内容时返回空串，组件会画占位） */
+  private ambientUrl(): string {
+    const item: MediaItem | null = this.currentItem();
+    return item === null ? '' : this.coverUrl(item, 900);
+  }
+
+  /** 当前条目的类型徽标文案（电影 / 单集 / 视频 …） */
+  private typeBadge(item: MediaItem): string {
+    return item.typeLabel();
+  }
+
+  /**
+   * 元信息行：`2023 · 8.1 分 · 1:32:10 · 剧情 / 悬疑`
+   *
+   * 用 `MediaItem.metaLine()` 的年/评分/时长，再补一段类型（短视频用户往往先看类型）。
+   */
+  private metaLine(item: MediaItem): string {
+    const base: string = item.metaLine();
+    if (item.genres.length === 0) {
+      return base;
+    }
+    const top: string[] = [];
+    for (let i = 0; i < item.genres.length && i < 2; i++) {
+      top.push(item.genres[i]);
+    }
+    const suffix: string = top.join(' / ');
+    return base.length > 0 ? `${base} · ${suffix}` : suffix;
+  }
+
+  // ─────────────────────────── 画面（UI）───────────────────────────
+
+  /**
+   * 环境背景：当前封面铺满 + 压暗。
+   *
+   * 位置在**视频面之下**：视频面按"适应"缩放后四周留白，这里把留白填成同一张图的
+   * 暗色放大版本（主流做法，Plex/Infuse 都这么处理黑边），比纯黑的两条边更完整。
+   */
   @Builder
-  FeedToolbar() {
-    Row({ space: 8 }) {
+  AmbientBackdrop() {
+    Stack() {
+      JellyfinImage({
+        url: this.ambientUrl(),
+        imgWidth: 900,
+        imgHeight: 1600,
+        cornerRadius: 0,
+        objectFit: ImageFit.Cover,
+        placeholderIcon: 'movie',
+        fillMode: true
+      })
+      // 压暗：环境背景是"底"，不能比画面本身更抢眼
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.colors().scrimHeavy)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /**
+   * 顶部工具行：标题 + 页码 + 来源，右侧是方向与设置。
+   *
+   * 做成浮层（而不是占一行高度的实体栏）：短视频页的画面就是内容本体，
+   * 顶部/底部的渐变 scrim 保证文字在任何画面上都可读，同时不切走画面高度。
+   */
+  @Builder
+  TopChrome(index: number) {
+    Row({ space: 10 }) {
       Column({ space: 2 }) {
-        Text('短视频')
-          .fontSize(ThemeConstants.TITLE_MEDIUM)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().textPrimary)
+        Row({ space: 8 }) {
+          Text('短视频')
+            .fontSize(ThemeConstants.TITLE_MEDIUM)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.colors().onOverlay)
+          Text(`${index + 1}/${this.items.length}`)
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().onOverlayMuted)
+            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+            .backgroundColor(this.colors().overlayControl)
+            .borderRadius(ThemeConstants.BADGE_RADIUS)
+        }
+        .alignItems(VerticalAlign.Center)
+
         Text(this.libraryNames.length > 0
           ? `来自：${this.libraryNames.join(' / ')}`
           : '来自已选的短视频媒体库')
           .fontSize(ThemeConstants.META_SMALL)
-          .fontColor(this.colors().textTertiary)
+          .fontColor(this.colors().onOverlayMuted)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
 
-      Button('换一批', { type: ButtonType.Normal, stateEffect: false })
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textPrimary)
-        .backgroundColor(this.colors().surfacePressed)
-        .borderRadius(ThemeConstants.BADGE_RADIUS)
-        .height(32)
-        .padding({ left: 12, right: 12 })
-        .enabled(!this.refreshing)
-        .onClick(() => { this.loadFeed(); })
+      // 方向：跟随系统 / 横屏 / 竖屏（图标 + 文案，状态一眼可见）
+      Button({ type: ButtonType.Normal, stateEffect: false }) {
+        Row({ space: 5 }) {
+          SymbolGlyph(this.orientationIcon())
+            .fontSize(ThemeConstants.ICON_SMALL)
+            .fontColor([this.colors().onOverlay])
+          Text(this.orientationLabel())
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().onOverlay)
+            .maxLines(1)
+        }
+        .alignItems(VerticalAlign.Center)
+      }
+      .height(32)
+      .padding({ left: 10, right: 12 })
+      .backgroundColor(this.colors().overlayControl)
+      .borderRadius(ThemeConstants.CHIP_RADIUS)
+      .onClick(() => { this.cycleOrientation(); })
 
-      // 方向：跟随系统 / 横屏 / 竖屏 —— 短视频同样需要横屏全屏观看
-      // （横屏下同一个"适应"盒子计算会给出更大的画面，见 videoBoxWidth/Height）
-      Button(this.orientationLabel(), { type: ButtonType.Normal, stateEffect: false })
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textPrimary)
-        .backgroundColor(this.colors().surfacePressed)
-        .borderRadius(ThemeConstants.BADGE_RADIUS)
-        .height(32)
-        .padding({ left: 12, right: 12 })
-        .onClick(() => { this.cycleOrientation(); })
-
-      Button('设置', { type: ButtonType.Normal, stateEffect: false })
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textPrimary)
-        .backgroundColor(this.colors().surfacePressed)
-        .borderRadius(ThemeConstants.BADGE_RADIUS)
-        .height(32)
-        .padding({ left: 12, right: 12 })
-        .onClick(() => { this.openSettings(); })
+      // 设置：进入「短视频模式」媒体库选择
+      Button({ type: ButtonType.Circle, stateEffect: false }) {
+        SymbolGlyph($r('sys.symbol.gearshape'))
+          .fontSize(ThemeConstants.ICON_MEDIUM)
+          .fontColor([this.colors().onOverlay])
+      }
+      .width(32)
+      .height(32)
+      .padding(0)
+      .backgroundColor(this.colors().overlayControl)
+      .onClick(() => { this.openSettings(); })
     }
     .width('100%')
-    .padding({
-      left: ThemeConstants.PAGE_PADDING,
-      right: ThemeConstants.PAGE_PADDING,
-      top: 8 + this.topInsetVp,
-      bottom: 8
-    })
     .alignItems(VerticalAlign.Center)
   }
 
-  /** 一屏一条短视频：封面铺满 + 底部渐变 + 标题/简介 + 播放按钮与页码 */
+  /** 右侧操作栏的一个按钮（圆形图标 + 一行小字） */
+  @Builder
+  RailButton(icon: Resource, label: string, selected: boolean, onTap: () => void) {
+    Column({ space: 5 }) {
+      Button({ type: ButtonType.Circle, stateEffect: false }) {
+        SymbolGlyph(icon)
+          .fontSize(ThemeConstants.ICON_XLARGE)
+          .fontColor([selected ? this.colors().onBrand : this.colors().onOverlay])
+      }
+      .width(46)
+      .height(46)
+      .padding(0)
+      .backgroundColor(selected ? this.colors().brandPrimary : this.colors().overlayControl)
+      .onClick(() => { onTap(); })
+
+      Text(label)
+        .fontSize(ThemeConstants.LABEL_SMALL)
+        .fontColor(this.colors().onOverlayMuted)
+        .maxLines(1)
+    }
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /**
+   * 一屏一条短视频的卡片。
+   *
+   * 层次（自下而上）：封面（仅"当前这条还没出画面"时画）→ 顶部/底部渐变 →
+   * 手势层 → 顶部工具行 → 底部信息 + 右侧操作栏。
+   *
+   * 封面只在**当前条目**上画：`ForEach` 会为整批条目建组件，一屏只看得到一条，
+   * 却要为每条拉一张 900px 的图（原生下载 + 解码）—— 24 条并发取图既慢又吃内存。
+   */
   @Builder
   FeedCard(item: MediaItem, index: number) {
-    Stack({ alignContent: Alignment.Bottom }) {
-      // 封面：优先横图（Backdrop）/ 退化为竖图（Primary）。
-      // **正在页内播放的那一条不画封面** —— 视频层在本页最底下，封面会把它整块挡住；
-      // 封面只作为"还没起播 / 播不了"时的占位。
-      if (!this.isVideoPlaying(index)) {
+    Stack({ alignContent: Alignment.Center }) {
+      if (index === this.currentIndex && !this.isVideoPlaying(index)) {
         JellyfinImage({
-          url: item.imageUrl(900, item.backdropTag.length > 0 ? 'Backdrop' : 'Primary'),
+          url: this.coverUrl(item, 900),
           imgWidth: 900,
           imgHeight: 1600,
           cornerRadius: 0,
           objectFit: ImageFit.Cover,
-          placeholderIcon: 'movie'
+          placeholderIcon: 'movie',
+          fillMode: true
         })
-          .width('100%')
-          .height('100%')
       }
 
-      // 底部渐变：保证文字在任何封面上都可读（与播放页同一套 scrim 令牌）
-      Column()
-        .width('100%')
-        .height('46%')
-        .linearGradient({
-          angle: 180,
-          colors: [['#00000000', 0.0], [this.colors().scrimHeavy, 1.0]]
-        })
-
-      Column({ space: 10 }) {
-        Text(item.displayTitle())
-          .fontSize(ThemeConstants.TITLE_LARGE)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onOverlay)
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      // 顶部渐变：工具行压在亮画面上也读得清
+      Column() {
+        Column()
           .width('100%')
-        Text(item.metaLine())
-          .fontSize(ThemeConstants.META_MEDIUM)
-          .fontColor(this.colors().onOverlayMuted)
-          .maxLines(1)
-          .width('100%')
-        if (item.overview.length > 0) {
-          Text(item.overview)
-            .fontSize(ThemeConstants.META_SMALL)
-            .fontColor(this.colors().onOverlayMuted)
-            .maxLines(2)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-        }
-        Row({ space: 12 }) {
-          // 页内已自动播放：不再放「播放」（点画面即可暂停/继续，避免与单击语义打架），
-          // 主按钮改为「详情」，次按钮是「重播」（从头再放这一条）。
-          Button('详情', { type: ButtonType.Normal, stateEffect: false })
-            .fontSize(ThemeConstants.TITLE_MEDIUM)
-            .fontColor(this.colors().onBrand)
-            .backgroundColor(this.colors().brandPrimary)
-            .borderRadius(ThemeConstants.BUTTON_RADIUS)
-            .height(ThemeConstants.BUTTON_HEIGHT)
-            .padding({ left: 28, right: 28 })
-            .onClick(() => {
-              router.pushUrl({
-                url: 'pages/DetailPage',
-                params: { itemId: item.id, title: item.displayTitle() }
-              });
-            })
-
-          Button('重播', { type: ButtonType.Normal, stateEffect: false })
-            .fontSize(ThemeConstants.TITLE_MEDIUM)
-            .fontColor(this.colors().onOverlay)
-            .backgroundColor(this.colors().overlayControl)
-            .borderRadius(ThemeConstants.BUTTON_RADIUS)
-            .height(ThemeConstants.BUTTON_HEIGHT)
-            .padding({ left: 22, right: 22 })
-            .onClick(() => {
-              this.currentIndex = index;
-              this.playCurrent();
-            })
-
-          Blank()
-
-          Text(`${index + 1}/${this.items.length}`)
-            .fontSize(ThemeConstants.META_SMALL)
-            .fontColor(this.colors().onOverlayMuted)
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
+          .height(120 + this.topInsetVp)
+          .linearGradient({
+            angle: 0,
+            colors: [['#00000000', 0.0], [this.colors().scrim, 1.0]]
+          })
+        Blank()
       }
       .width('100%')
-      .padding({ left: 20, right: 20, bottom: 24 })
-      .alignItems(HorizontalAlign.Start)
+      .height('100%')
+      .hitTestBehavior(HitTestMode.None)
+
+      // 底部渐变：标题/元信息的可读性底（与播放页同一套 scrim 令牌）
+      Column() {
+        Blank()
+        Column()
+          .width('100%')
+          .height('52%')
+          .linearGradient({
+            angle: 180,
+            colors: [['#00000000', 0.0], [this.colors().scrimHeavy, 1.0]]
+          })
+      }
+      .width('100%')
+      .height('100%')
+      .hitTestBehavior(HitTestMode.None)
+
+      // 手势层：单击暂停/继续、双击两侧 ±10 秒。
+      //
+      // 为什么挂在**卡片自己的**全屏透明层上而不是页面根节点：它在 Swiper 内部，
+      // 纵向滑动仍由 Swiper 接管（"点得着也滑得动"）；按钮在它**之上**作为兄弟节点，
+      // 因此按钮的点击不会被它抢走，只有落在画面区的点按才交给它。
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(Color.Transparent)
+        .onTouch((event: TouchEvent) => {
+          if (index === this.currentIndex) {
+            this.onCardTouch(event);
+          }
+        })
+
+      // 顶部工具行（Transparent：自身不挡下面的手势层，内部按钮照常响应）
+      Column() {
+        this.TopChrome(index)
+        Blank()
+      }
+      .width('100%')
+      .height('100%')
+      .padding({
+        left: ThemeConstants.PAGE_PADDING,
+        right: ThemeConstants.PAGE_PADDING,
+        top: 10 + this.topInsetVp
+      })
+      .hitTestBehavior(HitTestMode.Transparent)
+
+      // 底部信息 + 右侧操作栏
+      Column() {
+        Blank()
+        Row({ space: 8 }) {
+          Column({ space: 6 }) {
+            Row({ space: 6 }) {
+              Text(this.typeBadge(item))
+                .fontSize(ThemeConstants.LABEL_SMALL)
+                .fontWeight(FontWeight.Medium)
+                // 类型徽标用品牌色实底 + `onBrand` 文字（品牌色上的专用前景色，
+                // 明暗两套主题下都有足够对比度；用 `onOverlay` 会在浅色主题下发灰）
+                .fontColor(this.colors().onBrand)
+                .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+                .backgroundColor(this.colors().brandPrimary)
+                .borderRadius(ThemeConstants.BADGE_RADIUS)
+              if (item.officialRating.length > 0) {
+                Text(item.officialRating)
+                  .fontSize(ThemeConstants.LABEL_SMALL)
+                  .fontColor(this.colors().onOverlay)
+                  .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+                  .backgroundColor(this.colors().overlayControl)
+                  .borderRadius(ThemeConstants.BADGE_RADIUS)
+              }
+            }
+            .alignItems(VerticalAlign.Center)
+
+            if (item.seriesName.length > 0 && item.type === 'Episode') {
+              Text(item.seriesName)
+                .fontSize(ThemeConstants.META_SMALL)
+                .fontColor(this.colors().onOverlayMuted)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+
+            Text(item.displayTitle())
+              .fontSize(ThemeConstants.TITLE_LARGE)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.colors().onOverlay)
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+
+            if (this.metaLine(item).length > 0) {
+              Text(this.metaLine(item))
+                .fontSize(ThemeConstants.META_MEDIUM)
+                .fontColor(this.colors().onOverlayMuted)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+
+            if (item.overview.length > 0) {
+              Text(item.overview)
+                .fontSize(ThemeConstants.META_SMALL)
+                .fontColor(this.colors().onOverlayMuted)
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+
+          // 操作栏：收藏 / 已看 / 详情 / 换一批
+          Column({ space: 14 }) {
+            this.RailButton(
+              this.isFavoriteId(item.id) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'),
+              this.isFavoriteId(item.id) ? '已收藏' : '收藏',
+              this.isFavoriteId(item.id),
+              () => { this.toggleFavorite(item); })
+
+            this.RailButton(
+              this.isPlayedId(item.id) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.checkmark'),
+              this.isPlayedId(item.id) ? '已看' : '标记已看',
+              this.isPlayedId(item.id),
+              () => { this.togglePlayed(item); })
+
+            this.RailButton($r('sys.symbol.info_circle'), '详情', false,
+              () => { this.openDetail(item); })
+
+            this.RailButton($r('sys.symbol.arrow_2_circlepath'), '换一批', false,
+              () => { this.loadFeed(); })
+          }
+          .width(kRailWidthVp - 24)
+          .alignItems(HorizontalAlign.Center)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Bottom)
+        // 左右留白 + 底部让出进度线（见 BottomProgress）
+        .padding({
+          left: ThemeConstants.PAGE_PADDING,
+          right: ThemeConstants.PAGE_PADDING,
+          bottom: 22
+        })
+      }
+      .width('100%')
+      .height('100%')
+      .hitTestBehavior(HitTestMode.Transparent)
     }
     .width('100%')
     .height('100%')
-    // 单击 = 暂停/继续。
-    //
-    // 为什么挂在**页面根节点**而不是"覆盖在 Swiper 之上的整屏透明层"：
-    // 设备实测（模拟器）覆盖层方案只在第一次点击生效，暂停之后点击再也不到回调
-    // （同一 Stack 里条件分支一增删，覆盖层的命中测试就不稳定了）；
-    // 挂在页面根节点上则与页面同生命周期，且**仍在 Swiper 内部** ——
-    // 纵向滑动仍由 Swiper 接管，不会出现"点得着但滑不动"。
-    .onClick(() => {
-      if (index === this.currentIndex) {
-        this.togglePause();
+  }
+
+  /** 底部细进度线 + `已看 / 总时长` */
+  @Builder
+  BottomProgress() {
+    Column() {
+      if (this.durationMs > 0) {
+        Row() {
+          Blank()
+          Text(`${formatSeconds(Math.floor(this.positionMs / 1000))} / ${formatSeconds(Math.floor(this.durationMs / 1000))}`)
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().onOverlayMuted)
+        }
+        .width('100%')
+        .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: 4 })
       }
-    })
+      Progress({ value: this.progressRatio() * 100, total: 100, type: ProgressType.Linear })
+        .color(this.colors().brandPrimary)
+        .backgroundColor('#33000000')
+        .width('100%')
+        .height(3)
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.End)
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** 中央"正在准备"：取流/建播放器期间给一个明确的进度感 */
+  @Builder
+  PreparingBadge() {
+    Column({ space: 10 }) {
+      LoadingProgress()
+        .width(36)
+        .height(36)
+        .color(this.colors().onOverlay)
+      Text('正在准备…')
+        .fontSize(ThemeConstants.META_MEDIUM)
+        .fontColor(this.colors().onOverlayMuted)
+    }
+    .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+    .backgroundColor(this.colors().overlayControlStrong)
+    .borderRadius(ThemeConstants.CARD_RADIUS)
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** 暂停提示：中央一个大播放图标（点画面即继续） */
+  @Builder
+  PausedBadge() {
+    Column({ space: 10 }) {
+      Column() {
+        SymbolGlyph($r('sys.symbol.play_fill'))
+          .fontSize(ThemeConstants.ICON_HERO)
+          .fontColor([this.colors().onOverlay])
+      }
+      .width(84)
+      .height(84)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.colors().overlayControlStrong)
+      .borderRadius(42)
+
+      Text('已暂停')
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().onOverlay)
+        .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+        .backgroundColor(this.colors().overlayControlStrong)
+        .borderRadius(ThemeConstants.BADGE_RADIUS)
+    }
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** 双击跳转的瞬时提示 */
+  @Builder
+  SeekHintBadge() {
+    Row({ space: 8 }) {
+      SymbolGlyph(this.seekHint.startsWith('快进')
+        ? $r('sys.symbol.goforward_10') : $r('sys.symbol.gobackward_10'))
+        .fontSize(ThemeConstants.ICON_XLARGE)
+        .fontColor([this.colors().onOverlay])
+      Text(this.seekHint)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().onOverlay)
+    }
+    .padding({ left: 18, right: 20, top: 12, bottom: 12 })
+    .backgroundColor(this.colors().overlayControlStrong)
+    .borderRadius(26)
+    .alignItems(VerticalAlign.Center)
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** 本条播不了：如实说明 + 去播放页 + 自动跳过倒计时 */
+  @Builder
+  FailureCard() {
+    Column({ space: 10 }) {
+      SymbolGlyph($r('sys.symbol.xmark_circle_fill'))
+        .fontSize(ThemeConstants.ICON_XXL)
+        .fontColor([this.colors().warning])
+      Text(this.playbackError)
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().onOverlay)
+        .textAlign(TextAlign.Center)
+      if (this.skipLeftMs > 0) {
+        Text(`${Math.ceil(this.skipLeftMs / 1000)} 秒后自动跳过`)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlayMuted)
+      }
+      Row({ space: 12 }) {
+        Button('去播放页', { type: ButtonType.Normal, stateEffect: false })
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().onBrand)
+          .backgroundColor(this.colors().brandPrimary)
+          .borderRadius(ThemeConstants.BUTTON_RADIUS)
+          .height(ThemeConstants.BUTTON_HEIGHT)
+          .onClick(() => {
+            const item: MediaItem | null = this.currentItem();
+            if (item !== null) {
+              this.openInPlayer(item);
+            }
+          })
+        Button('跳过', { type: ButtonType.Normal, stateEffect: false })
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().onOverlay)
+          .backgroundColor(this.colors().overlayControl)
+          .borderRadius(ThemeConstants.BUTTON_RADIUS)
+          .height(ThemeConstants.BUTTON_HEIGHT)
+          .onClick(() => {
+            this.cancelAutoSkip();
+            this.advance(1);
+          })
+      }
+    }
+    .padding({ left: 24, right: 24, top: 20, bottom: 20 })
+    .backgroundColor(this.colors().overlayControlStrong)
+    .borderRadius(ThemeConstants.CARD_RADIUS)
+  }
+
+  /** 真的没有新内容了（服务端就这么多）：给「换一批」，不假装永远刷不完 */
+  @Builder
+  EndCard() {
+    Column({ space: 12 }) {
+      Text('这批已经看完了')
+        .fontSize(ThemeConstants.TITLE_MEDIUM)
+        .fontColor(this.colors().onOverlay)
+      Text('去设置里多选几个媒体库，能刷的内容会更多')
+        .fontSize(ThemeConstants.META_SMALL)
+        .fontColor(this.colors().onOverlayMuted)
+        .textAlign(TextAlign.Center)
+      Row({ space: 12 }) {
+        Button('换一批', { type: ButtonType.Normal, stateEffect: false })
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().onBrand)
+          .backgroundColor(this.colors().brandPrimary)
+          .borderRadius(ThemeConstants.BUTTON_RADIUS)
+          .height(ThemeConstants.BUTTON_HEIGHT)
+          .onClick(() => { this.loadFeed(); })
+        Button('设置', { type: ButtonType.Normal, stateEffect: false })
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().onOverlay)
+          .backgroundColor(this.colors().overlayControl)
+          .borderRadius(ThemeConstants.BUTTON_RADIUS)
+          .height(ThemeConstants.BUTTON_HEIGHT)
+          .onClick(() => { this.openSettings(); })
+      }
+    }
+    .padding({ left: 24, right: 24, top: 20, bottom: 20 })
+    .backgroundColor(this.colors().overlayControlStrong)
+    .borderRadius(ThemeConstants.CARD_RADIUS)
   }
 
   build() {
     Column() {
-      this.FeedToolbar()
-
       if (this.status === UiState.INITIAL || this.status === UiState.LOADING) {
         LoadingState({ hint: '正在准备短视频…' })
       } else if (this.status === UiState.ERROR) {
-        EmptyState({
-          message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
-          detail: '请检查网络或服务器状态',
-          actionLabel: '重试',
-          onAction: () => { this.loadFeed(); }
-        })
+        // 空态/错误态由父级加权容器负责垂直居中（EmptyState 自身不加 layoutWeight）
+        Column() {
+          EmptyState({
+            message: this.errorMsg.length > 0 ? this.errorMsg : '加载失败',
+            detail: '请检查网络或服务器状态',
+            actionLabel: '重试',
+            onAction: () => { this.loadFeed(); }
+          })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
       } else if (this.status === UiState.EMPTY) {
         // 空态分两种：没配过库 → 引导去设置；配过但没内容 → 如实说明
-        EmptyState({
-          message: ShortVideoPrefs.loadLibraryIds().length === 0
-            ? '还没有设置短视频媒体库'
-            : '所选的媒体库里没有可播放的视频',
-          detail: ShortVideoPrefs.loadLibraryIds().length === 0
-            ? '在设置里勾选要进入短视频模式的媒体库，「视频」页会随机连播这些库里的内容'
-            : '可以换几个媒体库，或先往库里添加内容',
-          actionLabel: '去设置',
-          icon: $r('sys.symbol.play_circle'),
-          onAction: () => { this.openSettings(); }
-        })
+        Column() {
+          EmptyState({
+            message: ShortVideoPrefs.loadLibraryIds().length === 0
+              ? '还没有设置短视频媒体库'
+              : '所选的媒体库里没有可播放的视频',
+            detail: ShortVideoPrefs.loadLibraryIds().length === 0
+              ? '在设置里勾选要进入短视频模式的媒体库，「视频」页会随机连播这些库里的内容'
+              : '可以换几个媒体库，或先往库里添加内容',
+            actionLabel: '去设置',
+            icon: $r('sys.symbol.play_circle'),
+            onAction: () => { this.openSettings(); }
+          })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
       } else {
-        // 视频层（最底）→ 播放流（封面/文案/按钮）→ 失败浮层 → 到底提示
+        // 视频层（最底）→ 环境背景（更底下）→ 播放流（封面/文案/操作栏）→ 各类浮层
         Stack({ alignContent: Alignment.Center }) {
-          // AVPlayer 的渲染目标。**不要** `libraryname`：
-          // 软解用的原生 XComponent 桥是全进程单例，本页只走硬解（解不了的内容引导去播放页），
+          // ① 环境背景：垫在视频面之下，只在真的出画面时出现（见 ambientVisible）
+          if (this.ambientVisible()) {
+            this.AmbientBackdrop()
+          }
+
+          // ② AVPlayer / 软解的渲染目标。**不要** `libraryname`：
+          // 软解用的原生 XComponent 桥是全进程单例，本页走 `surfaceId` 路径，
           // 挂上同一个 libraryname 会与播放页争抢那块桥状态。
           XComponent({
             id: 'short_video_surface',
@@ -1116,6 +2034,7 @@ export struct ShortVideoPage {
               }
             })
 
+          // ③ 一屏一条（滑到哪条播哪条）
           Swiper() {
             ForEach(this.items, (item: MediaItem, index: number) => {
               this.FeedCard(item, index)
@@ -1131,99 +2050,34 @@ export struct ShortVideoPage {
             }
             // 滑到哪条就播哪条（这就是"连续刷"）
             this.currentIndex = index;
+            this.prefetchIfNearEnd();
             this.playCurrent();
           })
           .width('100%')
           .height('100%')
 
-          // 暂停时的中央提示
-          if (this.paused && this.playbackError.length === 0) {
-            Column() {
-              SymbolGlyph($r('sys.symbol.play_fill'))
-                .fontSize(ThemeConstants.ICON_HERO)
-                .fontColor([this.colors().onOverlay])
-            }
-            .width(84)
-            .height(84)
-            .justifyContent(FlexAlign.Center)
-            .alignItems(HorizontalAlign.Center)
-            .backgroundColor(this.colors().overlayControlStrong)
-            .borderRadius(42)
-            .hitTestBehavior(HitTestMode.None)
+          // ④ 底部进度（细线 + 时间读数）
+          if (this.videoReady || this.paused) {
+            this.BottomProgress()
           }
 
-          // 本条播放失败：如实说明 + 软解入口 + 自动跳过倒计时
+          // ⑤ 中央状态浮层（都是"看"的信息，不参与触摸）
+          if (this.preparing && !this.videoReady && this.playbackError.length === 0) {
+            this.PreparingBadge()
+          }
+          if (this.paused && this.playbackError.length === 0 && !this.preparing) {
+            this.PausedBadge()
+          }
+          if (this.seekHint.length > 0) {
+            this.SeekHintBadge()
+          }
+
+          // ⑥ 失败 / 到底（这两个卡片里有按钮，因此不设 hitTestBehavior：
+          //    它们只有卡片那么大的命中区，卡片之外的点按照旧落到手势层）
           if (this.playbackError.length > 0) {
-            Column({ space: 12 }) {
-              Text(this.playbackError)
-                .fontSize(ThemeConstants.TITLE_MEDIUM)
-                .fontColor(this.colors().onOverlay)
-              Text(`将在 ${Math.round(kAutoSkipMs / 1000)} 秒后自动跳过`)
-                .fontSize(ThemeConstants.META_SMALL)
-                .fontColor(this.colors().onOverlayMuted)
-              Row({ space: 12 }) {
-                Button('用软解播放', { type: ButtonType.Normal, stateEffect: false })
-                  .fontSize(ThemeConstants.META_MEDIUM)
-                  .fontColor(this.colors().onBrand)
-                  .backgroundColor(this.colors().brandPrimary)
-                  .borderRadius(ThemeConstants.BUTTON_RADIUS)
-                  .height(ThemeConstants.BUTTON_HEIGHT)
-                  .onClick(() => {
-                    const item: MediaItem | null = this.currentItem();
-                    if (item !== null) {
-                      this.openInPlayer(item);
-                    }
-                  })
-                Button('跳过', { type: ButtonType.Normal, stateEffect: false })
-                  .fontSize(ThemeConstants.META_MEDIUM)
-                  .fontColor(this.colors().onOverlay)
-                  .backgroundColor(this.colors().overlayControl)
-                  .borderRadius(ThemeConstants.BUTTON_RADIUS)
-                  .height(ThemeConstants.BUTTON_HEIGHT)
-                  .onClick(() => {
-                    this.cancelAutoSkip();
-                    this.advance(1);
-                  })
-              }
-            }
-            .padding({ left: 24, right: 24, top: 20, bottom: 20 })
-            .backgroundColor(this.colors().overlayControlStrong)
-            .borderRadius(ThemeConstants.CARD_RADIUS)
-          }
-
-          // 进度条：短视频也要能看到"还剩多少"（细线，压在底部）
-          if (this.videoReady) {
-            Column() {
-              Progress({ value: this.progressRatio() * 100, total: 100,
-                type: ProgressType.Linear })
-                .color(this.colors().brandPrimary)
-                .backgroundColor('#33000000')
-                .width('100%')
-                .height(3)
-            }
-            .width('100%')
-            .height('100%')
-            .justifyContent(FlexAlign.End)
-            .hitTestBehavior(HitTestMode.None)
-          }
-
-          // 到底了：不自动循环（避免"永远刷不完"的假象），给「换一批」
-          if (this.reachedEnd) {
-            Column({ space: 14 }) {
-              Text('这批已经看完了')
-                .fontSize(ThemeConstants.TITLE_MEDIUM)
-                .fontColor(this.colors().onOverlay)
-              Button('换一批', { type: ButtonType.Normal, stateEffect: false })
-                .fontSize(ThemeConstants.META_MEDIUM)
-                .fontColor(this.colors().onBrand)
-                .backgroundColor(this.colors().brandPrimary)
-                .borderRadius(ThemeConstants.BUTTON_RADIUS)
-                .height(ThemeConstants.BUTTON_HEIGHT)
-                .onClick(() => { this.loadFeed(); })
-            }
-            .padding({ left: 24, right: 24, top: 20, bottom: 20 })
-            .backgroundColor(this.colors().overlayControlStrong)
-            .borderRadius(ThemeConstants.CARD_RADIUS)
+            this.FailureCard()
+          } else if (this.reachedEnd && !this.appendPending) {
+            this.EndCard()
           }
         }
         .layoutWeight(1)
