@@ -123,13 +123,43 @@ POST /Users/a8b1…/Configuration         -> HTTP 204
 | `TranscodingPage` | 也是 `/System/Configuration/encoding` 的字段编辑器，但只有 7 个字段、含一个不存在的 `AllowAv1Encoding`，而且**缺了最关键的硬件加速类型**。已被「转码」页取代（37 个字段里覆盖 32 个，字段名对着 `EncodingOptions.cs` 核过） |
 | `UsersMetadataPage` | `/System/Configuration/metadata` 的原始键值表（只有 `UseFileCreationTimeForDateAdded` 一个字段），与新的「媒体库元数据」页重复，入口也不再有页面指向它 |
 
-### 写这类页面时的两个坑（都是本轮设备实测踩到的）
+### 写这类页面时的三个坑（都是本轮设备实测踩到的）
 
 1. **`InputType.Number` 会吞掉负号**：`EncodingThreadCount` 的 `-1` 表示"自动"，
    用数字键盘的输入框显示/回写成 `1`，一保存服务端就从 -1 变成 1（实测）。
    需要负数或小数的字段（线程数、立体声增益、色调映射的几个 double）必须用 `InputType.Normal` 再自己解析；
 2. **只在服务端确实下发过该字段时才写回**（转码页的 `setIfPresent`）：
-   这样旧/新版本里不存在的字段不会被客户端凭空补一个默认值写回去。
+   这样旧/新版本里不存在的字段不会被客户端凭空补一个默认值写回去；
+3. **开关别用 `@Builder` 包一层，直接用 `SettingCell`**（见下一节）。
+
+### 开关：别自己用 `@Builder` 拼一个 `Toggle`，直接用 `SettingCell`
+
+设置主页原来是自己写了个 `@Builder ToggleRow(...)`，里面放裸 `Toggle`。设备实测的毛病：
+
+- 点「自动播放下一集」（原本**开**）想关掉它时，`onChange` 回调拿到的是**旧值 `true`**
+  （probe 日志：`saveUserField EnableNextEpisodeAutoPlay=true`），于是把 `true` 又写回服务器，
+  开关看起来"弹回去、点了没反应"（两行开关都复现过）；
+- 换成直接放 `SettingCell`（`@Component`，`showToggle: true`）之后，同一次点击回调拿到的是 `false`，
+  服务端正确翻转（主机实测：`True -> False`）。
+
+另一件事：`Toggle` 在**创建时**就会用它拿到的值回调一次 `onChange` ——
+也就是说"进设置页"这个动作本身会给每个"开着"的开关各触发一次回调。
+这不是用户操作，所以 `saveUserField` 现在会先跟 `loadUserConfig` 记下的服务端值比对，
+**相同就不发请求**（原来每次进页面都会白写 2 个 PATCH，而每个 PATCH 在原生侧是一次 GET + 一次 POST）。
+
+### 回归巡检
+
+`全部可逆`：翻转 → 断言服务端字段变化（且**只有这一个字段**变）→ 写回基线 → 断言零差异。
+
+| 开关 | 结果 |
+| --- | --- |
+| 自动播放下一集（`EnableNextEpisodeAutoPlay`） | True → False ✓，只此一字段变化 |
+| 隐藏已播放的最新项（`HidePlayedInLatest`） | True → False ✓ |
+| 显示缺失的剧集（`DisplayMissingEpisodes`） | False → True ✓ |
+| 优先播放默认音轨（音频页 `PlayDefaultAudioTrack`） | False → True ✓ |
+| 记住字幕选择（字幕页 `RememberSubtitleSelections`） | False → True ✓ |
+
+五项全部通过，最后一项收尾时 `UserConfiguration` 与基线**零差异**。
 
 
 ### 命名配置的 key 别猜，实测为准
