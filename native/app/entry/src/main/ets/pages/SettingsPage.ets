@@ -6,6 +6,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { PageHeader } from '../components/PageHeader';
 import { SettingCell } from '../components/SettingCell';
+import { SectionCard } from '../components/SectionCard';
 import { JsonUtil } from '../common/JsonUtil';
 import { SessionUtil } from '../services/SessionUtil';
 import { ShortVideoPrefs } from '../common/ShortVideoPrefs';
@@ -66,7 +67,14 @@ export struct SettingsPage {
 
   @Link themeTick: number;
   @Prop embedded: boolean = false;
-
+  /**
+   * 「设置」页签被选中时由 MainShell 自增。
+   *
+   * 设置页是嵌在 Tabs 里的普通组件：从子页返回、或从别的页签切回来时**不会重建**，
+   * 而本页有几行是"现读本地偏好"算出来的（例如短视频模式的「已选 N 个媒体库」）——
+   * 没有这个信号的话，改完偏好返回看到的还是旧数字（设备实测过）。
+   */
+  @Prop settingsTick: number = 0;
   async aboutToAppear(): Promise<void> {
     const vm: AppViewModel = AppViewModel.getInstance();
     this.themeMode = vm.themeMode;
@@ -170,12 +178,22 @@ export struct SettingsPage {
     return AppViewModel.getInstance().colors();
   }
 
+  /**
+   * 「主题与显示」这一行的副标题。
+   *
+   * 读的是 `AppViewModel` 里的**当前**主题，而不是本页 `aboutToAppear` 时抄下来的副本 ——
+   * 用副本的话，在主题页改完主题、返回设置页时这一行还显示改之前的主题（设备实测：
+   * 选「浅色」返回后仍写着「深色」，只有重启应用才会对上）。`this.themeTick` 用来
+   * 建立"主题变了要重算"的依赖（与 `colors()` 同一套路）。
+   */
   private themeSubtitle(): string {
+    this.themeTick;
+    const vm: AppViewModel = AppViewModel.getInstance();
     const modeLabel: string =
-      this.themeMode === 'light' ? '\u6d45\u8272' : (this.themeMode === 'dark' ? '\u6df1\u8272' : '\u8ddf\u968f\u7cfb\u7edf');
+      vm.themeMode === 'light' ? '\u6d45\u8272' : (vm.themeMode === 'dark' ? '\u6df1\u8272' : '\u8ddf\u968f\u7cfb\u7edf');
     const accentLabel: string =
-      this.accent === 'jade' ? '\u7fe1\u7fe0\u7eff'
-        : (this.accent === 'amber' ? '\u7425\u73c0' : (this.accent === 'coral' ? '\u73ca\u7469' : '\u6d77\u6d0b\u84dd'));
+      vm.accent === 'jade' ? '\u7fe1\u7fe0\u7eff'
+        : (vm.accent === 'amber' ? '\u7425\u73c0' : (vm.accent === 'coral' ? '\u73ca\u7469' : '\u6d77\u6d0b\u84dd'));
     return `${modeLabel} \u00b7 ${accentLabel}`;
   }
 
@@ -191,10 +209,13 @@ export struct SettingsPage {
   /**
    * 「短视频模式」这一行的副标题：直接说清"当前选了几个库"。
    *
-   * 为什么读偏好而不是用 @State：这一行只是入口，勾选发生在子页里、返回时本页不会重建；
-   * 每次渲染都从偏好现读（本地读，无网络）才能保证返回后看到的数字是新的。
+   * 为什么读偏好而不是用 @State：这一行只是入口，勾选发生在子页里。
+   * 但**只靠"每次渲染现读"是不够的** —— 从子页返回时本页并不会重建（页面还在路由栈里），
+   * 于是副标题会一直显示进子页之前的旧数字（设备实测：取消勾选一个库、返回后仍显示「已选 2 个」）。
+   * 所以这里再叠一个 `prefTick`：`onPageShow` 时自增，让这一行跟着重算。
    */
   private shortVideoSubtitle(): string {
+    this.settingsTick;
     const count: number = ShortVideoPrefs.loadLibraryIds().length;
     if (count === 0) {
       return '选择进入短视频模式的媒体库（当前未设置）';
@@ -690,12 +711,28 @@ export struct SettingsPage {
             { icon: '', title: '界面语言', subtitle: '简体中文（本应用目前只提供中文界面）', info: true },
           ])
 
-          // 显示（含服务器开关）
+          /*
+           * 显示 / 播放 / 服务器这三张卡的副标题是**算出来的**（`themeSubtitle()` /
+           * `playerLabel()` / `shortVideoSubtitle()` / 服务器信息），所以这里不把行丢进
+           * `this.SectionCard(标题, 图标, 行数组)` 那种按值 `@Builder` 里 ——
+           * 按值参数不会随状态刷新，行会"冻"在第一次渲染的值上（设备实测：
+           * 短视频模式取消勾选一个库、返回设置页后仍显示「已选 2 个媒体库」；
+           * 切页签也不会变）。改成用 `SectionCard` 组件 + 行内 `SettingCell`，
+           * 内容由组件在渲染时回调，值自然是最新的。
+           */
           Column() {
-            this.SectionCard('\u663e\u793a', 'display', [
-              { icon: 'paintpalette', title: '\u4e3b\u9898\u4e0e\u663e\u793a', subtitle: this.themeSubtitle(),
-                route: 'pages/settings/ThemeSettingsPage' },
-            ])
+            SectionCard({ title: '显示', icon: $r('sys.symbol.display'), showHeaderIcon: true }) {
+              SettingCell({
+                title: '\u4e3b\u9898\u4e0e\u663e\u793a',
+                subtitle: this.themeSubtitle(),
+                showIcon: true,
+                icon: $r('sys.symbol.paintpalette'),
+                showChevron: true,
+                onTap: () => {
+                  router.pushUrl({ url: 'pages/settings/ThemeSettingsPage' });
+                }
+              })
+            }
             Column() {
               SettingCell({
                 title: '\u9690\u85cf\u5df2\u64ad\u653e\u7684\u6700\u65b0\u9879',
@@ -737,12 +774,31 @@ export struct SettingsPage {
 
           // 播放（含服务器开关）
           Column() {
-            this.SectionCard('\u64ad\u653e', 'play_circle', [
-              { icon: 'video', title: '\u9ed8\u8ba4\u64ad\u653e\u5668', subtitle: `\u65b0\u6253\u5f00\u7684\u5a92\u4f53\u5c06\u4f7f\u7528${this.playerLabel()}`, action: 'defaultPlayer' },
+            SectionCard({ title: '\u64ad\u653e', icon: $r('sys.symbol.play_circle'),
+              showHeaderIcon: true }) {
+              SettingCell({
+                title: '\u9ed8\u8ba4\u64ad\u653e\u5668',
+                subtitle: `\u65b0\u6253\u5f00\u7684\u5a92\u4f53\u5c06\u4f7f\u7528${this.playerLabel()}`,
+                showIcon: true,
+                icon: $r('sys.symbol.video'),
+                showChevron: true,
+                onTap: () => {
+                  this.showPlayerPicker = true;
+                }
+              })
+              Divider().color(this.colors().divider).strokeWidth(0.5)
               // 短视频模式：选择哪些媒体库进入「视频」页的短视频流（承载页见 pages/ShortVideoPage）
-              { icon: 'play_circle', title: '短视频模式', subtitle: this.shortVideoSubtitle(),
-                route: 'pages/settings/ShortVideoSettingsPage' },
-            ])
+              SettingCell({
+                title: '短视频模式',
+                subtitle: this.shortVideoSubtitle(),
+                showIcon: true,
+                icon: $r('sys.symbol.play_circle'),
+                showChevron: true,
+                onTap: () => {
+                  router.pushUrl({ url: 'pages/settings/ShortVideoSettingsPage' });
+                }
+              })
+            }
             Column() {
               SettingCell({
                 title: '\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6',
@@ -787,13 +843,17 @@ export struct SettingsPage {
           }
 
           // 服务器（Flutter：名称 InfoTile + 地址 + 版本）
-          this.SectionCard('\u670d\u52a1\u5668', 'externaldrive', [
+          SectionCard({ title: '\u670d\u52a1\u5668', icon: $r('sys.symbol.externaldrive'),
+            showHeaderIcon: true }) {
             // 名称行原来错误地显示了地址；地址行改用会话权威值（原为可能陈旧的 VM 值）
-            { icon: '', title: '\u670d\u52a1\u5668\u540d\u79f0', subtitle: this.serverNameText(), info: true },
-            { icon: '', title: '\u670d\u52a1\u5668\u5730\u5740', subtitle: this.serverAddressText(), info: true },
+            SettingCell({ title: '\u670d\u52a1\u5668\u540d\u79f0', valueText: this.serverNameText() })
+            Divider().color(this.colors().divider).strokeWidth(0.5)
+            SettingCell({ title: '\u670d\u52a1\u5668\u5730\u5740', valueText: this.serverAddressText() })
+            Divider().color(this.colors().divider).strokeWidth(0.5)
             // 取不到版本时显示"未知"（原来永远停在"加载中..."）
-            { icon: '', title: '\u670d\u52a1\u5668\u7248\u672c', subtitle: this.serverVersion.length > 0 ? this.serverVersion : '\u672a\u77e5', info: true },
-          ])
+            SettingCell({ title: '\u670d\u52a1\u5668\u7248\u672c',
+              valueText: this.serverVersion.length > 0 ? this.serverVersion : '\u672a\u77e5' })
+          }
 
           // 账号
           this.SectionCard('\u8d26\u53f7', 'person_2', [

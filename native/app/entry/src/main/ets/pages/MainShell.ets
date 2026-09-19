@@ -22,6 +22,8 @@ import { SettingsPage } from './SettingsPage';
  */
 /** 「视频」页在底部页签中的下标（与 ShortVideoPage.kVideoTabIndex 对应） */
 const kVideoTabIndex: number = 1;
+/** 「设置」页在底部页签中的下标 */
+const kSettingsTabIndex: number = 2;
 
 @Entry
 @Component
@@ -37,6 +39,14 @@ struct MainShell {
    * 回到「视频」页却仍是空态 —— 必须由一个外部信号告诉它"配置可能变了"。
    */
   @State private videoTabTick: number = 0;
+  /**
+   * 「设置」页的重读信号：每次切到该页签就自增。
+   *
+   * 同样的道理：设置页里有些行是"现读本地偏好"算出来的（例如短视频模式的「已选 N 个媒体库」），
+   * 而设置页是从子页返回时**不会重建**的嵌入式组件 —— 不给信号的话，
+   * 用户刚在子页改完、返回设置页看到的还是旧数字（设备实测：取消勾选一个库后仍显示「已选 2 个」）。
+   */
+  @State private settingsTabTick: number = 0;
   /** 窗口实例：沉浸式全屏（「视频」页）需要它，进入/退出必须成对 */
   private windowRef: window.Window | null = null;
   /** 当前是否为「视频」页应用了沉浸式全屏（避免重复进入/退出） */
@@ -52,6 +62,11 @@ struct MainShell {
   aboutToAppear(): void {
     AppViewModel.getInstance().onThemeChanged = () => {
       this.themeTick = this.themeTick + 1;
+    };
+    // 子页改了本地偏好（例如短视频模式勾选的媒体库）：给设置页一个刷新信号，
+    // 否则从子页返回时设置页不会重建，那几行"现读偏好"的文字仍是旧值。
+    AppViewModel.getInstance().onLocalPrefsChanged = () => {
+      this.settingsTabTick = this.settingsTabTick + 1;
     };
     this.themeTick = AppViewModel.getInstance().themeVersion;
     // 窗口实例提前取回：切到「视频」页要立刻隐藏系统栏，不能等到用户切页签时才开始异步取
@@ -121,6 +136,10 @@ struct MainShell {
       if (index === kVideoTabIndex) {
         // 切到「视频」页：重读短视频媒体库配置（设置页可能刚改过）+ 进入全屏沉浸式
         this.videoTabTick = this.videoTabTick + 1;
+      }
+      if (index === kSettingsTabIndex) {
+        // 切到「设置」页：让"读本地偏好"的那几行重算（见 settingsTabTick 的说明）
+        this.settingsTabTick = this.settingsTabTick + 1;
       }
       this.applyChromeForTab(index);
     })
@@ -280,7 +299,8 @@ struct MainShell {
           .tabBar('视频')
 
           TabContent() {
-            SettingsPage({ themeTick: $themeTick, embedded: true })
+            SettingsPage({ themeTick: $themeTick, embedded: true,
+              settingsTick: this.settingsTabTick })
           }
           .tabBar($r('app.string.nav_settings'))
         }
