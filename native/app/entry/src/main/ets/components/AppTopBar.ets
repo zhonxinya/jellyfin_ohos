@@ -22,6 +22,15 @@ export struct AppTopBar {
   /** 页面自定义的返回行为；不传则走 router.back() */
   onBackTap: () => void = () => { router.back(); };
   @BuilderParam action: () => void = this.defaultAction;
+  /**
+   * 挖孔（刘海/胶囊）要避让的高度（vp，由外壳写入 `AppStorage`）。
+   *
+   * 为什么需要：外壳是**整屏沉浸式**（见 `MainShell.applyChromeForTab`），系统不再替应用
+   * 避让顶部，56vp 的顶栏会顶到屏幕最上边 —— 有挖孔的机型上标题会被压住。
+   * 为什么走 `AppStorage`：顶栏被外壳与几十个页面共用，让它们各自异步取窗口既啰嗦、
+   * 也可能拿到不同窗口实例。外壳不在栈上（例如登录页）或无挖孔时该值为 0，行为与以前一致。
+   */
+  @StorageProp('shellTopInsetVp') topInsetVp: number = 0;
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
@@ -61,6 +70,8 @@ export struct AppTopBar {
         .strokeWidth(0.5)
     }
     .width('100%')
+    // 挖孔避让：沉浸式下顶栏顶到屏幕最上边，有挖孔的机型要让开那一条
+    .padding({ top: this.topInsetVp })
     .backgroundColor(this.colors().cardBackground)
   }
 }
