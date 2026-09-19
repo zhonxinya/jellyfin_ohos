@@ -9,22 +9,32 @@ import display from '@ohos.display';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 
 /**
- * HeroBanner —— 首页顶部推荐横幅，视觉规则已按 mybooks_ohos 重做。
+ * HeroBanner —— 首页顶部推荐横幅。
  *
- * 与参考项目一致的要点：
- * - 遮罩只用令牌，不再写死 `#000000CC`，也修掉了原实现"两个 1.0 停靠点 + `background` 放错位置"的渐变 bug；
- * - 叠加在图片上的文字硬编码白色系（`onOverlay` / `onOverlayMuted`）——参考项目的明确约定：
- *   `on_brand` 在深色主题会翻成近黑，不能用在图片上；
- * - 主操作由 52vp 圆形 FAB 改为参考项目按钮规格：**48vp 高、12vp 圆角（不是胶囊）、品牌色实底 + `onBrand` 文字**；
- * - 加载态用 48vp 品牌色 `LoadingProgress`（参考项目 LoadingState 尺寸），占位底色用卡片色。
+ * 视觉规则对齐 mybooks_ohos：
+ * - 遮罩只用令牌，不写死 `#000000CC`，也修掉过原实现"两个 1.0 停靠点 + `background` 放错位置"的渐变 bug；
+ * - 叠加在图片上的文字硬编码白色系（`onOverlay` / `onOverlayMuted`）——`on_brand` 在深色主题
+ *   会翻成近黑，不能用在图片上；
+ * - 加载态用 48vp 品牌色 `LoadingProgress`，占位底色用卡片色。
  *
- * 数据来源：/Users/{userId}/Items?IncludeItemTypes=Movie,Series&Limit=1&SortBy=Random
+ * 本轮改动（需求：**移除明显的播放按钮**、**可以滑动切换推荐作品**）：
+ * 1. **不再放 48vp 品牌色按钮**。原来那个按钮写的是「播放」、点击却是跳详情页
+ *    （文案与行为不符），而且它是整块横幅里最抢眼的元素 —— 推荐位的任务是"吸引点进去看"，
+ *    不是让人在首页直接起播。现在**整块横幅可点**（进该条详情），动作与视觉一致；
+ * 2. **横向滑动切换**：数据从 1 条改成一批（`limit=6`），用 `Swiper` 一屏一条，
+ *    右下角给分页圆点（正好落在原按钮的位置，不与左侧标题抢空间）。
+ *    首页外层是纵向 `Scroll`，横滑与之不冲突。
+ *
+ * 数据来源：/Users/{userId}/Items?IncludeItemTypes=Movie,Series&Limit=6&SortBy=Random
  */
 @Component
 export struct HeroBanner {
-  @Prop bannerItem: MediaItem = new MediaItem();
+  /** 推荐条目（多条时可横向滑动切换） */
+  @Prop items: MediaItem[] = [];
   @Prop status: string = UiState.LOADING;
   @Prop errorMsg: string = '';
+  /** 当前显示第几条（分页圆点与"点开的是哪一条"都按它走） */
+  @State private currentIndex: number = 0;
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
@@ -43,16 +53,16 @@ export struct HeroBanner {
   }
 
   private hasContent(): boolean {
-    return this.bannerItem.id.length > 0 && this.bannerItem.backdropTag.length > 0;
+    return this.items.length > 0 && this.items[0].id.length > 0;
   }
 
-  private openDetail(): void {
-    if (this.bannerItem.id.length === 0) {
+  private openDetail(item: MediaItem): void {
+    if (item.id.length === 0) {
       return;
     }
     router.pushUrl({
       url: 'pages/DetailPage',
-      params: { itemId: this.bannerItem.id }
+      params: { itemId: item.id }
     });
   }
 
@@ -82,8 +92,40 @@ export struct HeroBanner {
 
   @Builder
   BannerContent() {
+    Swiper() {
+      ForEach(this.items, (item: MediaItem) => {
+        this.BannerSlide(item)
+      }, (item: MediaItem) => item.id)
+    }
+    .autoPlay(false)
+    .loop(false)
+    .index(this.currentIndex)
+    .onChange((index: number) => {
+      this.currentIndex = index;
+    })
+    // 分页圆点：有圆点用户才知道这里可以滑；放右下角（原按钮的位置）
+    .indicator(Indicator.dot()
+      .itemWidth(6)
+      .itemHeight(6)
+      .selectedItemWidth(16)
+      .selectedItemHeight(6)
+      .color(this.colors().onOverlayMuted)
+      .selectedColor(this.colors().onOverlay)
+      .right(ThemeConstants.PAGE_PADDING)
+      .bottom(12))
+    .width('100%')
+    .height(this.bannerHeight())
+  }
+
+  /**
+   * 单条推荐：背景图 + 渐变遮罩 + 标题/元信息。
+   *
+   * **没有播放按钮**（见文件头说明）：整块区域可点，进入该条详情页。
+   */
+  @Builder
+  BannerSlide(item: MediaItem) {
     Stack({ alignContent: Alignment.BottomStart }) {
-      Image(this.bannerItem.imageUrl(1200, 'Backdrop'))
+      Image(item.imageUrl(1200, 'Backdrop'))
         .width('100%')
         .height(this.bannerHeight())
         .objectFit(ImageFit.Cover)
@@ -105,58 +147,30 @@ export struct HeroBanner {
           ]
         })
 
-      Row({ space: 12 }) {
-        Column({ space: 4 }) {
-          Text(this.bannerItem.name)
-            .fontSize(ThemeConstants.TITLE_XLARGE)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.colors().onOverlay)
-            .maxLines(2)
+      Column({ space: 4 }) {
+        Text(item.name)
+          .fontSize(ThemeConstants.TITLE_XLARGE)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.colors().onOverlay)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (item.metaLine().length > 0) {
+          Text(item.metaLine())
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().onOverlayMuted)
+            .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (this.bannerItem.metaLine().length > 0) {
-            Text(this.bannerItem.metaLine())
-              .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onOverlayMuted)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
         }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        Button({ type: ButtonType.Normal, stateEffect: false }) {
-          Row({ space: 6 }) {
-            SymbolGlyph($r('sys.symbol.play'))
-              .fontSize(ThemeConstants.ICON_MEDIUM)
-              .fontColor([this.colors().onBrand])
-            Text('播放')
-              .fontSize(ThemeConstants.TITLE_MEDIUM)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.colors().onBrand)
-          }
-          .alignItems(VerticalAlign.Center)
-        }
-        .height(ThemeConstants.BUTTON_HEIGHT)
-        .padding({ left: 18, right: 18 })
-        .backgroundColor(this.colors().brandPrimary)
-        .borderRadius(ThemeConstants.BUTTON_RADIUS)
-        .stateStyles({
-          pressed: {
-            .backgroundColor(this.colors().brandPrimaryPressed)
-          }
-        })
-        .onClick(() => {
-          this.openDetail();
-        })
       }
+      .alignItems(HorizontalAlign.Start)
+      // 右侧让出分页圆点的位置（圆点在右下角，标题不该压上去）
+      .padding({ left: ThemeConstants.PAGE_PADDING, right: 64, bottom: 20 })
       .width('100%')
-      .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: 20 })
-      .alignItems(VerticalAlign.Bottom)
     }
     .width('100%')
     .height(this.bannerHeight())
     .onClick(() => {
-      this.openDetail();
+      this.openDetail(item);
     })
   }
 }
@@ -166,7 +180,13 @@ export struct HeroBanner {
 export struct HeroBannerLoader {
   onBannerTap: () => void = () => {};
 
-  @State private bannerItem: MediaItem = new MediaItem();
+  /**
+   * 推荐条目。
+   *
+   * 为什么是 6 条而不是 1 条：需求要"滑动切换推荐作品"，至少得够滑几下；
+   * 也不宜太多 —— 每条背景图都要下载，而这是首页首屏最贵的一批图。
+   */
+  @State private items: MediaItem[] = [];
   @State private status: string = UiState.LOADING;
   @State private errorMsg: string = '';
 
@@ -178,7 +198,7 @@ export struct HeroBannerLoader {
     this.status = UiState.LOADING;
     const query: ItemsQueryOptions = new ItemsQueryOptions();
     query.includeItemTypes = 'Movie,Series';
-    query.limit = 1;
+    query.limit = 6;
     query.sortBy = 'Random';
     query.fields = 'Overview,CommunityRating,RunTimeTicks,ProductionYear,Genres,BackdropImageTags';
     const raw: string = await JellyfinNative.queryItems(query.toJson());
@@ -188,22 +208,28 @@ export struct HeroBannerLoader {
       this.errorMsg = result.message.length > 0 ? result.message : '加载失败';
       return;
     }
-    const items: Object[] = JsonUtil.extractItems(result.data);
-    if (items.length > 0) {
-      const item: MediaItem = MediaItem.fromJson(items[0]);
+    const rawItems: Object[] = JsonUtil.extractItems(result.data);
+    // 横幅用的是横图（Backdrop）：没有横图的条目跳过 —— 否则滑到那一条是纯色块，观感很差
+    const keep: MediaItem[] = [];
+    for (let i = 0; i < rawItems.length; i++) {
+      const item: MediaItem = MediaItem.fromJson(rawItems[i]);
       if (item.id.length > 0 && item.backdropTag.length > 0) {
-        this.bannerItem = item;
-        this.status = UiState.SUCCESS;
-        return;
+        keep.push(item);
       }
     }
-    this.status = UiState.ERROR;
-    this.errorMsg = '暂无推荐内容';
+    if (keep.length === 0) {
+      this.items = [];
+      this.status = UiState.ERROR;
+      this.errorMsg = '暂无推荐内容';
+      return;
+    }
+    this.items = keep;
+    this.status = UiState.SUCCESS;
   }
 
   build() {
     HeroBanner({
-      bannerItem: this.bannerItem,
+      items: this.items,
       status: this.status,
       errorMsg: this.errorMsg
     })
