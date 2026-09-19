@@ -5,6 +5,7 @@ import { AppViewModel } from '../viewmodel/AppViewModel';
 import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { PageHeader } from '../components/PageHeader';
+import { SettingCell } from '../components/SettingCell';
 import { JsonUtil } from '../common/JsonUtil';
 import { SessionUtil } from '../services/SessionUtil';
 import { ShortVideoPrefs } from '../common/ShortVideoPrefs';
@@ -60,6 +61,8 @@ export struct SettingsPage {
   @State private enableNextEpisodeAutoPlay: boolean = false;
   @State private rememberAudioSelections: boolean = false;
   @State private displayMissingEpisodes: boolean = false;
+  /** 服务端当前值（`loadUserConfig` 里填）：用来跳过与服务器相同的写入 */
+  private serverValues: Record<string, Object> = {};
 
   @Link themeTick: number;
   @Prop embedded: boolean = false;
@@ -104,10 +107,18 @@ export struct SettingsPage {
     if (cfg === null) {
       return;
     }
-    this.hidePlayedInLatest = JsonUtil.getBoolean(cfg, 'HidePlayedInLatest', false);
-    this.enableNextEpisodeAutoPlay = JsonUtil.getBoolean(cfg, 'EnableNextEpisodeAutoPlay', false);
-    this.rememberAudioSelections = JsonUtil.getBoolean(cfg, 'RememberAudioSelections', false);
-    this.displayMissingEpisodes = JsonUtil.getBoolean(cfg, 'DisplayMissingEpisodes', false);
+    // 记下"服务端当前值"：用来跳过与服务器相同的写入（见 saveUserField）
+    const values: Record<string, Object> = {};
+    values['HidePlayedInLatest'] = JsonUtil.getBoolean(cfg, 'HidePlayedInLatest', false);
+    values['EnableNextEpisodeAutoPlay'] = JsonUtil.getBoolean(cfg, 'EnableNextEpisodeAutoPlay', false);
+    values['RememberAudioSelections'] = JsonUtil.getBoolean(cfg, 'RememberAudioSelections', false);
+    values['DisplayMissingEpisodes'] = JsonUtil.getBoolean(cfg, 'DisplayMissingEpisodes', false);
+    this.serverValues = values;
+
+    this.hidePlayedInLatest = values['HidePlayedInLatest'] as boolean;
+    this.enableNextEpisodeAutoPlay = values['EnableNextEpisodeAutoPlay'] as boolean;
+    this.rememberAudioSelections = values['RememberAudioSelections'] as boolean;
+    this.displayMissingEpisodes = values['DisplayMissingEpisodes'] as boolean;
   }
 
   private getUserId(): string {
@@ -127,15 +138,31 @@ export struct SettingsPage {
    * （旧实现直接把 `{field: value}` 当完整配置 POST 到 `/Users/Configuration?userId=`，
    * 那个路由在 10.8.12 上不存在 —— userId 被当成字面量 "Configuration"，服务端直接 400，
    * 所以这些开关以前根本没能保存到服务器。）
+   *
+   * 两个"别白写请求"的细节：
+   * - 值与服务端当前值相同就直接返回 —— `Toggle` 在**创建时**就会用它拿到的值回调一次
+   *   （实测每次进设置页都会给两个"开着"的开关各触发一次 `onChange`），
+   *   那不是用户操作，照发就是每次进页面白写几个 PATCH（每个还是 GET+POST）；
+   * - 保存成功后把"已知的服务端值"更新掉，避免同一次会话里重复提交同一个值。
    */
   private async saveUserField(field: string, value: boolean | string | number): Promise<void> {
+    const known: Object | undefined = this.serverValues[field];
+    if (known !== undefined && `${known}` === `${value}`) {
+      // 与服务器相同：不发请求（开关在创建时回调一次，那不是用户操作）
+      return;
+    }
     const patch: Record<string, Object> = {};
     patch[field] = value;
     const result: NativeResult = JellyfinNative.parseResult(
       await JellyfinNative.patchUserConfiguration(JSON.stringify(patch)));
-    if (!result.ok && result.message.length > 0) {
-      this.message = result.message;
+    if (!result.ok) {
+      if (result.message.length > 0) {
+        this.message = result.message;
+      }
+      // 失败时不更新已知值，用户再点一次仍会发请求
+      return;
     }
+    this.serverValues[field] = value;
   }
 
   private colors(): ThemeColors {
@@ -591,31 +618,15 @@ export struct SettingsPage {
     })
   }
 
-  /** 开关行 —— 对齐参考项目 `SettingCell` 的 toggle 分支（16/12 文案 + 品牌色开关） */
-  @Builder
-  ToggleRow(title: string, subtitle: string, isOn: boolean, onChange: (v: boolean) => void) {
-    Row({ space: 12 }) {
-      Column({ space: 4 }) {
-        Text(title)
-          .fontSize(ThemeConstants.TITLE_MEDIUM)
-          .fontColor(this.colors().textPrimary)
-        if (subtitle.length > 0) {
-          Text(subtitle)
-            .fontSize(ThemeConstants.META_SMALL)
-            .fontColor(this.colors().textSecondary)
-        }
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: isOn })
-        .selectedColor(this.colors().brandPrimary)
-        .onChange((v: boolean) => {
-          onChange(v);
-        })
-    }
-    .width('100%')
-    .padding(ThemeConstants.PAGE_PADDING)
-  }
+  /**
+   * 开关行**不再**用 `@Builder` 包一层，直接在 `build()` 里用 `SettingCell`（`@Component`）。
+   *
+   * 原因：`@Builder` 的按值参数不会随状态刷新。用户点开关 → 状态改掉 → 页面重建时
+   * 组件又被塞回**旧值**，开关被"弹回去"，并且还会再回调一次旧值 ——
+   * 设备实测点「自动播放下一集」（原本开）时回调拿到 `true`，于是又把 `true` 写回服务器，
+   * 表现就是"点了没反应"（probe 日志：`saveUserField EnableNextEpisodeAutoPlay=true`）。
+   * 其它设置页（网络 / 转码 / 品牌 / 音频…）一直是直接放 `SettingCell`，都是好的。
+   */
 
   build() {
     Stack() {
@@ -686,11 +697,16 @@ export struct SettingsPage {
                 route: 'pages/settings/ThemeSettingsPage' },
             ])
             Column() {
-              this.ToggleRow('\u9690\u85cf\u5df2\u64ad\u653e\u7684\u6700\u65b0\u9879', '\u5728\u201c\u6700\u65b0\u6dfb\u52a0\u201d\u4e2d\u9690\u85cf\u5df2\u770b\u5b8c\u7684\u5185\u5bb9',
-                this.hidePlayedInLatest, (v: boolean) => {
+              SettingCell({
+                title: '\u9690\u85cf\u5df2\u64ad\u653e\u7684\u6700\u65b0\u9879',
+                subtitle: '\u5728\u201c\u6700\u65b0\u6dfb\u52a0\u201d\u4e2d\u9690\u85cf\u5df2\u770b\u5b8c\u7684\u5185\u5bb9',
+                showToggle: true,
+                toggleOn: this.hidePlayedInLatest,
+                onToggle: (v: boolean) => {
                   this.hidePlayedInLatest = v;
                   this.saveUserField('HidePlayedInLatest', v);
-                })
+                }
+              })
             }
             .width('100%')
             .backgroundColor(this.colors().cardBackground)
@@ -728,11 +744,16 @@ export struct SettingsPage {
                 route: 'pages/settings/ShortVideoSettingsPage' },
             ])
             Column() {
-              this.ToggleRow('\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6', '\u64ad\u653e\u5b8c\u4e00\u96c6\u540e\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6',
-                this.enableNextEpisodeAutoPlay, (v: boolean) => {
+              SettingCell({
+                title: '\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6',
+                subtitle: '\u64ad\u653e\u5b8c\u4e00\u96c6\u540e\u81ea\u52a8\u64ad\u653e\u4e0b\u4e00\u96c6',
+                showToggle: true,
+                toggleOn: this.enableNextEpisodeAutoPlay,
+                onToggle: (v: boolean) => {
                   this.enableNextEpisodeAutoPlay = v;
                   this.saveUserField('EnableNextEpisodeAutoPlay', v);
-                })
+                }
+              })
             }
             .width('100%')
             .backgroundColor(this.colors().cardBackground)
@@ -747,11 +768,16 @@ export struct SettingsPage {
               { icon: 'video', title: '\u663e\u793a\u7f3a\u5931\u7684\u5267\u96c6', subtitle: '\u5728\u5267\u96c6\u5217\u8868\u4e2d\u663e\u793a\u5c1a\u672a\u83b7\u53d6\u7684\u5267\u96c6' },
             ])
             Column() {
-              this.ToggleRow('\u663e\u793a\u7f3a\u5931\u7684\u5267\u96c6', '\u5728\u5267\u96c6\u5217\u8868\u4e2d\u663e\u793a\u5c1a\u672a\u83b7\u53d6\u7684\u5267\u96c6',
-                this.displayMissingEpisodes, (v: boolean) => {
+              SettingCell({
+                title: '\u663e\u793a\u7f3a\u5931\u7684\u5267\u96c6',
+                subtitle: '\u5728\u5267\u96c6\u5217\u8868\u4e2d\u663e\u793a\u5c1a\u672a\u83b7\u53d6\u7684\u5267\u96c6',
+                showToggle: true,
+                toggleOn: this.displayMissingEpisodes,
+                onToggle: (v: boolean) => {
                   this.displayMissingEpisodes = v;
                   this.saveUserField('DisplayMissingEpisodes', v);
-                })
+                }
+              })
             }
             .width('100%')
             .backgroundColor(this.colors().cardBackground)
