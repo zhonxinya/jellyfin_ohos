@@ -358,6 +358,13 @@ struct UsersPage {
         Text(user.isDisabled ? '已禁用' : (user.isHidden ? '隐藏用户' : '可登录'))
           .fontSize(ThemeConstants.LABEL_SMALL)
           .fontColor(user.isDisabled ? this.colors().error : this.colors().textSecondary)
+        if (this.isCurrentLoggedInAdmin(user)) {
+          // 「删除」对当前账号是禁用的：与其让用户点了才看到拒绝提示，不如直接说明原因
+          Text('当前登录账号（不能删除自己）')
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().warning)
+            .width('100%')
+        }
       }
       .layoutWeight(1)
       Button('编辑')
