@@ -105,6 +105,13 @@ const kTopChromeVp: number = 64;
 const kBottomChromeVp: number = 108;
 const kRailWidthVp: number = 84;
 const kRailHeightVp: number = 380;
+/**
+ * 横屏下"底部控件带"的高度（vp）。
+ *
+ * 横屏可用高度只有 ~306vp（2844×1071px 的画面区），操作栏是横排的一行，
+ * 因此整条底部带都算控件区 —— 竖屏那套"右侧一列"的判定放到横屏会把大半画面吃掉。
+ */
+const kLandscapeBottomVp: number = 92;
 
 /**
  * 「视频」页 —— 短视频模式的承载页（底部导航第二个页签）。
@@ -261,6 +268,8 @@ export struct ShortVideoPage {
   private windowRef: window.Window | null = null;
   /** 方向选择：跟随系统 / 横屏 / 竖屏 */
   @State private orientation: PlayerOrientation = 'auto';
+  /** 进入本页签之前窗口的首选方向（离开页签时还原；<0 表示还没记录） */
+  private savedOrientationValue: number = -1;
 
   // ───────────────── 页内软解回退（硬解不支持时不再跳过）─────────────────
   //
@@ -298,7 +307,16 @@ export struct ShortVideoPage {
   private lastReportAt: number = 0;
 
   aboutToAppear(): void {
+    // 恢复上次的方向选择（横竖屏是用户偏好，见 ShortVideoPrefs.loadOrientation）
+    const saved: string = ShortVideoPrefs.loadOrientation();
+    this.orientation = saved === 'landscape' ? 'landscape'
+      : (saved === 'portrait' ? 'portrait' : 'auto');
     this.loadFeed();
+    // 只在本页签真的处于激活状态时应用方向：嵌入式组件在别的页签上被创建时
+    // 不该把整个窗口转过去
+    if (this.activeTab === kVideoTabIndex && this.orientation !== 'auto') {
+      this.applyOrientation();
+    }
   }
 
   aboutToDisappear(): void {
@@ -322,6 +340,8 @@ export struct ShortVideoPage {
     if (this.activeTab !== kVideoTabIndex) {
       // 离开本页不再需要屏幕常亮（用户在看别的页面）
       this.applyScreenOn(false);
+      // 方向也是窗口级的：离开本页签要还原，否则「媒体库/设置」会跟着横屏
+      this.restoreOrientationOnLeave();
       if (this.softActive) {
         // 软解：切走即停帧循环（回来自会自动续上，见下面 else 分支）
         this.stopSoftPullLoop();
@@ -335,6 +355,11 @@ export struct ShortVideoPage {
       return;
     }
     // 切回本页：软解重启帧循环；硬解用 `play()` 续播（**不是** `playCurrent()`，后者会从头重开）
+    // 方向也要重新应用（离开页签时还原过，见 restoreOrientationOnLeave）：
+    // 放在分支之前，软解/硬解两条路径都会走到
+    if (this.orientation !== 'auto') {
+      this.applyOrientation();
+    }
     if (this.softActive) {
       if (!this.paused) {
         this.startSoftPullLoop();
@@ -1182,10 +1207,15 @@ export struct ShortVideoPage {
     if (this.areaH <= 0 || this.areaW <= 0) {
       return false;
     }
+    if (this.landscape) {
+      // 横屏：操作栏是右下角的**横排**，整条底部信息带都算控件区
+      // （竖屏那套"右侧一列 84×380"在横屏下会把大半个画面判成控件区）
+      return y > this.areaH - kLandscapeBottomVp;
+    }
     if (y > this.areaH - kBottomChromeVp) {
       return true;
     }
-    // 右侧操作栏：竖排在右下角，比底部信息区更高
+    // 竖屏：右侧操作栏是竖排，比底部信息区更高
     return x > this.areaW - kRailWidthVp && y > this.areaH - kRailHeightVp;
   }
 
@@ -1419,12 +1449,40 @@ export struct ShortVideoPage {
     const next: PlayerOrientation = this.orientation === 'auto'
       ? 'landscape' : (this.orientation === 'landscape' ? 'portrait' : 'auto');
     this.orientation = next;
+    // 记住选择（横竖屏是"躺着看/坐着看"的选择，不该每次进来重设）
+    ShortVideoPrefs.saveOrientation(next);
+    await this.applyOrientation();
+  }
+
+  /**
+   * 把当前方向选择应用到窗口；同时记下"改之前的窗口方向"，供离开本页签时还原。
+   *
+   * 为什么要还原：方向是**窗口级**状态，本页是嵌入式组件 —— 用户在「视频」页选了横屏，
+   * 切到「媒体库/设置」后那些页面也会跟着横着（它们并没有横屏布局）。
+   * 因此离开页签时还原、回来时重新应用，形成成对的进出（与播放页同一套做法）。
+   */
+  private async applyOrientation(): Promise<void> {
     const win: window.Window | null = await this.ensureWindowRef();
     if (win === null) {
       // 取不到窗口：方向设置失败，但短视频页仍可用（跟随系统）
       return;
     }
-    WindowFullscreen.setOrientation(win, next);
+    if (this.savedOrientationValue < 0) {
+      this.savedOrientationValue = WindowFullscreen.currentOrientation(win);
+    }
+    WindowFullscreen.setOrientation(win, this.orientation);
+  }
+
+  /** 离开本页签时把窗口方向还原成"进来之前的样子" */
+  private async restoreOrientationOnLeave(): Promise<void> {
+    const win: window.Window | null = await this.ensureWindowRef();
+    if (win === null) {
+      return;
+    }
+    if (this.savedOrientationValue >= 0) {
+      WindowFullscreen.restoreOrientation(win, this.savedOrientationValue);
+      this.savedOrientationValue = -1;
+    }
   }
 
   // ─────────────────────── 进度上报与窗口状态 ───────────────────────
@@ -1820,12 +1878,13 @@ export struct ShortVideoPage {
     Column({ space: 5 }) {
       Button({ type: ButtonType.Circle, stateEffect: false }) {
         SymbolGlyph(this.railIcon(kind, itemId))
-          .fontSize(ThemeConstants.ICON_XLARGE)
+          .fontSize(this.landscape ? ThemeConstants.ICON_MEDIUM : ThemeConstants.ICON_XLARGE)
           .fontColor([this.railSelected(kind, itemId)
             ? this.colors().onBrand : this.colors().onOverlay])
       }
-      .width(46)
-      .height(46)
+      // 横屏可用高度只有 ~306vp：按钮缩到 40vp，四个横排才放得下且不与工具行打架
+      .width(this.landscape ? 40 : 46)
+      .height(this.landscape ? 40 : 46)
       .padding(0)
       .backgroundColor(this.railSelected(kind, itemId)
         ? this.colors().brandPrimary : this.colors().overlayControl)
@@ -1959,89 +2018,55 @@ export struct ShortVideoPage {
       })
       .hitTestBehavior(HitTestMode.Transparent)
 
-      // 底部信息 + 右侧操作栏
+      // 底部信息 + 操作栏
+      //
+      // 布局分横竖两套（**不是**同一套量的缩放）：竖屏是 20:9 的窄长屏，竖排操作栏
+      // 只占右侧一条；横屏可用高度只剩 ~306vp，竖排 4 个按钮（约 270vp）会直接顶到
+      // 顶部工具行 —— 设备实测两者**重叠 85×108px**（收藏按钮压在「设置」上）。
+      // 因此横屏把操作栏改成**右下角的横排**，信息区留在左侧。
       Column() {
         Blank()
-        Row({ space: 8 }) {
-          Column({ space: 6 }) {
-            Row({ space: 6 }) {
-              Text(this.typeBadge(item))
-                .fontSize(ThemeConstants.LABEL_SMALL)
-                .fontWeight(FontWeight.Medium)
-                // 类型徽标用品牌色实底 + `onBrand` 文字（品牌色上的专用前景色，
-                // 明暗两套主题下都有足够对比度；用 `onOverlay` 会在浅色主题下发灰）
-                .fontColor(this.colors().onBrand)
-                .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-                .backgroundColor(this.colors().brandPrimary)
-                .borderRadius(ThemeConstants.BADGE_RADIUS)
-              if (item.officialRating.length > 0) {
-                Text(item.officialRating)
-                  .fontSize(ThemeConstants.LABEL_SMALL)
-                  .fontColor(this.colors().onOverlay)
-                  .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-                  .backgroundColor(this.colors().overlayControl)
-                  .borderRadius(ThemeConstants.BADGE_RADIUS)
-              }
+        if (this.landscape) {
+          Row({ space: 12 }) {
+            this.InfoBlock(item)
+            Row({ space: 12 }) {
+              this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
+              this.RailButton('played', item.id, () => { this.togglePlayed(item); })
+              this.RailButton('detail', item.id, () => { this.openDetail(item); })
+              this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
             }
-            .alignItems(VerticalAlign.Center)
-
-            if (item.seriesName.length > 0 && item.type === 'Episode') {
-              Text(item.seriesName)
-                .fontSize(ThemeConstants.META_SMALL)
-                .fontColor(this.colors().onOverlayMuted)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .width('100%')
-            }
-
-            Text(item.displayTitle())
-              .fontSize(ThemeConstants.TITLE_LARGE)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.colors().onOverlay)
-              .maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .width('100%')
-
-            if (this.metaLine(item).length > 0) {
-              Text(this.metaLine(item))
-                .fontSize(ThemeConstants.META_MEDIUM)
-                .fontColor(this.colors().onOverlayMuted)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .width('100%')
-            }
-
-            if (this.overviewText(item).length > 0) {
-              Text(this.overviewText(item))
-                .fontSize(ThemeConstants.META_SMALL)
-                .fontColor(this.colors().onOverlayMuted)
-                .maxLines(2)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .width('100%')
-            }
+            .alignItems(VerticalAlign.Bottom)
           }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-
-          // 操作栏：收藏 / 已看 / 详情 / 换一批
-          // （只传种类与条目 id，状态在 RailButton 内部读 —— 见该 Builder 的说明）
-          Column({ space: 14 }) {
-            this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
-            this.RailButton('played', item.id, () => { this.togglePlayed(item); })
-            this.RailButton('detail', item.id, () => { this.openDetail(item); })
-            this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
+          .width('100%')
+          .alignItems(VerticalAlign.Bottom)
+          .padding({
+            left: ThemeConstants.PAGE_PADDING,
+            right: ThemeConstants.PAGE_PADDING,
+            bottom: 12
+          })
+        } else {
+          Row({ space: 8 }) {
+            this.InfoBlock(item)
+            // 操作栏：收藏 / 已看 / 详情 / 换一批
+            // （只传种类与条目 id，状态在 RailButton 内部读 —— 见该 Builder 的说明）
+            Column({ space: 14 }) {
+              this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
+              this.RailButton('played', item.id, () => { this.togglePlayed(item); })
+              this.RailButton('detail', item.id, () => { this.openDetail(item); })
+              this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
+            }
+            .width(kRailWidthVp - 24)
+            .alignItems(HorizontalAlign.Center)
           }
-          .width(kRailWidthVp - 24)
-          .alignItems(HorizontalAlign.Center)
+          .width('100%')
+          .alignItems(VerticalAlign.Bottom)
+          // 左右留白 + 底部让出进度线（见 BottomProgress）
+          .padding({
+            left: ThemeConstants.PAGE_PADDING,
+            right: ThemeConstants.PAGE_PADDING,
+            bottom: 22
+          })
         }
-        .width('100%')
-        .alignItems(VerticalAlign.Bottom)
-        // 左右留白 + 底部让出进度线（见 BottomProgress）
-        .padding({
-          left: ThemeConstants.PAGE_PADDING,
-          right: ThemeConstants.PAGE_PADDING,
-          bottom: 22
-        })
       }
       .width('100%')
       .height('100%')
@@ -2049,6 +2074,76 @@ export struct ShortVideoPage {
     }
     .width('100%')
     .height('100%')
+  }
+
+  /**
+   * 底部信息区：类型徽标 + 系列名 + 标题 + 元信息 + 简介。
+   *
+   * 单独抽出来是因为横竖屏要把它放到不同的容器里（竖屏与竖排操作栏并排，
+   * 横屏与横排操作栏并排）；简介行数按横竖屏取 1 / 2 行 —— 横屏高度紧张，
+   * 多一行简介就会把标题挤出画面。
+   */
+  @Builder
+  InfoBlock(item: MediaItem) {
+    Column({ space: this.landscape ? 4 : 6 }) {
+      Row({ space: 6 }) {
+        Text(this.typeBadge(item))
+          .fontSize(ThemeConstants.LABEL_SMALL)
+          .fontWeight(FontWeight.Medium)
+          // 类型徽标用品牌色实底 + `onBrand` 文字（品牌色上的专用前景色，
+          // 明暗两套主题下都有足够对比度；用 `onOverlay` 会在浅色主题下发灰）
+          .fontColor(this.colors().onBrand)
+          .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+          .backgroundColor(this.colors().brandPrimary)
+          .borderRadius(ThemeConstants.BADGE_RADIUS)
+        if (item.officialRating.length > 0) {
+          Text(item.officialRating)
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().onOverlay)
+            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+            .backgroundColor(this.colors().overlayControl)
+            .borderRadius(ThemeConstants.BADGE_RADIUS)
+        }
+      }
+      .alignItems(VerticalAlign.Center)
+
+      if (item.seriesName.length > 0 && item.type === 'Episode') {
+        Text(item.seriesName)
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlayMuted)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+      }
+
+      Text(item.displayTitle())
+        .fontSize(this.landscape ? ThemeConstants.TITLE_MEDIUM : ThemeConstants.TITLE_LARGE)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.colors().onOverlay)
+        .maxLines(this.landscape ? 1 : 2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+
+      if (this.metaLine(item).length > 0) {
+        Text(this.metaLine(item))
+          .fontSize(ThemeConstants.META_MEDIUM)
+          .fontColor(this.colors().onOverlayMuted)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+      }
+
+      if (this.overviewText(item).length > 0) {
+        Text(this.overviewText(item))
+          .fontSize(ThemeConstants.META_SMALL)
+          .fontColor(this.colors().onOverlayMuted)
+          .maxLines(this.landscape ? 1 : 2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+      }
+    }
+    .alignItems(HorizontalAlign.Start)
+    .layoutWeight(1)
   }
 
   /** 底部细进度线 + `已看 / 总时长` */

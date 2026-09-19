@@ -22,6 +22,9 @@ export const kShortVideoBatchSize: number = 24;
 /** 短视频清晰度（= 播放时向服务端请求的质量档位）的偏好键 */
 export const kShortVideoQualityKey: string = 'shortVideoQuality';
 
+/** 短视频的屏幕方向偏好键（`auto` / `landscape` / `portrait`） */
+export const kShortVideoOrientationKey: string = 'shortVideoOrientation';
+
 /**
  * 一档清晰度。
  *
@@ -173,6 +176,37 @@ export class ShortVideoPrefs {
     JellyfinNative.setPreference(kShortVideoQualityKey, id);
     SessionStore.saveSession(JellyfinNative.getSession());
     AppViewModel.getInstance().notifyLocalPrefsChanged();
+  }
+
+  /**
+   * 读取屏幕方向偏好（`auto` / `landscape` / `portrait`）。
+   *
+   * 为什么要记住：横竖屏是"躺着看/坐着看"的选择，与清晰度一样属于"这台设备上我怎么用"。
+   * 记不住的话每次进应用都要重新点一次「方向」（设置页的其它偏好都是记住的）。
+   * 未知值一律回落到 `auto`（跟随系统），不让坏数据把窗口锁在一个奇怪的方向上。
+   */
+  static loadOrientation(): string {
+    try {
+      const raw: string = JellyfinNative.getPreferences();
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        return 'auto';
+      }
+      const value: string = JsonUtil.getString(result.data as ESObject,
+                                                kShortVideoOrientationKey, '');
+      if (value === 'landscape' || value === 'portrait' || value === 'auto') {
+        return value;
+      }
+      return 'auto';
+    } catch (err) {
+      return 'auto';
+    }
+  }
+
+  /** 保存屏幕方向偏好 */
+  static saveOrientation(value: string): void {
+    JellyfinNative.setPreference(kShortVideoOrientationKey, value);
+    SessionStore.saveSession(JellyfinNative.getSession());
   }
 
   /** 当前档位的短标签（工具栏上显示"现在是什么清晰度"） */
