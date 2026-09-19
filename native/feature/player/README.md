@@ -6,8 +6,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `soft_decode_session.{h,cpp}` | **流式软解会话**：HTTP Range 分页取流（自定义 AVIO）→ libavformat 解容器 → 软件解码 → `swscale` 转 RGBA 逐帧输出；支持 seek |
-| `range_cache.{h,cpp}` | **Range 分页缓存**：把顺序读翻译成按需 Range 请求并缓存最近一块；不依赖 FFmpeg 与任何 HTTP 实现，**可在主机上单测**（`native/core/tests/test_range_cache.cpp`，29 项断言） |
+| `soft_decode_session.{h,cpp}` | **流式软解会话**：HTTP Range 分页取流（自定义 AVIO）→ libavformat 解容器 → 软件解码 → `swscale` 转 RGBA 逐帧输出；支持 seek || `range_cache.{h,cpp}` | **Range 分页缓存**：把顺序读翻译成按需 Range 请求并缓存最近一块；不依赖 FFmpeg 与任何 HTTP 实现，**可在主机上单测**（`native/core/tests/test_range_cache.cpp`，29 项断言） |
 | `ffmpeg_decoder.{h,cpp}` | 一次性**内存探测**：解析容器/编码/宽高/像素格式，可导出首帧 PNG（用于能力检测与诊断） |
 | `egl_renderer.{h,cpp}` | **EGL/GLES 渲染**：surfaceId → native window → EGL surface/context → 纹理上传 RGBA 并绘制；含 `readbackRgba()`（glReadPixels 回读，用于验证渲染结果） |
 | `range_fetcher.{h,cpp}` | **取流抽象**：宿主注入 `RangeFetchFn`，本目录不依赖任何具体 HTTP 实现 |
@@ -21,8 +20,12 @@
    预编译产物**随仓库提交**：`native/app/entry/libs/{x86_64,arm64-v8a}/`（克隆后直接可用）
    需要刷新时的交叉编译脚本：`scripts/build_ffmpeg_ohos.sh`（x86_64 / arm64-v8a）
    公开头文件：`native/third_party/ffmpeg/include`；许可与分发要求见 `native/third_party/NOTICE`
-2. **OHOS NDK 图形库**：`EGL` `GLESv3` `native_window`
-3. C++17
+2. **dav1d 1.5.1 共享库**（BSD-2-Clause，动态链接）——**AV1 软解靠它**：
+   `libdav1d.so`（`libavcodec.so` 的 `DT_NEEDED` 依赖 `libdav1d.so.7`）
+   源码内置：`native/third_party/dav1d/source`；交叉编译脚本：`scripts/build_dav1d_ohos.sh`
+   （**为什么必须有它**见下方「AV1 软解」一节，别退回 FFmpeg 自带的 `av1` 解码器）
+3. **OHOS NDK 图形库**：`EGL` `GLESv3` `native_window`
+4. C++17
 
 ## 接入步骤（移植到其它工程）
 
@@ -238,4 +241,72 @@ while (session.nextFrameRgba(0, rgba, frame)) {     // maxWidth=0 → 原分辨�
   而 ✅/⚠️ 两类无法按需复现 —— 实现出来就是一段**无法验证**的分支。
   按本工程"每项改动都要有实测证据"的约定，留档待真机/可复现环境再做。
 
-- **许可**：FFmpeg 为 LGPL-2.1+，必须动态链接并随包提供许可与源码获取方式（见 `native/third_party/NOTICE`）。
+- **AV1 软解必须用 dav1d —— FFmpeg 自带的 `av1` 解码器在本构建里一帧都解不出来**
+  （本工程实测的根因，排查花了一整轮，别再踩）：
+
+  | 现象 | 设备实测 |
+  |---|---|
+  | 硬解 | 系统 `AVPlayer` 解不了 AV1（模拟器）→ 报错 → 触发"自动回退软解" |
+  | 软解 | `softPlayOpen ok codec=av1 ...`（打开**成功**），随后**一帧都没有**：进度条停在 0、画面纯黑，屏幕上只有一句"已自动切换软解播放" |
+  | 日志 | `softPlayNextFrame` 只在**成功**时打印，于是 hilog 里一片空白（失败静默）—— 这就是"看不出哪里坏了"的原因 |
+
+  根因（读源码 + 用同源码/同 configure 的宿主二进制复现）：
+  FFmpeg 7.1 `libavcodec/av1dec.c` 的 `get_pixel_format()` 末尾有一段硬判断 ——
+  若 `ff_get_format()` 之后 `avctx->hwaccel == NULL`（没有真的初始化出硬件加速），
+  直接 `av_log("Your platform doesn't support hardware accelerated AV1 decoding")`
+  并 `return AVERROR(ENOSYS)`。而"纯软解"的绕过分支是
+  `for (int i = 0; pix_fmts[i] != pix_fmt; i++) if (pix_fmts[i] == avctx->pix_fmt)` ——
+  它只遍历**硬件格式**；本工程的 FFmpeg 是 `--disable-hwaccels` 构建（`HWACCEL_MAX == 0`，
+  候选表里只剩软件格式），这个分支**永远进不去**。
+  宿主复现（同一份源码 + 同一套 configure 选项）：`avcodec_open2` 成功、
+  `avcodec_send_packet` 对**每一个包**返回 `-38 Function not implemented`，
+  600 个包 → **0 帧**。
+
+  修法：内置并交叉编译 **dav1d**（`scripts/build_dav1d_ohos.sh`），FFmpeg 以
+  `--enable-libdav1d` 重建，`SoftDecodeSession` 对 AV1 **显式优先**
+  `avcodec_find_decoder_by_name("libdav1d")`（见 `PickVideoDecoder()`）。
+  同一宿主复现改为 dav1d 后：`frames=5 packets=8`，`yuv420p 1280x720` 正常出帧。
+
+  另外两条顺带修掉的设计缺陷（都属于"异常必须到达终态"）：
+  1. **解码器每包必拒时不再读完整个文件**：`nextFrameRgba()` 现在统计连续被拒的包数，
+     0 帧 + 连续 ≥30 包被拒即报"解码器 X 无法解码该码流（Function not implemented）"，
+     而不是把整片读完再以 `eof` 收场（设备上那样等于用户白等几十秒 + 白下载几十 MB）；
+  2. **失败必须留痕并可诊断**：`softPlayNextFrame` 失败时也打日志（首个失败立即打，
+     之后每 100 次一条，带解码器名/frames/fetched）；宿主侧对"取帧失败信封"和
+     "0 帧即 eof"都给出错误终态与可重试入口，不再出现"黑屏 + 一句绿色提示"。
+  3. `softPlayOpen` 的日志与返回值新增 `decoder`（选中的解码器名）：设备上一眼就能确认
+     "是 dav1d 在解，还是那个解不出帧的 `av1`"。
+
+- **`RangeCache` 淘汰策略：正在读的那一块永远不能被淘汰**（设备实测的"软解卡死"根因）
+  原实现是"优先丢 `pos_` 之前的块，否则丢 `chunks_.begin()`（偏移最小的那块）"。
+  MP4 的 moov（索引）常在**文件末尾**：解复用器一开始就把 `pos_` 抬到 673MB 一带、
+  缓存被远块填满；等它回头顺序读开头时，缓存里没有任何"`pos_` 之前"的块 →
+  走 `begin()` 分支 → 而 `begin()` 恰好是**刚取回来的、正在读的第 0 块** → 立刻被淘汰 →
+  读不到 → 再取 → 再淘汰 …… 死循环。设备实测一次播放发出**上千个** Range 请求，
+  某次拉帧 20 秒不返回（上层看门狗判"软解卡死"）。
+  现在：① 有"已读过（`end <= pos_`）"的块就先丢它；② 否则丢**离 `pos_` 最远**的块，
+  且**跳过包含 `pos_` 的块**；③ 若只剩正在读的那一块，允许暂时超上限。
+  主机回归用例见 `native/core/tests/test_range_cache.cpp` 的
+  `TestEvictionNeverDropsTheChunkBeingRead`（旧实现该用例失败、新实现通过）。
+- **软解会话的生命周期：异步任务必须持有 `shared_ptr`**（设备实测的 cppcrash 根因）
+  `nextFrameRgba()` 跑在宿主的工作线程上，而"停止软解"跑在 UI 线程（看门狗判卡死、
+  退出播放页）。宿主若在那里直接销毁会话，正在飞的那次调用就会踩到已释放对象 ——
+  实测 faultlog 栈 `RangeCache::read → fetchIntoLockedRange → std::mutex::lock`
+  落在已释放内存上（SIGSEGV，应用直接消失）。宿主侧正确做法（本工程 `jellyfin_napi.cpp`）：
+  会话用 `shared_ptr` 保存，**异步任务把引用带进闭包**，"关闭"只把会话从单例摘下。
+- **诊断能力是这套模块的一部分**（不是调试残留）
+  - `SoftDecodeSession::stageSnapshot()`：拉帧卡住时能说出卡在 `receiveFrame` /
+    `readPacket` / `sendPacket` / `swsScale` 的哪一步、卡了多久、本次已读多少包；
+  - 单次拉帧 >3s 会周期性打印进度（拉帧**永不返回**时这是唯一的线索）；
+  - 单帧 >500ms 打印分段耗时（`readMs/sendMs/recvMs/packets`）；
+  - `RangeCache` 把 >500ms 的取流与 >1s 的等锁记下来（"卡网络"与"卡锁"分得开）；
+  - 一帧都没解出来 + 连续 ≥30 包被解码器拒绝 → **明确报错**，不再把整片读完再以 `eof`
+    收场（否则用户白等几十秒、白下几十 MB，且日志里什么都没有）；
+  - 这些日志经 `player_log.h` 的注入点交给宿主（本模块仍不依赖 hilog，可整目录移植）。
+- **AV1 与服务器转码的关系（宿主侧约定）**
+  本模块只解"一个 HTTP Range 可顺序读的文件"。服务器转码给出的是 **HLS（m3u8 + TS 分片）**，
+  本模块读不了 —— 因此宿主要在"转码流播放失败"时**不要**回退软解，而应先改走直连
+  （去掉 `DeviceProfile` 重新请求），直连失败后再交给软解。本工程的做法见
+  `docs/av1-and-transcoding.md` 第 5.2 节。
+- **许可**：FFmpeg 为 LGPL-2.1+，dav1d 为 BSD-2-Clause，均必须动态链接并随包提供许可与
+  源码获取方式（见 `native/third_party/NOTICE`）。

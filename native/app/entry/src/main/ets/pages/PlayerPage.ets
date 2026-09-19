@@ -6,6 +6,7 @@ import media from '@ohos.multimedia.media';
 import display from '@ohos.display';
 import avSession from '@ohos.multimedia.avsession';
 import { PiPWindow } from '@kit.ArkUI';
+import hilog from '@ohos.hilog';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -42,6 +43,10 @@ const kTapSlopVp: number = 12;
 
 /** 双击反馈浮层的停留时间（毫秒） */
 const kRippleMs: number = 620;
+
+/** 播放页的诊断日志域与标签（与 EntryAbility 的 hilog 用法保持一致） */
+const LOG_DOMAIN: number = 0x0000;
+const LOG_TAG: string = 'JellyfinPlayer';
 
 /** 软解瞬时提示（打开中/跳转失败等）的自动隐去时间（毫秒） */
 const kSoftNoticeMs: number = 4000;
@@ -122,6 +127,28 @@ const kSoftOpenTimeoutMs: number = 30000;
  * 重新绑定当前 surface），连续失败才说明真的上不了屏。
  */
 const kSoftRenderErrorLimit: number = 3;
+
+/**
+ * 软解**取帧接口连续失败**多少次即判定"软解不可用"并进入错误终态。
+ *
+ * 为什么需要：`softPlayNextFrame` 返回失败信封（原生侧会话已关、参数异常等）时，
+ * 原来的循环只是 `return` —— 而 `finally` 里的自调度会立刻再排一帧（8ms 后），
+ * 于是变成一个"每 8ms 空转一次、永远不出画面、永远不报错"的死循环：
+ * 用户看到的是一块黑屏配一句"已自动切换软解播放"，日志里一行错误都没有。
+ * 取 10：偶发单次失败可以自愈（原生侧每帧都会重新校验会话），连续失败必然是硬故障。
+ */
+const kSoftPullFailLimit: number = 10;
+
+/**
+ * 起播（AVPlayer 到 `prepared`）的最长容忍时间（毫秒）。
+ *
+ * 为什么必须有：**播放器可能永远停在 `initialized`**。设备实测（AV1 请求服务器转码，
+ * 服务端 ffmpeg 转码失败返回 HTTP 500）时 AVPlayer 既不报错也不前进，界面永久停在
+ * "正在加载 · initialized" —— 违反本项目"异常与超时都必须到达终态"的约定。
+ * 20 秒：转码起播需要服务端拉起 ffmpeg 并产出首个分片（实测 1–3 秒），
+ * 给足余量后才能把"慢"与"死"分开。
+ */
+const kPrepareTimeoutMs: number = 20000;
 
 /**
  * 锁定态"锁提示"的停留时间（毫秒）。
@@ -221,6 +248,8 @@ struct PlayerPage {
   private softRenderFailed: boolean = false;
   /** 连续上屏失败计数：偶发一次可容忍，连续失败必须给终态（否则就是"永久黑屏"） */
   private softRenderErrorStreak: number = 0;
+  /** 软解取帧接口连续失败次数（见 kSoftPullFailLimit；出画面后清零） */
+  private softPullFailStreak: number = 0;
   private softPulling: boolean = false;
   /** 当前这次拉帧的起始时刻（0 表示空闲）；用于卡死看门狗 */
   private softPullStartedAt: number = 0;
@@ -344,6 +373,14 @@ struct PlayerPage {
   @State private trackNote: string = '';
   /** 当前 MediaSourceId（Jellyfin 字幕端点需要它） */
   private mediaSourceId: string = '';
+  /** 本次播放方式（DirectPlay / DirectStream / Transcode）；转码时禁止回退软解 */
+  private playMethod: string = '';
+  /** 转码流起播失败后是否已改走"直连 + 本机软解"（只试一次，避免来回切） */
+  private transcodeFallbackTried: boolean = false;
+  /** 起播看门狗定时器（见 kPrepareTimeoutMs） */
+  private prepareTimerId: number = -1;
+  /** 因播放器状态不合法而被推迟的 seek 目标（毫秒，<0 表示没有）；prepared 后补做 */
+  private pendingAvSeekMs: number = -1;
   /**
    * 续播起点（毫秒）：由宿主页面按条目的观看进度传入。
    *
@@ -423,6 +460,11 @@ struct PlayerPage {
   static readonly SPEEDS: number[] = [0.5, 1.0, 1.25, 1.5, 2.0];
 
   aboutToAppear(): void {
+    // 每次进入播放页都是新的一次播放：不沿用上一次的转码/软解回退状态
+    this.transcodeFallbackTried = false;
+    this.playMethod = '';
+    this.pendingAvSeekMs = -1;
+    this.clearPrepareTimer();
     const params: Record<string, Object> = router.getParams() as Record<string, Object>;
     if (params !== undefined && params !== null) {
       const idVal: Object | undefined = params['itemId'];
@@ -1236,6 +1278,12 @@ struct PlayerPage {
    * 软解用 FFmpeg 在 CPU 上解码，虽然帧率有限，但能把这些内容放出来。
    */
   private async startSoftPlay(): Promise<void> {
+    // 转码流（HLS）无法用本机软解读：与其一路失败到超时，不如立刻说清原因
+    if (this.playMethod === 'Transcode' || this.playUrl.includes('.m3u8')) {
+      const msg: string = '当前是服务器转码流（HLS），不支持本机软解；可直接用系统播放器播放';
+      this.setSoftNotice(msg, false);
+      return;
+    }
     this.softRenderFailed = false;
     this.softRenderErrorStreak = 0;
     this.setSoftNotice('正在打开软解会话…', false);
@@ -1283,6 +1331,7 @@ struct PlayerPage {
     this.softLastFrameIndex = 0;
     this.softPullStartedAt = 0;
     this.softRenderErrorStreak = 0;
+    this.softPullFailStreak = 0;
 
     // ── 在 UI 线程初始化 EGL 渲染器（"软解黑屏"的修复点）──────────────────
     // 为什么必须在这里、且必须是同步调用：
@@ -1470,11 +1519,48 @@ struct PlayerPage {
       return;
     }
     const stalledMs: number = Date.now() - this.softPullStartedAt;
+    // 「卡在哪一步」写进提示：没有调试器时，这是唯一能区分
+    // "卡在网络取流 / 卡在解码器收帧 / 卡在缩放上屏"的信息（原生侧阶段快照见 softPlayStatus）。
     this.setSoftNotice(`软解无响应已 ${Math.round(stalledMs / 1000)} 秒（解到第 `
-      + `${this.softLastFrameIndex} 帧），已停止；可点「软解」重试或改看其它条目`, true);
+      + `${this.softLastFrameIndex} 帧${this.softStallStageText()}），已停止；`
+      + '可点「软解」重试或改看其它条目', true);
     this.softPulling = false;
     this.softPullStartedAt = 0;
     this.stopSoftPlay();
+  }
+
+  /**
+   * 卡死时的原生阶段快照文案（"· 卡在 readPacket 12.3s · 本次已读 480 包"）。
+   *
+   * 为什么值得单独做一个：软解卡死是本工程最难定位的一类故障（设备实测 HEVC 1080p
+   * 解到第 10 帧后某次拉帧 20 秒不返回）。原生侧把当前阶段与耗时记在原子变量里，
+   * 这里同步读一次即可 —— 用户看到的错误文案、日志里的那一行，都会带上"卡在哪"。
+   */
+  private softStallStageText(): string {
+    try {
+      const raw: string = JellyfinNative.softPlayStatus();
+      const result: NativeResult = JellyfinNative.parseResult(raw);
+      if (!result.ok || result.data === null) {
+        return '';
+      }
+      const data: ESObject = result.data as ESObject;
+      const stage: string = JsonUtil.getString(data, 'stage', '');
+      const stageMs: number = JsonUtil.getNumber(data, 'stageMs', 0);
+      const packets: number = JsonUtil.getNumber(data, 'callPackets', 0);
+      if (stage.length === 0 || stage === 'idle') {
+        return '';
+      }
+      let text: string = ` · 卡在 ${stage} ${(stageMs / 1000).toFixed(1)}s`;
+      if (packets > 0) {
+        text += ` · 本次已读 ${packets} 包`;
+      }
+      hilog.warn(LOG_DOMAIN, LOG_TAG,
+        'soft stall stage=%{public}s stageMs=%{public}d packets=%{public}d',
+        stage, Math.round(stageMs), packets);
+      return text;
+    } catch (err) {
+      return '';
+    }
   }
 
   private async pullSoftFrame(): Promise<void> {
@@ -1498,17 +1584,50 @@ struct PlayerPage {
       const raw: string = await JellyfinNative.softPlayNextFrame(this.softDecodeMaxWidth);
       const result: NativeResult = JellyfinNative.parseResult(raw);
       if (!result.ok || result.data === null) {
+        // ── 拉帧调用本身失败必须给终态 ───────────────────────────────────────
+        // 之前这里直接 return：若原生侧每次都返回失败信封（例如会话被关掉），
+        // 帧循环会以 8ms 的节奏空转、既不报错也不出画面 —— 屏幕上只有那句
+        // "已自动切换软解播放"，用户看到的是永久黑屏，日志里什么都没有。
+        // 现在：连续失败到阈值就停下并如实报错（终态，可重试）。
+        this.softPullFailStreak++;
+        if (this.softPullFailStreak >= kSoftPullFailLimit) {
+          const reason: string = result.message.length > 0 ? result.message : '原生取帧接口失败';
+          this.setSoftNotice(`软解取帧失败（连续 ${this.softPullFailStreak} 次）：${reason}`, true);
+          this.softPulling = false;
+          this.softPullStartedAt = 0;
+          this.stopSoftPlay();
+          this.status = UiState.ERROR;
+          this.errorMsg = `软解取帧失败：${reason}`;
+          return;
+        }
         return;
       }
+      this.softPullFailStreak = 0;
       const frame: ESObject = result.data as ESObject;
       const ok: boolean = JsonUtil.getBoolean(frame, 'ok', false);
       if (!ok) {
         const reason: string = JsonUtil.getString(frame, 'error', '');
         if (reason === 'eof') {
+          // "一帧都没解出来就到末尾"不是正常播完：说明解码器解不了这个码流
+          // （设备实测：AV1 + FFmpeg 自带 av1 解码器，每包 ENOSYS）。
+          // 之前这里静默 stopSoftPlay，用户只看到黑屏 + "已自动切换软解播放"。
+          if (this.softLastFrameIndex <= 0) {
+            const decoder: string = JsonUtil.getString(frame, 'decoder', '');
+            const detail: string = decoder.length > 0 ? `（解码器 ${decoder}）` : '';
+            const msg: string = `该视频编码无法解码${detail}：一帧都没有解出来`;
+            this.setSoftNotice(msg, true);
+            this.stopSoftPlay();
+            this.status = UiState.ERROR;
+            this.errorMsg = msg;
+            return;
+          }
           this.stopSoftPlay();
         } else if (reason.length > 0) {
           this.setSoftNotice(`软解失败：${reason}`, true);
           this.stopSoftPlay();
+          this.status = UiState.ERROR;
+          this.errorMsg = `软解失败：${reason}`;
+          return;
         }
         return;
       }
@@ -1603,9 +1722,7 @@ struct PlayerPage {
         // AVSession 的 seek 回调给的是**绝对时间**（毫秒），不是偏移量。
         // 之前写成 onSeek(timeMs - this.positionMs) 是错的：会把绝对位置当作增量再叠加一次。
         this.positionMs = timeMs;
-        if (this.avPlayer !== null) {
-          this.avPlayer.seek(timeMs);
-        }
+        this.seekAvPlayer(timeMs, 'avsession');
 
       });
       await session.activate();
@@ -1967,8 +2084,8 @@ struct PlayerPage {
     await this.openPlayer();
     // 回到切换前的位置（AVPlayer 在 prepared 后 seek 最稳妥，这里做一次兜底 seek）
     setTimeout(() => {
-      if (this.avPlayer !== null && resumeMs > 1000) {
-        this.avPlayer.seek(resumeMs);
+      if (resumeMs > 1000) {
+        this.seekAvPlayer(resumeMs, '切轨道后回原位');
         this.positionMs = resumeMs;
       }
     }, 1200);
@@ -2516,7 +2633,7 @@ struct PlayerPage {
       }
 
     } else if (this.avPlayer !== null) {
-      this.avPlayer.seek(target);
+      this.seekAvPlayer(target, 'seekTo');
 
     }
     this.positionMs = target;
@@ -2565,6 +2682,69 @@ struct PlayerPage {
     }
   }
 
+  /**
+   * 统一的 AVPlayer seek 封装：**只在合法状态下 seek**。
+   *
+   * 为什么需要（设备实测）：`avPlayer.seek()` 在 `initialized` 等状态下会抛
+   * `5400102 Operate Not Permit: current state is not prepared/playing/paused/completed`，
+   * 并被 `on('error')` 捕获 → 走 handlePlaybackFailure → 用户看到一条红色错误提示，
+   * 而实际上只是"seek 早了一步"（转码起播、重开播放时很常见，实测在"服务器转码失败→
+   * 改直连"的切换过程中就出现过）。这里统一守卫，调用方不需要各自判断状态。
+   *
+   * 非法状态下的 seek 不是丢弃而是记下来：`pendingAvSeekMs` 会在 `prepared` 之后补做，
+   * 否则"续播位置"这类 seek 会永久丢失。
+   */
+  private seekAvPlayer(timeMs: number, reason: string): void {
+    const player: media.AVPlayer | null = this.avPlayer;
+    if (player === null) {
+      return;
+    }
+    const st: string = player.state;
+    if (st === 'prepared' || st === 'playing' || st === 'paused' || st === 'completed') {
+      player.seek(timeMs);
+      return;
+    }
+    this.pendingAvSeekMs = timeMs;
+    hilog.warn(LOG_DOMAIN, LOG_TAG,
+      'seek 延后：state=%{public}s reason=%{public}s target=%{public}dms',
+      st, reason, Math.round(timeMs));
+  }
+
+  private clearPrepareTimer(): void {
+    if (this.prepareTimerId >= 0) {
+      clearTimeout(this.prepareTimerId);
+      this.prepareTimerId = -1;
+    }
+  }
+
+  /**
+   * 转码流起播失败后的保底：改走"直连 + 本机软解"。
+   *
+   * 为什么需要（设备实测的真实场景）：AV1 内容在**带 DeviceProfile** 的请求下会被服务端
+   * 判成"需要转码"，客户端于是拿到 HLS（master.m3u8）。但服务端转码本身可能失败 ——
+   * 本机 Jellyfin 就是如此（RTX 2060 没有 AV1 硬解、自带 ffmpeg 5.1 又拿不稳 AV1 extradata，
+   * 转码任务一启动就 `FFmpeg exited with code 1`，分片接口返回 500）。
+   * 此时若不给保底，用户看到的是"永久转圈"或错误页；而本机软解（dav1d）其实是能放的。
+   *
+   * 做法：把 DeviceProfile 关掉再请求一次 PlaybackInfo —— 服务端会回到"直接播放"，
+   * 系统硬解失败后由既有的"自动回退软解"接手。只做一次，避免在两条路之间来回切。
+   */
+  private async fallbackFromTranscode(reason: string): Promise<void> {
+    this.transcodeFallbackTried = true;
+    this.setSoftNotice(`服务器转码不可用（${reason}）→ 改用直接播放 + 本机软解…`, false);
+    try {
+      const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
+      opts['includeDeviceProfile'] = false;   // 关键：让服务端别再给转码地址
+      this.playbackOptions = JSON.stringify(opts);
+    } catch (err) {
+      this.playbackOptions = '{"includeDeviceProfile":false}';
+    }
+    this.playMethod = '';
+    this.softFallbackTried = false;           // 允许随后走"硬解失败→软解"这条正常回退
+    this.status = UiState.LOADING;
+    await this.openPlayer();
+  }
+
   private async openPlayer(): Promise<void> {
     this.status = UiState.LOADING;
     const target: string = this.playUrl.length > 0 ? this.playUrl : this.itemId;
@@ -2585,6 +2765,11 @@ struct PlayerPage {
     }
     // MediaSourceId：Jellyfin 外挂字幕端点需要（字幕切换时用）
     this.mediaSourceId = JsonUtil.getString(result.data, 'mediaSourceId', '');
+    // 播放方式：转码流的地址是 HLS（m3u8），**本机软解读不了**（RangeCache+FFmpeg 不做 HLS 分片），
+    // 因此它对"回退软解"是一个硬性边界（见 handlePlaybackFailure）。
+    this.playMethod = JsonUtil.getString(result.data, 'playMethod', '');
+    // 记下最终播放地址：转码流的判据（`.m3u8`）与"是否允许回退软解"都依赖它
+    this.playUrl = resolvedUrl;
     // 创建 AVPlayer 进行实际视频渲染
     this.createAvPlayer(resolvedUrl);
     // 进入系统媒体会话体系（后台播放/媒体控件）；失败不影响播放
@@ -2592,6 +2777,15 @@ struct PlayerPage {
   }
 
   private async createAvPlayer(url: string): Promise<void> {
+    // 起播看门狗：AVPlayer 可能停在 initialized 永不前进（服务端转码失败时实测如此），
+    // 上层拿不到任何事件 —— 这里把它变成终态（见 handlePlaybackFailure）。
+    this.clearPrepareTimer();
+    this.prepareTimerId = setTimeout(() => {
+      this.prepareTimerId = -1;
+      if (this.status === UiState.LOADING) {
+        this.handlePlaybackFailure(`起播超时（${Math.round(kPrepareTimeoutMs / 1000)} 秒未就绪）`);
+      }
+    }, kPrepareTimeoutMs);
     // 先释放"上一个"播放器与软解会话，再创建新的。
     //
     // 为什么必须这样（服务端实证的缺陷）：`createAvPlayer` 原来直接覆盖 `this.avPlayer`，
@@ -2620,6 +2814,7 @@ struct PlayerPage {
 
           }
         } else if (state === 'prepared') {
+          this.clearPrepareTimer();
           this.durationMs = (this.avPlayer?.duration ?? 0);
           // 视频真实尺寸：只在**与元数据不一致**时才改视频面尺寸（避免播放中重建 surface）。
           const vw: number = this.avPlayer?.width ?? 0;
@@ -2640,8 +2835,12 @@ struct PlayerPage {
           // 续播：seek 到宿主传入的观看进度（只做一次；切轨道/重开播放不再回到这里）
           if (this.startPositionMs > 1000 && !this.resumeApplied) {
             this.resumeApplied = true;
-            this.avPlayer?.seek(this.startPositionMs);
+            this.seekAvPlayer(this.startPositionMs, '续播');
             this.positionMs = this.startPositionMs;
+          } else if (this.pendingAvSeekMs > 0) {
+            // 起播前被推迟的 seek（如切轨道/AVSession 拖进度）：现在补做
+            this.seekAvPlayer(this.pendingAvSeekMs, '补做延迟 seek');
+            this.pendingAvSeekMs = -1;
           }
           // 硬解已就绪：清掉软解可能留下的提示（上一段软解会话的信息不应继续挂在画面上）
           this.clearSoftNotice();
@@ -2717,7 +2916,16 @@ struct PlayerPage {
     // 现在：只要还有软解可回退，就保持**加载态**（转圈 + 标题 + "正在切换软解…"），
     // 只有软解也起不来时才进错误态（那时错误页是必要的终态）。
     this.resumeApplied = false;
-    const willFallback: boolean = !this.softFallbackTried && !this.softPlaying;
+    this.clearPrepareTimer();
+    // 转码流（HLS）不能回退软解：软解会话是"HTTP Range 顺序读一个文件"，
+    // 读不了 m3u8 + TS 分片（会一路失败到超时）。这时先尝试"关掉 DeviceProfile 改直连"，
+    // 直连失败后再由下面的软解回退接手（见 fallbackFromTranscode）。
+    const transcodeStream: boolean = this.playMethod === 'Transcode' || this.playUrl.includes('.m3u8');
+    if (transcodeStream && !this.transcodeFallbackTried) {
+      this.fallbackFromTranscode(message);
+      return;
+    }
+    const willFallback: boolean = !transcodeStream && !this.softFallbackTried && !this.softPlaying;
     if (!willFallback) {
       this.status = UiState.ERROR;
       this.errorMsg = message;
@@ -3692,6 +3900,12 @@ struct PlayerPage {
             }
           })
           // 硬解不支持该编码（如 HEVC）时，提供 FFmpeg 软解回放
+          if (this.playMethod === 'Transcode') {
+            Text('服务器转码播放（H.264/HLS）')
+              .fontSize(ThemeConstants.META_SMALL)
+              .fontColor(this.colors().textSecondary)
+              .padding({ top: 2 })
+          }
           if (this.softStatus.length > 0) {
             Text(this.softStatus)
               .fontSize(ThemeConstants.META_MEDIUM)

@@ -1,8 +1,10 @@
 #include "range_cache.h"
 
+#include "player_log.h"
 #include "range_fetcher.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 
@@ -128,6 +130,20 @@ int64_t RangeCache::contiguousEndLocked() const
 
 void RangeCache::evictLocked()
 {
+    // ── 淘汰策略："正在读的那一块永远不会被淘汰" ──────────────────────────────
+    // 踩过的坑（设备实测最严重的一次软解故障：拉帧 20 秒不返回、看门狗判卡死、
+    // 一次播放产生上千个 HTTP Range 请求）：
+    // 原实现是"优先丢 pos_ 之前的块，否则丢 chunks_.begin()（偏移最小的那块）"。
+    // 而 MP4 的 moov（索引）常在**文件末尾**，于是解复用器一开始就把 pos_ 抬到
+    // 673MB 附近、缓存里塞满"远处的块"。等它回头顺序读开头（pos_ 很小）时：
+    //   ① 缓存里没有任何"pos_ 之前"的块（都在 pos_ 之后）→ 走 begin() 分支；
+    //   ② begin() 恰好就是**刚存进来的第 0 块**（正被读取的那块）→ 立刻被淘汰；
+    //   ③ 读不到 → 再取 → 再被淘汰 …… 死循环，每轮 1MB HTTP 请求。
+    // 现在：
+    //   ① 有"已读过（end <= pos_）"的块 → 先丢它（顺序播放时最没用）；
+    //   ② 否则丢**离 pos_ 最远**的块（通常是索引那一带的远块），
+    //      且**跳过包含 pos_ 的块**；
+    //   ③ 若只剩"正在读的那一块"，就允许暂时超出上限，绝不把它丢掉。
     while (static_cast<int64_t>(chunks_.size()) > maxChunks_) {
         auto victim = chunks_.end();
         for (auto it = chunks_.begin(); it != chunks_.end(); ++it) {
@@ -138,7 +154,22 @@ void RangeCache::evictLocked()
             }
         }
         if (victim == chunks_.end()) {
-            victim = chunks_.begin();
+            int64_t bestDistance = -1;
+            for (auto it = chunks_.begin(); it != chunks_.end(); ++it) {
+                const int64_t start = it->first;
+                const int64_t end = start + static_cast<int64_t>(it->second.size());
+                if (pos_ >= start && pos_ < end) {
+                    continue;  // 正在读的块，绝对不淘汰
+                }
+                const int64_t distance = (start > pos_) ? (start - pos_) : (pos_ - end);
+                if (distance > bestDistance) {
+                    bestDistance = distance;
+                    victim = it;
+                }
+            }
+        }
+        if (victim == chunks_.end()) {
+            break;
         }
         chunks_.erase(victim);
     }
@@ -164,7 +195,19 @@ bool RangeCache::fetchIntoLockedRange(int64_t pos, std::string &error, bool coun
         lastReqStart_ = start;
         lastReqEnd_ = end;
     }
+    // 取流前后各留一条痕：软解"卡在读包"时，靠这两条就能判定
+    // "卡在 HTTP 取流上"（只有 begin 没有 end）还是"卡在缓存锁上"（有 lockWait 日志）。
+    static std::atomic<int64_t> fetchSeq{0};
+    const int64_t seq = fetchSeq.fetch_add(1);
+    const auto fetchStart = std::chrono::steady_clock::now();
     const RangeResponse resp = FetchRange(url_, start, end);
+    const int64_t fetchMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - fetchStart).count();
+    if (fetchMs > 500) {
+        PlayerLog("rangeCache fetch#" + std::to_string(seq) + " slow ms=" + std::to_string(fetchMs)
+                  + " status=" + std::to_string(resp.status)
+                  + " bytes=" + std::to_string(resp.body.size()));
+    }
     if (resp.status >= 400 || resp.body.empty()) {
         // 起点处的失败可能是"服务器不支持 Range"：退化为整段请求再试一次
         if (start == 0) {
@@ -174,6 +217,17 @@ bool RangeCache::fetchIntoLockedRange(int64_t pos, std::string &error, bool coun
         }
         const RangeResponse plain = (start == 0) ? FetchRange(url_, 0, -1) : resp;
         std::lock_guard<std::mutex> lock(mtx_);
+        static std::atomic<int> failLogs{0};
+        if (failLogs.fetch_add(1) < 50) {
+            PlayerLog("rangeCache fetchFailed seq=" + std::to_string(seq)
+                      + " status=" + std::to_string(resp.status)
+                      + " bytes=" + std::to_string(resp.body.size())
+                      + " err=" + resp.error
+                      + " plainStatus=" + std::to_string(plain.status)
+                      + " plainBytes=" + std::to_string(plain.body.size())
+                      + " plainErr=" + plain.error
+                      + " size=" + std::to_string(size_) + " pos=" + std::to_string(pos_));
+        }
         if (plain.status >= 400 || plain.body.empty()) {
             if (plain.status >= 200 && plain.status < 300 && plain.error.empty() &&
                 plain.body.empty()) {
@@ -225,7 +279,15 @@ int RangeCache::read(uint8_t *buf, int bufSize, std::string &error)
         return 0;
     }
     {
+        const auto lockWaitStart = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(mtx_);
+        const int64_t lockWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - lockWaitStart).count();
+        if (lockWaitMs > 1000) {
+            // 锁被长时间占用 = "卡在读包"的另一种可能（此前没有任何日志可区分）
+            PlayerLog("rangeCache lockWaitMs=" + std::to_string(lockWaitMs)
+                      + " pos=" + std::to_string(pos_));
+        }
         if (size_ >= 0 && pos_ >= size_) {
             return 0;
         }

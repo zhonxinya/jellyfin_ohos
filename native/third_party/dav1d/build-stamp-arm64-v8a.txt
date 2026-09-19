@@ -1,0 +1,4 @@
+abi=arm64-v8a
+dav1d=1.5.1
+script_sha256=5a01ef0978c54a083fa98f2626e504b46acfd574cc3607a721842fe62afb6821
+source_tree=nogit

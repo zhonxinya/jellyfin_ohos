@@ -29,12 +29,14 @@
 // FFmpeg 软解码器（未链接 FFmpeg 时其 available() 返回 false，probe 会如实报错）
 #include "../feature/player/ffmpeg_decoder.h"
 // 流式软解会话（播放用：Range 分页取流 + 逐帧 RGBA 输出）
+#include "../feature/player/player_log.h"
 #include "../feature/player/soft_decode_session.h"
 // EGL/GLES 渲染（把软解帧直接画进 XComponent surface）
 #include "../feature/player/egl_renderer.h"
 // 官方 XComponent 原生渲染桥（OH_NativeXComponent 回调提供 window）
 #include "../feature/player/xcomponent_bridge.h"
 
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <functional>
@@ -52,6 +54,9 @@ namespace {
 constexpr const char *kNativeVersion = JELLYFIN_APP_VERSION "-native";
 
 
+/** 软解诊断日志（定义在本文件后部；取流计时等早于此处的代码需要前置声明） */
+void SoftLog(const std::string &message);
+
 /**
  * 向 feature/player 注入取流实现（本工程用 core 的 HttpClient，支持 https 与 Jellyfin 鉴权）。
  * feature/player 自身不依赖任何 HTTP 实现，换工程时只需替换这里的注入。
@@ -60,6 +65,13 @@ void EnsureRangeFetcher()
 {
     static std::once_flag once;
     std::call_once(once, []() {
+        // feature/player 的日志注入：软解内部的耗时诊断（慢帧分段耗时等）接到 hilog 上。
+        // 该模块本身不依赖 hilog（设计上要能整目录移植），所以由宿主在这里接线。
+        jellyfin::player::SetPlayerLogFn([](const char *message) {
+            if (message != nullptr) {
+                SoftLog(std::string("player: ") + message);
+            }
+        });
         jellyfin::player::SetRangeFetcher([](const std::string &url, int64_t start, int64_t end) {
             jellyfin::player::RangeResponse out;
             jellyfin::HttpClient http;
@@ -69,7 +81,23 @@ void EnsureRangeFetcher()
             if (end >= start) {
                 headers["Range"] = "bytes=" + std::to_string(start) + "-" + std::to_string(end);
             }
+            const auto t0 = std::chrono::steady_clock::now();
             const jellyfin::HttpResponse resp = http.get(url, headers);
+            const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count();
+            // 慢取流必须留痕：软解"卡住不动"时，第一件要分清的事就是
+            // "卡在网络上"还是"卡在解码上"。设备实测过一次 20 秒级停滞（看门狗判卡死），
+            // 没有这条日志就只能靠猜。>500ms 一律记录；前 3 次也记录（起播阶段的口径）。
+            static std::atomic<int> firstCalls{0};
+            const int callIndex = firstCalls.fetch_add(1);
+            if (ms > 500 || callIndex < 3) {
+                SoftLog("rangeFetch start=" + std::to_string(start) + " end=" + std::to_string(end)
+                        + " status=" + std::to_string(resp.status)
+                        + " bytes=" + std::to_string(resp.body.size())
+                        + " ms=" + std::to_string(ms)
+                        + (resp.error.empty() ? std::string() : (" err=" + resp.error)));
+            }
             out.status = resp.status;
             out.body = resp.body;
             out.error = resp.error;
@@ -299,7 +327,43 @@ jellyfin::api::PlaybackInfoOptions ParsePlaybackOptionsJson(const nlohmann::json
     options.enableDirectPlay = j.value("enableDirectPlay", true);
     options.enableDirectStream = j.value("enableDirectStream", true);
     options.enableTranscoding = j.value("enableTranscoding", true);
+    // 是否带 DeviceProfile（默认带，见 api::PlaybackInfoOptions 的说明）。
+    // 宿主可在"用户明确要求强制直连"等场景置 false。
+    options.includeDeviceProfile = j.value("includeDeviceProfile", true);
     return options;
+}
+
+/**
+ * 请求 PlaybackInfo，并在**服务端给不出任何可用地址**时去掉 DeviceProfile 重试一次。
+ *
+ * 为什么需要这条保底路径：带上 DeviceProfile 后服务端按"客户端能直接播什么"判断；
+ * 若它既不能转码（没装/没开 ffmpeg）又不认为能直接播放，响应里就不会有任何可用 URL。
+ * 那时直接报错的话，用户看到的是"以前能放（慢），现在放不了"。重试一次不带 DeviceProfile
+ * 即可退回改造前的行为：直连 + 本机软解（AV1 由 dav1d 解，慢但能看）。
+ *
+ * @param usedFallback 输出：是否走了保底重试（宿主与日志据此留痕）
+ */
+jellyfin::ApiResult PostPlaybackInfoWithProfileFallback(
+    const std::string &itemId, const std::string &userId,
+    const jellyfin::api::PlaybackInfoOptions &options, bool &usedFallback)
+{
+    usedFallback = false;
+    auto result = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+    if (!result.ok() || !options.includeDeviceProfile) {
+        return result;
+    }
+    if (jellyfin::api::playbackInfoHasPlayableUrl(result.data)) {
+        return result;
+    }
+    jellyfin::api::PlaybackInfoOptions direct = options;
+    direct.includeDeviceProfile = false;
+    auto retry = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, direct);
+    if (retry.ok() && retry.data.is_object()) {
+        retry.data["DeviceProfileFallback"] = true;
+        usedFallback = true;
+        return retry;
+    }
+    return result;
 }
 
 bool ReadJsonArg(napi_env env, napi_callback_info info, size_t index, nlohmann::json &out)
@@ -812,11 +876,15 @@ napi_value GetPlaybackInfo(napi_env env, napi_callback_info info)
     const auto options = ParsePlaybackOptionsJson(optionsJson);
     const std::string userId = session.userId();
     return RunAsync(env, [userId, itemId, options]() {
-        auto result = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        bool fallback = false;
+        auto result = PostPlaybackInfoWithProfileFallback(itemId, userId, options, fallback);
         if (result.ok() && result.data.is_object()) {
             auto &session = jellyfin::SessionManager::instance();
             result.data["ResolvedPlayUrl"] = jellyfin::api::resolvePlayUrl(
                 session.baseUrl(), session.accessToken(), result.data);
+            if (fallback) {
+                result.data["DeviceProfileFallback"] = true;
+            }
         }
         return FromApi(result).dump();
     });
@@ -1163,10 +1231,42 @@ napi_value ReportPlaybackStopped(napi_env env, napi_callback_info info)
  * 用途：系统硬解不支持的编码（如模拟器上的 HEVC）用 FFmpeg 软解逐帧出图，
  * 由 ArkTS 定时器拉帧并渲染（后续可替换为 EGL 直渲以提升帧率）。
  */
-std::unique_ptr<jellyfin::player::SoftDecodeSession> &SoftSession()
+/**
+ * 软解会话单例。
+ *
+ * ⚠ 必须是 **shared_ptr**（而不是 unique_ptr）—— 这是设备上实测到的崩溃（cppcrash）根因：
+ * 逐帧拉取跑在 libuv 工作线程上（`softPlayNextFrame` 是 `RunAsync`），而"停止软解"跑在
+ * UI 线程：宿主看门狗（20s 没拉回一帧）或退出播放页时会调 `softPlayClose`。若那里直接
+ * `unique_ptr::reset()`，正在飞的那次 `nextFrameRgba()` 就会踩到已经被析构的会话对象 ——
+ * 实测 faultlog 栈为 `RangeCache::read → fetchIntoLockedRange → std::mutex::lock`
+ * 落在已释放内存上（SIGSEGV，进程直接挂掉，用户看到"播放中应用消失"）。
+ * 改成 shared_ptr 后：工作线程持有一份引用，对象活到那次调用结束；关闭只是"不再有新任务"。
+ */
+struct SoftSessionHolder {
+    std::mutex mutex;
+    std::shared_ptr<jellyfin::player::SoftDecodeSession> session;
+};
+
+SoftSessionHolder &SoftSessionStore()
 {
-    static std::unique_ptr<jellyfin::player::SoftDecodeSession> session;
-    return session;
+    static SoftSessionHolder holder;
+    return holder;
+}
+
+/** 取当前会话的一份引用（可能为 nullptr）；**异步任务必须先取一份再使用** */
+std::shared_ptr<jellyfin::player::SoftDecodeSession> SoftSession()
+{
+    SoftSessionHolder &store = SoftSessionStore();
+    std::lock_guard<std::mutex> lock(store.mutex);
+    return store.session;
+}
+
+/** 替换当前会话（旧的交给持有它的异步任务用完再析构） */
+void SetSoftSession(std::shared_ptr<jellyfin::player::SoftDecodeSession> session)
+{
+    SoftSessionHolder &store = SoftSessionStore();
+    std::lock_guard<std::mutex> lock(store.mutex);
+    store.session = std::move(session);
 }
 
 /** 软解渲染器（EGL）：与软解会话配对，把解码帧直接渲染到 XComponent surface */
@@ -1494,7 +1594,11 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
     return RunAsync(env, [userId, itemId, surfaceIdText, surfaceWidth, surfaceHeight, renderMode, options]() {
         nlohmann::json out;
         out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
-        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        bool profileFallback = false;
+        auto playback = PostPlaybackInfoWithProfileFallback(itemId, userId, options, profileFallback);
+        if (profileFallback) {
+            out["deviceProfileFallback"] = true;
+        }
         if (!playback.ok()) {
             out["ok"] = false;
             out["error"] = "获取播放信息失败：" + playback.error.message;
@@ -1566,11 +1670,12 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
             }
         }
 
-        SoftSession().reset(new jellyfin::player::SoftDecodeSession());
+        auto session = std::make_shared<jellyfin::player::SoftDecodeSession>();
+        SetSoftSession(session);
         std::string error;
         const auto openStart = std::chrono::steady_clock::now();
-        if (!SoftSession()->openUrl(pbSession.playUrl, error)) {
-            SoftSession().reset();
+        if (!session->openUrl(pbSession.playUrl, error)) {
+            SetSoftSession(nullptr);
             // 注意：**不销毁渲染器**。本函数在工作线程上运行，而 EGL 上下文是渲染线程
             // （UI 线程）私有的 —— 在这里销毁 EGL 对象属于跨线程操作。
             // 渲染器已经绑在当前 surface 上，留着下次直接复用即可（见 softPlayInitRenderer）。
@@ -1582,18 +1687,23 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
         const auto openMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - openStart)
                                 .count();
-        SoftLog("softPlayOpen ok codec=" + SoftSession()->videoCodec()
-                + " container=" + SoftSession()->container()
-                + " size=" + std::to_string(SoftSession()->width()) + "x"
-                + std::to_string(SoftSession()->height())
-                + " decodeThreads=" + std::to_string(SoftSession()->decoderThreads())
+        SoftLog("softPlayOpen ok codec=" + session->videoCodec()
+                + " decoder=" + session->decoderName()
+                + " pick=" + session->decoderNote()
+                + " container=" + session->container()
+                + " size=" + std::to_string(session->width()) + "x"
+                + std::to_string(session->height())
+                + " decodeThreads=" + std::to_string(session->decoderThreads())
                 + " openMs=" + std::to_string(openMs));
         out["ok"] = true;
-        out["container"] = SoftSession()->container();
-        out["videoCodec"] = SoftSession()->videoCodec();
-        out["width"] = SoftSession()->width();
-        out["height"] = SoftSession()->height();
-        out["durationSec"] = SoftSession()->durationSec();
+        out["container"] = session->container();
+        out["videoCodec"] = session->videoCodec();
+        // 解码器名一并回给宿主：AV1 是否拿到 dav1d 直接决定能不能出画面（见 README「AV1 软解」）
+        out["decoder"] = session->decoderName();
+        out["decoderPick"] = session->decoderNote();
+        out["width"] = session->width();
+        out["height"] = session->height();
+        out["durationSec"] = session->durationSec();
         return MakeResult(true, 200, "ok", out).dump();
     });
 }
@@ -1612,13 +1722,16 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
  */
 napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
 {
-    if (SoftSession() == nullptr) {
+    // 取一份会话引用并**带进异步任务**：宿主可能在本次调用飞在半空时调 softPlayClose
+    // （看门狗/退出播放页），只捕获裸指针或每处现取单例都会踩到已析构对象（见 SoftSession 注释）。
+    auto session = SoftSession();
+    if (session == nullptr) {
         return ToNapiJson(env, MakeResult(false, 0, "会话未打开"));
     }
     int64_t maxWidth = 0;
     ReadIntArg(env, info, 0, maxWidth);
     const int64_t cappedWidth = maxWidth > 0 ? maxWidth : 0;
-    return RunAsync(env, [cappedWidth]() {
+    return RunAsync(env, [cappedWidth, session]() {
         std::vector<uint8_t> rgba;
         jellyfin::player::SoftDecodeSession::FrameInfo frameInfo;
         // 软解速度（fps）的计时起点：首帧到达时记一次，之后每 100 帧打印实际帧率。
@@ -1626,7 +1739,7 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
         static std::chrono::steady_clock::time_point fpsStart;
         static int64_t fpsStartFrame = 0;
         const auto decodeStart = std::chrono::steady_clock::now();
-        const bool ok = SoftSession()->nextFrameRgba(
+        const bool ok = session->nextFrameRgba(
             cappedWidth > 0 ? static_cast<int>(cappedWidth) : 0, rgba, frameInfo);
         const auto decodeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                   std::chrono::steady_clock::now() - decodeStart)
@@ -1638,11 +1751,13 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
             {"height", frameInfo.height},
             {"ptsSec", frameInfo.ptsSec},
             {"frameIndex", frameInfo.frameIndex},
-            {"bytesFetched", SoftSession()->bytesFetched()},
+            {"bytesFetched", session->bytesFetched()},
             // 排队的 seek 结果：宿主据此知道"跳转到底生效了没有"（此前只能看到位置没变，
             // 无法区分"还没执行"与"执行失败"）。
             {"seekApplied", frameInfo.seekApplied},
             {"seekedToSec", frameInfo.seekedToSec},
+            // 解码器名随每一帧回给宿主：失败提示里能直接说清"是哪个解码器解不出来"
+            {"decoder", session->decoderName()},
         };
         if (!frameInfo.seekError.empty()) {
             out["seekError"] = frameInfo.seekError;
@@ -1671,7 +1786,22 @@ napi_value SoftPlayNextFrame(napi_env env, napi_callback_info info)
                     + std::to_string(frameInfo.height)
                     + " decodeMs=" + std::to_string(decodeMs)
                     + " fps=" + std::to_string(static_cast<int>(fps * 10) / 10)
-                    + " fetched=" + std::to_string(SoftSession()->bytesFetched()));
+                    + " fetched=" + std::to_string(session->bytesFetched()));
+        }
+        // ── 失败必须留痕（本工程踩过的最贵的一个坑）─────────────────────────
+        // 此前这里**只在成功时**打印，于是 AV1 那种"每一包都被解码器拒绝、一帧都出不来"
+        // 的情况在 hilog 里连一行都没有：上层看到 eof、用户看到黑屏，谁都查不出原因。
+        // 现在：首帧失败立即打印（带错误原因与解码器名），此后每 100 次失败再打印一次。
+        if (!ok) {
+            static int64_t failCount = 0;
+            failCount++;
+            if (failCount == 1 || failCount % kSoftFirstFrameLogInterval == 0) {
+                SoftLog("softPlayNextFrame 失败 #" + std::to_string(failCount)
+                        + " decoder=" + session->decoderName()
+                        + " reason=" + (frameInfo.error.empty() ? "未知" : frameInfo.error)
+                        + " frames=" + std::to_string(session->framesDecoded())
+                        + " fetched=" + std::to_string(session->bytesFetched()));
+            }
         }
         // 排队的 seek 落地（成功/失败都要留痕：这是"续播/跳转到底有没有生效"的唯一事实来源）
         if (frameInfo.seekApplied) {
@@ -1848,15 +1978,34 @@ napi_value SoftPlayStatus(napi_env env, napi_callback_info /*info*/)
 {
     nlohmann::json out;
     out["ffmpegAvailable"] = jellyfin::player::SoftDecodeSession::available();
-    if (SoftSession() != nullptr) {
-        out["open"] = SoftSession()->isOpen();
-        out["videoCodec"] = SoftSession()->videoCodec();
-        out["container"] = SoftSession()->container();
-        out["width"] = SoftSession()->width();
-        out["height"] = SoftSession()->height();
-        out["durationSec"] = SoftSession()->durationSec();
-        out["framesDecoded"] = SoftSession()->framesDecoded();
-        out["bytesFetched"] = SoftSession()->bytesFetched();
+    auto session = SoftSession();
+    if (session != nullptr) {
+        out["open"] = session->isOpen();
+        out["videoCodec"] = session->videoCodec();
+        out["container"] = session->container();
+        out["width"] = session->width();
+        out["height"] = session->height();
+        out["durationSec"] = session->durationSec();
+        out["framesDecoded"] = session->framesDecoded();
+        out["bytesFetched"] = session->bytesFetched();
+        // 阶段快照：宿主看门狗判定"卡死"时据此说明**卡在哪一步**（见 StageSnapshot 说明）。
+        // 这是一次独立的同步调用（UI 线程），不会与正在飞的解码调用抢锁 —— 全部是原子读。
+        const auto stage = session->stageSnapshot();
+        const char *stageName = "idle";
+        switch (stage.stage) {
+        case jellyfin::player::SoftDecodeSession::Stage::ReceiveFrame: stageName = "receiveFrame"; break;
+        case jellyfin::player::SoftDecodeSession::Stage::ReadPacket: stageName = "readPacket"; break;
+        case jellyfin::player::SoftDecodeSession::Stage::SendPacket: stageName = "sendPacket"; break;
+        case jellyfin::player::SoftDecodeSession::Stage::Scale: stageName = "swsScale"; break;
+        default: stageName = "idle"; break;
+        }
+        out["stage"] = stageName;
+        out["stageMs"] = static_cast<double>(stage.stageMs);
+        out["callMs"] = static_cast<double>(stage.callMs);
+        out["callPackets"] = stage.packetsRead;
+        out["sendRejects"] = stage.sendRejects;
+        out["decoder"] = session->decoderName();
+        out["decoderThreads"] = session->decoderThreads();
     } else {
         out["open"] = false;
     }
@@ -1965,9 +2114,11 @@ napi_value SoftPlaySelfTest(napi_env env, napi_callback_info /*info*/)
 
 napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
 {
+    // 关闭：从单例摘下来即可。**不要在这里销毁对象** —— 可能有一次 nextFrameRgba 正在
+    // 工作线程上跑（它持有自己的 shared_ptr，用完自然析构）。若在这里强行 close()，
+    // 等于把正在解码的上下文从工作线程脚下抽走（数据竞争 + 崩溃）。
     if (SoftSession() != nullptr) {
-        SoftSession()->close();
-        SoftSession().reset();
+        SetSoftSession(nullptr);
     }
     return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json{{"closed", true}}));
 }
@@ -1985,7 +2136,8 @@ napi_value SoftPlayClose(napi_env env, napi_callback_info /*info*/)
  */
 napi_value SoftPlaySeek(napi_env env, napi_callback_info info)
 {
-    if (SoftSession() == nullptr || !SoftSession()->isOpen()) {
+    auto session = SoftSession();
+    if (session == nullptr || !session->isOpen()) {
         return ToNapiJson(env, MakeResult(false, 0, "软解会话未打开"));
     }
     double positionSec = 0.0;
@@ -1997,7 +2149,7 @@ napi_value SoftPlaySeek(napi_env env, napi_callback_info info)
             napi_get_value_double(env, args[0], &positionSec);
         }
     }
-    SoftSession()->requestSeek(positionSec);
+    session->requestSeek(positionSec);
     SoftLog("softPlaySeek queued target=" + std::to_string(positionSec) + "s");
     nlohmann::json data = {
         {"ok", true},
@@ -2087,7 +2239,11 @@ napi_value PlayerSoftDecodeProbe(napi_env env, napi_callback_info info)
         out["ffmpegAvailable"] = jellyfin::player::FfmpegDecoder::available();
 
         // 1) 解析播放地址（与 playerOpen 走同一条 PlaybackInfo + 策略解析路径）
-        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        bool probeFallback = false;
+        auto playback = PostPlaybackInfoWithProfileFallback(itemId, userId, options, probeFallback);
+        if (probeFallback) {
+            out["deviceProfileFallback"] = true;
+        }
         if (!playback.ok()) {
             out["ok"] = false;
             out["error"] = "获取播放信息失败：" + playback.error.message;
@@ -2184,9 +2340,13 @@ napi_value PlayerOpen(napi_env env, napi_callback_info info)
 
     const std::string userId = session.userId();
     return RunAsync(env, [userId, itemId, options]() {
-        auto playback = jellyfin::api::postPlaybackInfo(Api(), itemId, userId, options);
+        bool profileFallback = false;
+        auto playback = PostPlaybackInfoWithProfileFallback(itemId, userId, options, profileFallback);
         if (!playback.ok()) {
             return FromApi(playback).dump();
+        }
+        if (profileFallback) {
+            SoftLog("playerOpen 使用直连保底路径（服务端未给出转码地址）");
         }
         if (playback.data.is_object() && !playback.data.contains("ItemId")) {            playback.data["ItemId"] = itemId;
         }
@@ -2209,6 +2369,22 @@ napi_value PlayerOpen(napi_env env, napi_callback_info info)
             CurrentMediaSourceId = pbSession.mediaSourceId;
         }
         Progress().reset();
+
+        // 播放方式必须留痕：这是"到底走的是直连 / 直接串流 / 服务器转码"的唯一事实来源
+        // （排查 AV1 这类"转码还是软解"的问题时，光看画面分不出是哪一条路）。
+        // ⚠ 只记录**去掉查询串**的 URL：Jellyfin 的直连地址里带 api_key，属于敏感信息。
+        {
+            std::string sanitized = pbSession.playUrl;
+            const size_t query = sanitized.find('?');
+            if (query != std::string::npos) {
+                sanitized = sanitized.substr(0, query) + "?<redacted>";
+            }
+            SoftLog(std::string("playerOpen method=") + jellyfin::player::PlayMethodToString(pbSession.method)
+                    + " codec=" + pbSession.videoCodec
+                    + " container=" + pbSession.container
+                    + " profileFallback=" + (profileFallback ? "1" : "0")
+                    + " url=" + sanitized);
+        }
 
         nlohmann::json startBody = BuildProgressBody(pbSession.itemId, 0, false, false);
         startBody["CanSeek"] = true;

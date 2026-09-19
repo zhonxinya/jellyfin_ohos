@@ -22,6 +22,26 @@ Upstream: https://github.com/nlohmann/json
 TODO: keep LICENSE.MIT alongside the header when packaging distributions.
 
 -------------------------------------------------------------------------------
+dav1d（AV1 软解码）
+-------------------------------------------------------------------------------
+Status: **源码已内置**（native/third_party/dav1d/source/，未经修改的上游源码树），
+        由本仓库脚本交叉编译为共享库并打进 HAP：
+        scripts/build_dav1d_ohos.sh
+        （编译产物已随仓库提交，克隆后构建应用直接链接；仅当指纹失效——源码树或脚本
+          变化——时才会重编译，见 native/third_party/README.md 的 dav1d 一节）
+版本:   dav1d 1.5.1
+       下载地址: https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz
+许可证: BSD-2-Clause（见 native/third_party/dav1d/source/COPYING）
+上游:   https://code.videolan.org/videolan/dav1d
+用途:   AV1 软解码。FFmpeg 以 --enable-libdav1d 编译，`libavcodec.so` 的 DT_NEEDED 依赖
+        `libdav1d.so.7`；播放侧对 AV1 显式优先选它（FFmpeg 自带的 `av1` 解码器在本构建里
+        一帧都解不出来，根因见 native/feature/player/README.md 的「AV1 软解」）
+源码:   native/third_party/dav1d/source/（随仓库提交，未经修改的上游源码）
+构建产物: native/app/entry/libs/<abi>/libdav1d.so、libdav1d.so.7
+          ABI: arm64-v8a（含汇编）、x86_64（纯 C，本环境无 nasm）
+编译指纹: native/third_party/dav1d/build-stamp-<abi>.txt
+
+-------------------------------------------------------------------------------
 libcurl
 -------------------------------------------------------------------------------
 Status: not yet vendored

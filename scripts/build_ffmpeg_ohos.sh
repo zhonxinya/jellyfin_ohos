@@ -39,6 +39,8 @@ WORK_ROOT="${FFMPEG_WORK_ROOT:-$(dirname "$REPO_ROOT")/_ffmpeg-build}"
 OUT_ROOT="${2:-${FFMPEG_OUT_ROOT:-$WORK_ROOT/out}}"
 
 FFMPEG_VERSION="7.1"
+# AV1 软解依赖的 dav1d（源码同样内置，见 native/third_party/dav1d/）
+DAV1D_VERSION="1.5.1"
 # 上游发行包校验值，用于溯源（本仓库直接内置其解压后的源码树）
 FFMPEG_SRC_TARBALL_SHA256="40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6"
 SRC_DIR="$REPO_ROOT/native/third_party/ffmpeg/source"
@@ -120,10 +122,24 @@ source_tree_dirty() {
 
 build_fingerprint() {
     local abi="$1"
-    printf 'abi=%s\nffmpeg=%s\nscript_sha256=%s\nsource_tree=%s\n' \
+    printf 'abi=%s\nffmpeg=%s\nscript_sha256=%s\nsource_tree=%s\ndav1d=%s\n' \
         "$abi" "$FFMPEG_VERSION" \
         "$(sha256sum "$SCRIPT_DIR/build_ffmpeg_ohos.sh" | awk '{print $1}')" \
-        "$(source_tree_id)"
+        "$(source_tree_id)" \
+        "$(dav1d_fingerprint_value "$abi")"
+}
+
+# dav1d 产物指纹：FFmpeg 的 libdav1d 解码器是**链接**到 libdav1d.so 的，
+# dav1d 一换（版本/汇编开关/ABI 变了）FFmpeg 也必须重编 —— 所以把它算进 FFmpeg 的指纹里，
+# 否则"刷新了 dav1d 却没重编 FFmpeg"会让产物与源码不一致（且没有任何提示）。
+dav1d_fingerprint_value() {
+    local abi="$1"
+    local lib="$REPO_ROOT/native/app/entry/libs/$abi/libdav1d.so"
+    if [ -f "$lib" ]; then
+        sha256sum "$lib" | awk '{print $1}'
+    else
+        echo "missing"
+    fi
 }
 
 needs_build() {
@@ -143,6 +159,20 @@ needs_build() {
         return 0
     fi
     return 1
+}
+
+# 确保某个 ABI 的 libdav1d 已部署在 entry/libs/<abi>/（--enable-libdav1d 的前提）。
+# 产物随仓库提交，正常情况下这里什么都不会做；缺失时调用 dav1d 的构建脚本补上。
+ensure_dav1d() {
+    local abi="$1"
+    local lib="$REPO_ROOT/native/app/entry/libs/$abi/libdav1d.so"
+    local script="$SCRIPT_DIR/build_dav1d_ohos.sh"
+    [ -f "$lib" ] && return 0
+    [ -x "$script" ] || die "缺少 libdav1d（$lib）且找不到 $script"
+    echo "libdav1d 缺失（$abi）：先交叉编译 dav1d ..."
+    DAV1D_WORK_ROOT="$WORK_ROOT/../_dav1d-build" bash "$script" "$abi" \
+        || die "dav1d 构建失败（$abi）"
+    [ -f "$lib" ] || die "dav1d 构建结束但仍没有 $lib"
 }
 
 build_abi() {
@@ -168,15 +198,41 @@ build_abi() {
 
     echo "==================== 构建 $abi（$triple） ===================="
 
+    # ── 确保 libdav1d 就位（AV1 软解的解码器，见 scripts/build_dav1d_ohos.sh 的说明）──
+    # 产物随仓库提交；缺失（例如首次引入 dav1d、或手工删过库）时按需交叉编译一次。
+    ensure_dav1d "$abi"
+
     # 复制内置源码到工作目录再构建：vendored 源码树保持原始状态
     rm -rf "$work" "$prefix"
     mkdir -p "$work" "$prefix"
     cp -a "$SRC_DIR/." "$work/"
 
+    # FFmpeg 的 --enable-libdav1d 走 require_pkg_config：本环境没有 pkg-config，
+    # 用仓库内的 scripts/pkg-config-shim.sh 顶上，并按当前 ABI 生成一份 dav1d.pc
+    # （路径是每次构建现算的绝对路径，所以不随仓库提交，避免把本机路径写进 git）。
+    local pc_dir="$OUT_ROOT/pkgconfig-$abi"
+    mkdir -p "$pc_dir"
+    cat > "$pc_dir/dav1d.pc" <<EOF
+prefix=$REPO_ROOT/native/third_party/dav1d
+includedir=$REPO_ROOT/native/third_party/dav1d/include
+libdir=$libs_dir
+
+Name: libdav1d
+Description: AV1 decoding library (HarmonyOS cross build, $abi)
+Version: $DAV1D_VERSION
+Libs: -L\${libdir} -ldav1d
+Libs.private: -pthread
+Cflags: -I\${includedir}
+EOF
+    export PKG_CONFIG_PATH="$pc_dir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
     pushd "$work" >/dev/null
 
     # 常用解码器/解复用器/解析器（媒体库常见格式：mkv/mp4/ts/webm + h264/hevc/av1/vp9 + 常见音频）
-    local decoders="h264,hevc,mpeg2video,mpeg4,msmpeg4v3,vc1,wmv3,vp8,vp9,av1,theora,flv,mjpeg,prores,\
+    # **av1 与 libdav1d 两个都留着**：客户端优先用 libdav1d（AV1 软解只有它能出帧，见
+    # scripts/build_dav1d_ohos.sh 顶部说明），自带 av1 解码器保留给"有硬件加速的构建"，
+    # 并且让 `avcodec_find_decoder` 在 dav1d 缺席时仍有回退对象（会明确报错，而不是静默黑屏）。
+    local decoders="h264,hevc,mpeg2video,mpeg4,msmpeg4v3,vc1,wmv3,vp8,vp9,av1,libdav1d,theora,flv,mjpeg,prores,\
 aac,aac_latm,ac3,eac3,dca,truehd,mlp,flac,mp3,opus,vorbis,alac,pcm_s16le,pcm_s24le,pcm_bluray,pcm_dvd,pcm_f32le,\
 subrip,ass,ssa,dvd_subtitle,hdmv_pgs_subtitle,webvtt,text"
     local demuxers="matroska,mov,mp4,mpegts,mpegps,avi,flv,asf,ogg,wav,flac,mp3,webm_dash_manifest,\
@@ -198,6 +254,8 @@ hls,concat,image2,srt,ass,webvtt_raw,sup,pgs"
         --sysroot="$SYSROOT" \
         --extra-cflags="--sysroot=$SYSROOT -I$SYSROOT/usr/include -fPIC -O2" \
         --extra-ldflags="--sysroot=$SYSROOT -L$sysroot_lib -Wl,-rpath-link,$sysroot_lib" \
+        --pkg-config="$SCRIPT_DIR/pkg-config-shim.sh" \
+        --enable-libdav1d \
         --enable-shared \
         --disable-static \
         --enable-pic \

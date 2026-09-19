@@ -1,9 +1,12 @@
 #include "soft_decode_session.h"
 
+#include "player_log.h"
 #include "range_cache.h"
 #include "range_fetcher.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -28,12 +31,26 @@ namespace player {
 #if defined(JELLYFIN_HAS_FFMPEG)
 namespace {
 
+int64_t NowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 std::string AvErrorStr(int code)
 {
     char buf[AV_ERROR_MAX_STRING_SIZE] = {0};
     av_strerror(code, buf, sizeof(buf));
     return std::string(buf);
 }
+
+/**
+ * 一帧都没解出来时，连续被拒多少包就判定"解码器不可用"。
+ * 取 30：正常码流的开头（sequence header + 关键帧）远小于这个数，
+ * 而"每包必拒"的坏情况（AV1 + 自带解码器）会立刻命中，不必把整片读完。
+ */
+constexpr int kMaxSendRejects = 30;
 
 struct AvioBridge {
     RangeCache *reader = nullptr;
@@ -76,6 +93,42 @@ int64_t BridgeSeek(void *opaque, int64_t offset, int whence)
     return bridge->reader->seek(base + offset);
 }
 
+/**
+ * 选择视频解码器：AV1 **必须**优先用 libdav1d。
+ *
+ * 为什么（本工程实测的根因，别再退回自带 av1 解码器）：
+ * FFmpeg 7.1 的 `libavcodec/av1dec.c` 在 `get_pixel_format()` 末尾有一段硬判断 ——
+ * `ff_get_format()` 之后若 `avctx->hwaccel == NULL`（即没有真的初始化出硬件加速），
+ * 直接 `av_log("Your platform doesn't support hardware accelerated AV1 decoding")`
+ * 并 `return AVERROR(ENOSYS)`。而"纯软解"的绕过分支是那段
+ * `for (int i = 0; pix_fmts[i] != pix_fmt; i++) if (pix_fmts[i] == avctx->pix_fmt)` ——
+ * 它只遍历**硬件格式**，本工程的 FFmpeg 是 `--disable-hwaccels` 构建的
+ * （`HWACCEL_MAX == 0`，候选列表里只剩软件格式），这个分支永远进不去。
+ * 后果：自带 av1 解码器**每一包都返回 -38（Function not implemented）**，一帧都解不出来；
+ * 而 `SoftDecodeSession` 只把该值当作"这包没被接受"继续读，最终读到文件末尾当作 `eof` ——
+ * 设备上表现为"回退软解后进度条不动、画面纯黑、没有任何错误提示"。
+ * 该结论已用同源码/同 configure 的宿主二进制复现（600 包 / 0 帧）。
+ *
+ * dav1d（BSD-2-Clause）是独立的多线程 AV1 解码器，也是服务端与桌面播放器实际在用的那个；
+ * 交叉编译与部署见 `scripts/build_dav1d_ohos.sh`。
+ */
+const AVCodec *PickVideoDecoder(AVCodecID id, std::string &note)
+{
+    if (id == AV_CODEC_ID_AV1) {
+        const AVCodec *dav1d = avcodec_find_decoder_by_name("libdav1d");
+        if (dav1d != nullptr) {
+            note = "AV1 → libdav1d";
+            return dav1d;
+        }
+        note = "AV1 → 自带 av1 解码器（本构建没有 libdav1d，很可能解不出帧）";
+    }
+    const AVCodec *fallback = avcodec_find_decoder(id);
+    if (fallback != nullptr && note.empty()) {
+        note = fallback->name;
+    }
+    return fallback;
+}
+
 } // namespace
 #endif /* JELLYFIN_HAS_FFMPEG */
 
@@ -99,8 +152,22 @@ struct SoftDecodeSession::Impl {
     bool failed = false;
     /** 解码器实际使用的线程数（0 = 解码器自行决定；见 openUrl 里的多核设置） */
     int threadCount = 0;
+    /** 选中的解码器名（如 libdav1d / hevc）。宿主与日志据此确认"到底谁在解" */
+    std::string decoderName;
+    /** 选择解码器时的说明（AV1 是否拿到了 dav1d），用于日志留痕 */
+    std::string decoderNote;
+    /** 连续被解码器拒绝的包数（用于把"解不出来"尽快变成明确错误，见 nextFrameRgba） */
+    int sendRejects = 0;
+    /** 最后一包被拒的错误码（AVERROR 负值） */
+    int lastSendError = 0;
     std::string error;
 #endif
+    // ── 阶段跟踪（诊断用；跨线程只读，见 StageSnapshot 的说明）─────────────────
+    std::atomic<int> stage{0};
+    std::atomic<int64_t> stageStartMs{0};
+    std::atomic<int64_t> callStartMs{0};
+    std::atomic<int> callPackets{0};
+
     /**
      * 排队的 seek 目标（秒，<0 表示无请求）。
      * 跨线程访问（UI 线程 requestSeek / 解码线程取用），必须用互斥量保护。
@@ -204,12 +271,13 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
     impl_->width = par->width;
     impl_->height = par->height;
 
-    const AVCodec *codec = avcodec_find_decoder(par->codec_id);
+    const AVCodec *codec = PickVideoDecoder(par->codec_id, impl_->decoderNote);
     if (codec == nullptr) {
         error = "本构建不含该视频解码器：" + impl_->codec;
         close();
         return false;
     }
+    impl_->decoderName = codec->name;
     impl_->dec = avcodec_alloc_context3(codec);
     if (impl_->dec == nullptr || avcodec_parameters_to_context(impl_->dec, par) < 0) {
         error = "打开视频解码器失败：" + impl_->codec;
@@ -276,30 +344,82 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
         return false;
     }
 
+    // ── 分段计时：慢在哪一段（取流 / 送包 / 收帧）────────────────────────────
+    // 设备实测"解到第 10 帧后某次拉帧 20 秒不返回"，而会话内部当时没有任何耗时日志，
+    // 只能靠猜。这里把三段耗时分别累计，只在这帧总耗时 >500ms 时打一行日志。
+    const auto frameStart = std::chrono::steady_clock::now();
+    impl_->callStartMs.store(NowMs());
+    impl_->callPackets.store(0);
+    int64_t readMs = 0;
+    int64_t sendMs = 0;
+    int64_t recvMs = 0;
+    int packetsRead = 0;
+    // 单次拉帧**长时间不返回**时，也要能在日志里看到它卡在哪一段（否则这种"挂住"只有
+    // 宿主的看门狗能发现，诊断信息为零）。每 3 秒打一行进度。
+    auto lastStuckReport = frameStart;
+
     for (;;) {
+        const auto recvStart = std::chrono::steady_clock::now();
+        impl_->stage.store(static_cast<int>(Stage::ReceiveFrame));
+        impl_->stageStartMs.store(NowMs());
         const int rc = avcodec_receive_frame(impl_->dec, impl_->frame);
+        recvMs += std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - recvStart).count();
         if (rc == 0) {
             break;  // 有帧可用
         }
         if (rc == AVERROR(EAGAIN)) {
+            const auto nowTs = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(nowTs - lastStuckReport).count() >= 3) {
+                lastStuckReport = nowTs;
+                PlayerLog("softDecode stillRunning frame=#" + std::to_string(impl_->frames + 1)
+                          + " elapsedMs=" + std::to_string(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(nowTs - frameStart).count())
+                          + " readMs=" + std::to_string(readMs)
+                          + " sendMs=" + std::to_string(sendMs)
+                          + " recvMs=" + std::to_string(recvMs)
+                          + " packets=" + std::to_string(packetsRead)
+                          + " rejects=" + std::to_string(impl_->sendRejects)
+                          + " fetched=" + std::to_string(bytesFetched()));
+            }
             // 需要更多包
             int readRc = 0;
+            const auto readStart = std::chrono::steady_clock::now();
+            impl_->stage.store(static_cast<int>(Stage::ReadPacket));
+            impl_->stageStartMs.store(NowMs());
             for (;;) {
                 readRc = av_read_frame(impl_->fmt, impl_->pkt);
                 if (readRc < 0) {
                     break;
                 }
                 if (impl_->pkt->stream_index == impl_->videoIndex) {
+                    packetsRead++;
+                    impl_->callPackets.store(packetsRead);
                     break;
                 }
                 av_packet_unref(impl_->pkt);
             }
+            readMs += std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - readStart).count();
             if (readRc < 0) {
                 // 数据用完：冲刷解码器
                 avcodec_send_packet(impl_->dec, nullptr);
                 const int flushRc = avcodec_receive_frame(impl_->dec, impl_->frame);
                 if (flushRc == 0) {
                     break;
+                }
+                // ── "一帧都没解出来就 EOF" 必须当成错误，而不是正常的播放结束 ──────
+                // 踩过的坑（AV1 + 自带 av1 解码器）：解码器对**每一个包**都返回
+                // -38 ENOSYS，而这里原本把它当"这包没接受、继续读"，于是把整个文件读完、
+                // 再以 "eof" 收场 —— 上层看到的是"播放结束"，用户看到的是一块黑屏，
+                // 任何一层日志里都没有错误。现在把它变成明确失败。
+                if (impl_->frames == 0 && impl_->sendRejects > 0) {
+                    impl_->failed = true;
+                    impl_->error = "解码器 " + (impl_->decoderName.empty() ? impl_->codec : impl_->decoderName)
+                                   + " 拒绝了全部 " + std::to_string(impl_->sendRejects)
+                                   + " 个数据包（" + AvErrorStr(impl_->lastSendError) + "），解不出任何帧";
+                    info.error = impl_->error;
+                    return false;
                 }
                 impl_->eof = true;
                 if (!impl_->bridge.error.empty()) {
@@ -311,7 +431,27 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
                 info.error = "eof";
                 return false;
             }
-            if (avcodec_send_packet(impl_->dec, impl_->pkt) < 0) {
+            const auto sendStart = std::chrono::steady_clock::now();
+            impl_->stage.store(static_cast<int>(Stage::SendPacket));
+            impl_->stageStartMs.store(NowMs());
+            const int sendRc = avcodec_send_packet(impl_->dec, impl_->pkt);
+            sendMs += std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - sendStart).count();
+            if (sendRc < 0) {
+                // 记下"被拒绝"的次数与错误码：一帧都没解出来时据此给出可诊断的失败原因
+                if (sendRc != AVERROR(EAGAIN)) {
+                    impl_->sendRejects++;
+                    impl_->lastSendError = sendRc;
+                    // 解不出任何帧且已经被拒很多包：立即报错，不再把整片读完（网络与时间都白费）
+                    if (impl_->frames == 0 && impl_->sendRejects >= kMaxSendRejects) {
+                        impl_->failed = true;
+                        impl_->error = "解码器 " + (impl_->decoderName.empty() ? impl_->codec : impl_->decoderName)
+                                       + " 无法解码该码流（" + AvErrorStr(sendRc) + "）";
+                        info.error = impl_->error;
+                        av_packet_unref(impl_->pkt);
+                        return false;
+                    }
+                }
                 av_packet_unref(impl_->pkt);
                 continue;
             }
@@ -330,6 +470,17 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
     }
 
     AVFrame *frame = impl_->frame;
+    const int64_t frameMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - frameStart).count();
+    if (frameMs > 500) {
+        PlayerLog("softDecode slowFrame #" + std::to_string(impl_->frames + 1)
+                  + " totalMs=" + std::to_string(frameMs)
+                  + " readMs=" + std::to_string(readMs)
+                  + " sendMs=" + std::to_string(sendMs)
+                  + " recvMs=" + std::to_string(recvMs)
+                  + " packets=" + std::to_string(packetsRead)
+                  + " fetched=" + std::to_string(bytesFetched()));
+    }
     const int srcW = frame->width > 0 ? frame->width : impl_->width;
     const int srcH = frame->height > 0 ? frame->height : impl_->height;
     const double scale = (maxWidth > 0 && srcW > maxWidth) ? (static_cast<double>(maxWidth) / srcW) : 1.0;
@@ -363,7 +514,10 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
     rgba.assign(static_cast<size_t>(dstW) * dstH * 4u, 0);
     uint8_t *dstData[4] = {rgba.data(), nullptr, nullptr, nullptr};
     int dstLinesize[4] = {dstW * 4, 0, 0, 0};
+    impl_->stage.store(static_cast<int>(Stage::Scale));
+    impl_->stageStartMs.store(NowMs());
     sws_scale(impl_->sws, frame->data, frame->linesize, 0, srcH, dstData, dstLinesize);
+    impl_->stage.store(static_cast<int>(Stage::Idle));
 
     int64_t pts = frame->pts;
     const AVRational tb = impl_->fmt->streams[impl_->videoIndex]->time_base;
@@ -377,6 +531,7 @@ bool SoftDecodeSession::nextFrameRgba(int maxWidth, std::vector<uint8_t> &rgba, 
     impl_->frames++;
     info.frameIndex = impl_->frames;
     av_frame_unref(frame);
+    impl_->stage.store(static_cast<int>(Stage::Idle));
     return true;
 #endif
 }
@@ -455,6 +610,10 @@ void SoftDecodeSession::close()
     impl_->eof = false;
     impl_->failed = false;
     impl_->error.clear();
+    impl_->decoderName.clear();
+    impl_->decoderNote.clear();
+    impl_->sendRejects = 0;
+    impl_->lastSendError = 0;
 #endif
     impl_->open = false;
     impl_->frames = 0;
@@ -512,6 +671,32 @@ int64_t SoftDecodeSession::framesDecoded() const
 int SoftDecodeSession::decoderThreads() const
 {
     return impl_->threadCount;
+}
+
+SoftDecodeSession::StageSnapshot SoftDecodeSession::stageSnapshot() const
+{
+    StageSnapshot snapshot;
+    snapshot.stage = static_cast<Stage>(impl_->stage.load());
+    const int64_t now = NowMs();
+    const int64_t stageStart = impl_->stageStartMs.load();
+    const int64_t callStart = impl_->callStartMs.load();
+    snapshot.stageMs = (snapshot.stage == Stage::Idle || stageStart == 0) ? 0 : (now - stageStart);
+    snapshot.callMs = callStart == 0 ? 0 : (now - callStart);
+    snapshot.packetsRead = impl_->callPackets.load();
+    snapshot.sendRejects = impl_->sendRejects;
+    snapshot.frames = impl_->frames;
+    snapshot.bytesFetched = bytesFetched();
+    return snapshot;
+}
+
+const std::string &SoftDecodeSession::decoderName() const
+{
+    return impl_->decoderName;
+}
+
+const std::string &SoftDecodeSession::decoderNote() const
+{
+    return impl_->decoderNote;
 }
 
 } // namespace player

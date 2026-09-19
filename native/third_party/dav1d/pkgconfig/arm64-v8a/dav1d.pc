@@ -1,0 +1,10 @@
+prefix=/vol3/@appdata/dsh-qddev/dsh-home/jellyfin_hmos_flutter/native/third_party/dav1d
+includedir=/vol3/@appdata/dsh-qddev/dsh-home/jellyfin_hmos_flutter/native/third_party/dav1d/include
+libdir=/vol3/@appdata/dsh-qddev/dsh-home/jellyfin_hmos_flutter/native/app/entry/libs/arm64-v8a
+
+Name: libdav1d
+Description: AV1 decoding library (HarmonyOS cross build, arm64-v8a)
+Version: 1.5.1
+Libs: -L${libdir} -ldav1d
+Libs.private: -pthread
+Cflags: -I${includedir}

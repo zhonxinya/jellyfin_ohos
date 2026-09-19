@@ -25,6 +25,17 @@ native/third_party/ffmpeg/source/**/*.so
 native/third_party/ffmpeg/source/**/*.so.*
 native/third_party/ffmpeg/source/**/*.a
 
+# dav1d（AV1 软解码，见 native/third_party/README.md）
+# 源码随仓库提交：native/third_party/dav1d/source/（dav1d 1.5.1 原始源码）
+# 公开头文件与预编译共享库同样随仓库提交（native/third_party/dav1d/include/、
+# native/app/entry/libs/{x86_64,arm64-v8a}/libdav1d.so*）
+# 防御：万一有人在源码树内直接 meson setup（脚本本身在临时目录构建，不产生这些）
+native/third_party/dav1d/source/build/
+native/third_party/dav1d/source/**/*.o
+native/third_party/dav1d/source/**/*.so
+native/third_party/dav1d/source/**/*.so.*
+native/third_party/dav1d/source/**/*.a
+
 # 签名材料与本机工程配置：禁止入库
 # native/app/build-profile.json5 由 DevEco 自动签名写入，含本机证书路径与密码；
 # 模板见 build-profile.json5.template，CI 使用 build-profile.ci.json5。

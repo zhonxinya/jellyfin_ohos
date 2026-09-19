@@ -1,7 +1,8 @@
 # Third-party native dependencies
 
 This tree vendors **nlohmann/json** (header-only) for Jellyfin API JSON parsing,
-**mbedTLS** for `https://` transport, and **FFmpeg 7.1** for software video decode.
+**mbedTLS** for `https://` transport, **FFmpeg 7.1** for software video decode, and
+**dav1d 1.5.1** for AV1 software decode (linked into FFmpeg as the `libdav1d` decoder).
 
 ## HTTPS (mbedTLS)
 
@@ -155,11 +156,54 @@ each against the packaged `libs/arm64-v8a/` splits cleanly:
 
 | Resolved from | Libraries |
 |---|---|
-| Inside the HAP | `libavformat.so.61`, `libavcodec.so.61`, `libavutil.so.59`, `libswscale.so.8`, `libswresample.so.5`, `libc++_shared.so` |
+| Inside the HAP | `libavformat.so.61`, `libavcodec.so.61`, `libavutil.so.59`, `libswscale.so.8`, `libswresample.so.5`, `libdav1d.so.7`, `libc++_shared.so` |
 | HarmonyOS system (any device) | `libace_napi.z.so`, `libace_ndk.z.so`, `libhilog_ndk.z.so`, `libdeviceinfo_ndk.z.so`, `libEGL.so`, `libGLESv3.so`, `libnative_window.so`, `libnative_image.so`, `libc.so` |
 
 Every FFmpeg dependency resolves from within the package, so a phone install carries its own
 FFmpeg and does not rely on anything FFmpeg-related being present on the system.
+
+## dav1d (AV1 software decode; source vendored, compiled into the app)
+
+FFmpeg is built with `--enable-libdav1d`, and the player prefers `libdav1d` for AV1. This is
+**not** an optional nicety — FFmpeg's own `av1` decoder cannot software-decode at all in this
+build (see `native/feature/player/README.md` → 「AV1 软解」 for the full root cause and the
+device/host evidence).
+
+Layout (mirrors the FFmpeg layout):
+
+| Path | Contents | In git? |
+|---|---|---|
+| `native/third_party/dav1d/source/` | Pristine upstream dav1d 1.5.1 source tree (359 files, ~12 MB) | yes |
+| `native/third_party/dav1d/include/` | Public headers (`dav1d/dav1d.h`) | yes |
+| `native/app/entry/libs/<abi>/libdav1d.so{,7}` | Runtime `.so` for each ABI | yes (prebuilt) |
+| `native/third_party/dav1d/build-stamp-<abi>.txt` | Fingerprint of the source/script that produced the `.so` | yes |
+
+Build / refresh:
+
+```bash
+bash scripts/build_dav1d_ohos.sh all              # 指纹一致时直接跳过
+DAV1D_FORCE_REBUILD=1 bash scripts/build_dav1d_ohos.sh all   # 无条件重建
+```
+
+Notes:
+
+- **Toolchain**: meson + ninja (dav1d builds with meson). `meson` is not part of the HarmonyOS
+  command-line tools — install it with `pip3 install --user meson` (the script also looks in
+  `~/.local/bin`), `ninja` comes from the distro.
+- **asm**: `arm64-v8a` builds **with** assembly (clang assembles dav1d's `.S` files; no nasm
+  needed). `x86_64` builds **without** assembly, because dav1d's x86 path requires nasm, which
+  neither this project nor the CI image has (same reason FFmpeg is configured `--disable-asm`).
+  The emulator's AV1 decode is therefore C-only — still multi-threaded and far faster than
+  FFmpeg's built-in decoder, and only the emulator is affected.
+- **FFmpeg needs pkg-config to find dav1d** and the HarmonyOS toolchain has none. The FFmpeg
+  script therefore points `--pkg-config` at `scripts/pkg-config-shim.sh` (a ~100-line bash
+  replacement that answers exactly the queries `configure` makes) and generates a per-ABI
+  `dav1d.pc` in the build directory (paths are computed per build, so no machine-specific path
+  is ever committed).
+- **Fingerprints are chained**: the FFmpeg stamp records the sha256 of the deployed
+  `libdav1d.so`, so refreshing dav1d forces FFmpeg to relink instead of silently keeping an
+  older binary. `scripts/verify_hap_ffmpeg.sh` also fails a release HAP whose `libavcodec.so`
+  does not need `libdav1d.so.7`, or which is missing that library.
 
 ## Planned: libass
 
