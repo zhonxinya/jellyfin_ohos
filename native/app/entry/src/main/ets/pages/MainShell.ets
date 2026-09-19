@@ -24,6 +24,13 @@ import { SettingsPage } from './SettingsPage';
 const kVideoTabIndex: number = 1;
 /** 「设置」页在底部页签中的下标 */
 const kSettingsTabIndex: number = 2;
+/**
+ * 挖孔（刘海/胶囊）避让高度的 `AppStorage` 键。
+ *
+ * 外壳把 `WindowFullscreen.insets(win, false).top` 写进来，`AppTopBar` / `PageHeader`
+ * 用 `@StorageProp` 读它做顶部内缩 —— 沉浸式下系统不再替应用避让，这一步必须自己做。
+ */
+const kTopInsetKey: string = 'shellTopInsetVp';
 
 @Entry
 @Component
@@ -47,12 +54,12 @@ struct MainShell {
    * 用户刚在子页改完、返回设置页看到的还是旧数字（设备实测：取消勾选一个库后仍显示「已选 2 个」）。
    */
   @State private settingsTabTick: number = 0;
-  /** 窗口实例：沉浸式全屏（「视频」页）需要它，进入/退出必须成对 */
+  /** 窗口实例：铺满整屏（全部页签）与沉浸式全屏（「视频」页）都依赖它 */
   private windowRef: window.Window | null = null;
-  /** 当前是否为「视频」页应用了沉浸式全屏（避免重复进入/退出） */
+  /** 当前是否为「视频」页应用了沉浸式全屏（记录状态，便于排查） */
   private immersiveForVideoTab: boolean = false;
   /**
-   * 沉浸式下「视频」页顶部要避让的像素（vp，来自挖孔/状态栏）。
+   * 沉浸式下「视频」页顶部要避让的像素（vp，来自挖孔）—— 交给页面自己的工具层用。
    *
    * 为什么由外壳算并下发：窗口实例在外壳手里，而**视频层铺满、工具层内缩**是同一套规则 ——
    * 页面自己再取一次窗口既多一次异步、也可能拿到不同实例。
@@ -78,16 +85,19 @@ struct MainShell {
       this.settingsTabTick = this.settingsTabTick + 1;
     };
     this.themeTick = AppViewModel.getInstance().themeVersion;
-    // 窗口实例提前取回：切到「视频」页要立刻隐藏系统栏，不能等到用户切页签时才开始异步取
+    // 先把挖孔避让的键建出来：`@StorageProp` 只在键**已存在**时才会收到后续更新，
+    // 顶栏组件在本方法之后就会绑定，晚一步建键会让它们永远拿不到那个值（踩过一次）。
+    AppStorage.setOrCreate(kTopInsetKey, 0);
+    // 窗口实例提前取回：外壳要立刻进沉浸式（三个页签都铺满整屏），
+    // 不能等到用户切页签时才开始异步取
     window.getLastWindow(getContext(this) as common.UIAbilityContext).then((win: window.Window) => {
       this.windowRef = win;
       this.applyChromeForTab(this.shellTabIndex);
       // 系统底部导航条的底色跟着应用走（部分机型/窗口模式下系统条是不透明的，
-      // 不改颜色就会在页签行下面压出一条异色横带）。真正让底部连成一整块的是
-      // build() 里的 expandSafeArea —— 见本文件 build() 开头与 WindowFullscreen.styleNavigationBarWith。
+      // 不改颜色就会在页签行下面压出一条异色横带）
       WindowFullscreen.styleNavigationBarWith(win, this.colors().cardBackground);
     }).catch(() => {
-      // 取不到窗口时「视频」页仍可用，只是不沉浸（不做静默假设）
+      // 取不到窗口时页面仍可用，只是不沉浸（不做静默假设）
     });
   }
 
@@ -104,8 +114,36 @@ struct MainShell {
   }
 
   /**
-   * 「视频」页默认**全屏沉浸式**（需求）：切到该页签即隐藏系统状态栏与导航栏并铺满整屏，
-   * 切走/离开必须还原（其它页面是普通布局，顶着"没有系统栏"会被当成系统级异常）。
+   * 外壳销毁（退出登录等）：把窗口还原成系统默认（两条系统栏都回来、取消沉浸式）。
+   *
+   * 为什么必须还原：沉浸式是**窗口级**状态。外壳是压栈路由的底页，一旦它带着"没有系统栏"
+   * 退出，而后面的页面（服务器配置 / 登录页）仍按系统常规避让，
+   * 那些页面就会顶着一个没人收拾的窗口状态 —— 它们并不走本外壳。
+   */
+  aboutToDisappear(): void {
+    AppStorage.setOrCreate(kTopInsetKey, 0);
+    WindowFullscreen.exit(this.windowRef, this.colors().cardBackground);
+  }
+
+  /**
+   * 按页签应用窗口外观：**三个页签都整屏沉浸**（隐藏状态栏与导航栏 + 铺满整屏）。
+   *
+   * 为什么非沉浸式页签也要铺满（用户口径："媒体库和设置页没有侵入底部空间，比视频页高"）：
+   * 应用只能在**自身内容框**内接收点击。非沉浸式窗口的内容框被系统按可见系统栏内缩
+   * （模拟器实测底部少 94px），底部页签行因此停在 y=2750，而沉浸式的「视频」页内容铺满整屏、
+   * 页签行在 y=2655..2844 —— 同一个页签行在两处差了整整一个系统导航条。
+   * 把它"画"下去没用：内容框外的部分**画得出来但点不动**（实测：负下边距把页签行推到
+   * y=2656..2844 后，从非沉浸式页签点它的下半部分完全无响应；单独关掉系统导航条也一样）。
+   *
+   * 备选方案"铺满但保留状态栏"实测被平台挡住：该模式下平台会把**外壳顶栏压扁**
+   * （190px → 59px，标题只剩 2px、肉眼不可见），`flexShrink(0)` / `constraintSize({minHeight})`
+   * / 插入 0 高度垫片都挡不住；而把状态栏一起隐藏时一切正常。因此统一走沉浸式。
+   *
+   * 沉浸式下顶部不再由系统避让，挖孔（刘海/胶囊）要应用自己躲 —— 见 `kTopInsetKey`。
+   *
+   * 为什么每次都重新应用、不按"状态没变就跳过"提前返回：播放页 / 详情页会自己进出沉浸式，
+   * 它们改的是**同一个窗口**。返回外壳时若按缓存布尔值跳过，窗口就会停在别人留下的状态上。
+   * 这些调用都是幂等的，代价可接受。
    */
   private applyChromeForTab(index: number): void {
     const wantImmersive: boolean = index === kVideoTabIndex;
@@ -114,20 +152,23 @@ struct MainShell {
     if (!wantImmersive) {
       this.videoFullscreen = false;
     }
-    if (wantImmersive === this.immersiveForVideoTab) {
-      return;
-    }
     this.immersiveForVideoTab = wantImmersive;
-    if (wantImmersive) {
-      WindowFullscreen.enter(this.windowRef);
-      // 系统栏隐藏后仍要避让挖孔：insets 的 visible 判定在 WindowFullscreen 里统一处理
-      this.videoTopInsetVp = WindowFullscreen.insets(this.windowRef, false).top;
-    } else {
-      // 退出沉浸式：还原系统栏时**必须同时**把底部导航条染回页签行的底色，
-      // 否则系统栏一出现就露出默认白底，底部页签行下面又多出一条白带（见 styleNavigationBarWith）
-      WindowFullscreen.exit(this.windowRef, this.colors().cardBackground);
-      this.videoTopInsetVp = 0;
-    }
+    // 三个页签都进沉浸式：内容框铺满整屏，底部页签行才既贴屏幕底边又点得到
+    WindowFullscreen.enter(this.windowRef);
+    // 系统栏隐藏后仍要避让挖孔：insets 的 visible 判定在 WindowFullscreen 里统一处理
+    this.applyTopInset(WindowFullscreen.insets(this.windowRef, false).top);
+  }
+
+  /**
+   * 下发"挖孔要避让多少"：外壳顶栏与压栈页面的顶栏都按它内缩。
+   *
+   * 为什么走 `AppStorage` 而不是只放 `@State`：`AppTopBar` / `PageHeader` 是外壳与几十个
+   * 压栈页面共用的顶栏组件，各自异步取窗口既啰嗦、也可能拿到不同窗口实例。
+   * 键在 `aboutToAppear` 里**先建出来**（`@StorageProp` 只在键已存在时才会收到后续更新）。
+   */
+  private applyTopInset(vp: number): void {
+    AppStorage.setOrCreate(kTopInsetKey, vp);
+    this.videoTopInsetVp = vp;
   }
 
   private colors(): ThemeColors {
@@ -284,14 +325,11 @@ struct MainShell {
   }
 
   build() {
-    // 外壳根容器把页面底色**向下铺到屏幕底边**（`expandSafeArea` 到 BOTTOM），底色用底部页签行的颜色。
+    // 外壳根容器铺满整屏，底色用页签行的颜色（`cardBackground`）。
     //
-    // 为什么：应用窗口本身是铺满整屏的，但**系统底部导航条不属于窗口安全区** —— 应用不在那一条里画东西时，
-    // 露出的就是系统底（浅色机型上是纯白）。于是同一个底部页签行：「媒体库」「设置」页下面是
-    // "56vp 页签行 + 28vp 白条"，「视频」页沉浸式下是"56vp 页签行 + 28vp 应用深色底" ——
-    // 两处看起来页签行高度不一致（模拟器 127.0.0.1:5555 实测：窗口内容止于 y=2750，
-    // 白/深色分界正好在 y=2750，也就是 `SCBGestureNavBar` 的顶边）。
-    // 铺满之后三个页签下的底部是同一块连续底色，页签行的内容位置完全不变（只是背景多铺了 28vp）。
+    // 为什么底色要铺到屏幕最底边：三个页签现在都是**整屏沉浸式**（见 `applyChromeForTab`），
+    // 内容区就是 0..屏幕高，页签行落在最底边；根容器这一层保证页签行下方不会露出任何系统底色
+    // （浅色机型上系统底是纯白，露出来就是一条突兀的白带 —— 上轮实测过）。
     Column() {
       Stack() {
         Column() {
@@ -392,7 +430,6 @@ struct MainShell {
     .width('100%')
     .height('100%')
     .backgroundColor(this.colors().cardBackground)
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
   }
 
   @Builder

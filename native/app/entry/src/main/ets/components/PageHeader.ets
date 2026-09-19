@@ -22,6 +22,13 @@ export struct PageHeader {
   @Prop transparent: boolean = false;
   onBack: () => void = () => {};
   @BuilderParam action: () => void = this.defaultAction;
+  /**
+   * 挖孔（刘海/胶囊）要避让的高度（vp，由外壳写入 `AppStorage`）—— 见 `AppTopBar` 同名字段说明。
+   *
+   * 本组件被近 40 个压栈页面共用，一处内缩即覆盖它们全部（外壳是整屏沉浸式，
+   * 压栈页面同样顶到屏幕最上边）。外壳不在栈上（例如登录页）或无挖孔时为 0。
+   */
+  @StorageProp('shellTopInsetVp') topInsetVp: number = 0;
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
@@ -66,6 +73,8 @@ export struct PageHeader {
       }
     }
     .width('100%')
+    // 挖孔避让（透明顶栏压在图片上时不加，否则会在图上留一条色带）
+    .padding({ top: this.transparent ? 0 : this.topInsetVp })
     .backgroundColor(this.transparent ? Color.Transparent : this.colors().cardBackground)
   }
 }
