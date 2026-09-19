@@ -46,6 +46,11 @@ export interface FullscreenResult {
  * - `getPreferredOrientation(): Orientation` —— 同步（第 4988 行），用于保存/还原进入播放页前的方向设置。
  * - `getWindowAvoidArea(AvoidAreaType): AvoidArea` —— 同步（第 4414 行）；`AvoidArea.visible`
  *   表示该避让区当前是否真的显示在屏幕上，`visible=false` 时其 rect 不应计入（否则会平白留白）。
+ * - `setWindowSystemBarProperties(SystemBarProperties): Promise<void>` —— since 9（第 4798 行，未废弃；
+ *   带 callback 的 `setSystemBarProperties` 已废弃）。字段实测存在：`statusBarColor` / `isStatusBarLightIcon` /
+ *   `statusBarContentColor` / `navigationBarColor` / `isNavigationBarLightIcon` / `navigationBarContentColor`。
+ *   注意：**应用不设置时系统导航条的底色由系统决定**（浅色模式下是纯白），
+ *   与应用的深色底形成一条突兀的白色横带 —— 见 `styleNavigationBarWith` 的说明。
  */
 export class WindowFullscreen {
   /**
@@ -79,8 +84,11 @@ export class WindowFullscreen {
    *
    * 不向上抛异常：退出路径上还要释放播放器与软解会话，
    * 不能因为"还原系统栏"这一步在某个机型上失败就中断后续资源释放。
+   *
+   * `navigationBarColor` 传应用底部页签行的底色：系统栏还原后必须**同时**是应用的颜色，
+   * 否则退出沉浸式就会露出系统默认底色（浅色模式下为纯白），底部又多出一条白带。
    */
-  static async exit(win: window.Window | null): Promise<void> {
+  static async exit(win: window.Window | null, navigationBarColor?: string): Promise<void> {
     if (win === null) {
       return;
     }
@@ -93,6 +101,43 @@ export class WindowFullscreen {
       await win.setWindowLayoutFullScreen(false);
     } catch (_e) {
       // 同上
+    }
+    // 系统栏底色与图标明暗必须跟着应用走（不传颜色时也用系统深色兜底，避免出现白带）
+    await WindowFullscreen.styleNavigationBarWith(win, navigationBarColor);
+  }
+
+  /**
+   * 让系统底部导航条与应用的底部页签行看起来是同一块底。
+   *
+   * 排查结论（模拟器 127.0.0.1:5555 实测，两条证据）：
+   * 1. `setWindowSystemBarProperties({navigationBarColor})` **调用成功且属性真的被写入**
+   *    （`getWindowSystemBarProperties()` 回读为设置值），但系统那条 94px 的
+   *    `SCBGestureNavBar` 仍然照原色绘制 —— 说明该窗口模式下系统导航条的底色不接受应用指定；
+   * 2. 系统导航条自带的底色本来就是 `#00FFFFFF`（全透明），应用窗口也确实是整屏
+   *    （`WindowManagerService` 里 `WindowRect = [0,0,1260,2844]`），
+   *    那一条之所以是白的，是因为**应用没有往窗口安全区以外的底部区域画东西**，
+   *    露出的正是系统底（浅色模式下为纯白）。
+   *
+   * 因此正确的修法是让应用自己把底色铺到屏幕底边（`MainShell.build` 里对外壳根容器
+   * `expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])` + 页签行同色底），
+   * 而不是去改系统栏颜色。本方法只作为兜底：在系统导航条**不透明**的机型/窗口模式下，
+   * 至少让它的颜色跟着应用走，避免底部再出现一条异色横带。
+   *
+   * 失败不抛：部分窗口模式/机型不支持改系统栏属性，此时保持系统默认（不做静默假设，只是不阻塞调用方）。
+   */
+  static async styleNavigationBarWith(win: window.Window | null, color?: string): Promise<void> {
+    if (win === null) {
+      return;
+    }
+    const barColor: string = (color !== undefined && color.length > 0) ? color : '#1C1F24';
+    try {
+      await win.setWindowSystemBarProperties({
+        navigationBarColor: barColor,
+        navigationBarContentColor: '#E8EAED',
+        isNavigationBarLightIcon: true
+      });
+    } catch (_e) {
+      // 当前窗口模式不支持改系统栏属性：保持系统默认底色
     }
   }
 

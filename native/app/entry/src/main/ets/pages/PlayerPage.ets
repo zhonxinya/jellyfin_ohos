@@ -929,7 +929,9 @@ struct PlayerPage {
     this.immersive = false;
     const win: window.Window | null = this.windowRef;
     if (win !== null) {
-      WindowFullscreen.exit(win).then(() => {
+      // 还原系统栏时把底部导航条染回页签行的底色：否则返回主壳后底部会多出一条系统默认白带
+      // （底部页签行的高度因此看起来与「视频」页沉浸式下不一致，见 WindowFullscreen.styleNavigationBarWith）
+      WindowFullscreen.exit(win, this.colors().cardBackground).then(() => {
         // 系统栏重新出现后，其它页面需要按常规避让；这里只记录，播放页即将离开
       });
       WindowFullscreen.restoreOrientation(win, this.savedOrientation);
