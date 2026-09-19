@@ -1,7 +1,7 @@
 {
   "modelVersion": "5.1.0",
   "name": "jellyfin_hmos",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Jellyfin HarmonyOS native client (Stage model, no Flutter).",
   "main": "",
   "author": "zhonxinya",

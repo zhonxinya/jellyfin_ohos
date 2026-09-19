@@ -57,7 +57,7 @@ scripts/         # 构建、单测、发布校验与设备脚本
 - 播放页：硬解优先，**硬解失败自动回退 FFmpeg 软解**（Infuse 风格控件、视频比例、音轨/字幕切换、横屏全屏）
 - 设置与管理端页面（媒体库、用户、设备、插件、任务、播放设置等）
 
-包名：`com.zhonxinya.jellyfin_hmos_flutter`，版本 `1.0.0`。
+包名：`com.zhonxinya.jellyfin_hmos_flutter`，版本 `1.1.0`。
 
 > **版本号只有一处**：`native/app/AppScope/app.json5` 的 `versionName`。
 > 构建时由 CMake 读出并注入 C++（`JELLYFIN_APP_VERSION`），供 User-Agent、Jellyfin

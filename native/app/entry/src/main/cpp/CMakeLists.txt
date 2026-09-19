@@ -45,7 +45,8 @@ target_compile_features(jellyfin_native PRIVATE cxx_std_17)
 # 起因：app.json5 已是 1.0.0，而 core/napi/player 与 User-Agent 还各自写着 0.1.0，
 # 服务端仪表盘与 Sessions 里看到的应用版本互相矛盾。改版本只需改 app.json5 一处。
 # 解析失败不致命：回退到下面的默认值（宿主单测不经 CMake，用 app_version.h 里的回退宏）。
-set(JELLYFIN_APP_VERSION "1.0.0")
+# 回退值要跟着 app.json5 一起改，否则解析万一失败，各模块自报的版本会悄悄退回旧值。
+set(JELLYFIN_APP_VERSION "1.1.0")
 if(EXISTS "${NATIVEROOT}/app/AppScope/app.json5")
   file(READ "${NATIVEROOT}/app/AppScope/app.json5" JELLYFIN_APP_JSON5)
   string(REGEX MATCH "\"versionName\"[ \t]*:[ \t]*\"([^\"]+)\"" _APP_VERSION_MATCH "${JELLYFIN_APP_JSON5}")
