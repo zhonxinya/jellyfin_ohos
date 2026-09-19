@@ -1,6 +1,7 @@
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from './JsonUtil';
 import { SessionStore } from '../services/SessionStore';
+import { AppViewModel } from '../viewmodel/AppViewModel';
 
 /**
  * 短视频模式的**媒体库配置**（本地偏好）。
@@ -54,6 +55,9 @@ export class ShortVideoPrefs {
     }
     JellyfinNative.setPreference(kShortVideoLibrariesKey, JSON.stringify(unique));
     SessionStore.saveSession(JellyfinNative.getSession());
+    // 通知外壳：设置主页那行「已选 N 个媒体库」需要重算
+    // （设置页是嵌入式组件，从本页返回时不会重建）
+    AppViewModel.getInstance().notifyLocalPrefsChanged();
   }
 
   /** 勾选/取消勾选某个媒体库，返回新的列表 */

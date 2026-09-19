@@ -10,6 +10,7 @@ import { LoadingState } from '../../components/LoadingState';
 import { JsonUtil } from '../../common/JsonUtil';
 import { UiState } from '../../common/UiState';
 import { ShortVideoPrefs } from '../../common/ShortVideoPrefs';
+import { parseBoldSegments, TextSegment } from '../../common/RichText';
 
 /** 媒体库集合类型 → 展示文案（与 `LibrariesAdminPage` 的口径一致） */
 function libraryTypeLabel(collectionType: string, type: string): string {
@@ -188,11 +189,17 @@ export struct ShortVideoSettingsPage {
             SectionCard({ title: '怎么用', showHeaderIcon: true,
               icon: $r('sys.symbol.play_circle') }) {
               Column({ space: 8 }) {
-                Text('勾选后，底部「视频」页会只从这些媒体库里**随机**抽取影片 / 剧集 / 视频，'
-                  + '竖屏满屏连播，上下滑动切换。')
-                  .fontSize(ThemeConstants.META_MEDIUM)
-                  .fontColor(this.colors().textSecondary)
-                  .width('100%')
+                // `**随机**` 拆片段渲染（ArkUI 的 Text 不认 markdown，直接写会原样看到星号）
+                Flex({ wrap: FlexWrap.Wrap }) {
+                  ForEach(parseBoldSegments('勾选后，底部「视频」页会只从这些媒体库里**随机**抽取影片 / 剧集 / 视频，'
+                    + '竖屏满屏连播，上下滑动切换。'), (seg: TextSegment, index: number) => {
+                    Text(seg.text)
+                      .fontSize(ThemeConstants.META_MEDIUM)
+                      .fontWeight(seg.bold ? FontWeight.Bold : FontWeight.Normal)
+                      .fontColor(seg.bold ? this.colors().textPrimary : this.colors().textSecondary)
+                  }, (seg: TextSegment, index: number) => `${index}_${seg.text}`)
+                }
+                .width('100%')
                 Text(`已选 ${this.selectedIds.length} 个媒体库`)
                   .fontSize(ThemeConstants.META_SMALL)
                   .fontColor(this.selectedIds.length > 0
