@@ -54,12 +54,16 @@ struct NetworkSettingsPage {
   @State private enableHttps: boolean = false;
   @State private requireHttps: boolean = false;
   @State private baseUrl: string = '';
+  @State private certificatePath: string = '';
+  @State private certificatePassword: string = '';
   // 协议与发现
   @State private enableIpv4: boolean = true;
   @State private enableIpv6: boolean = false;
   @State private autoDiscovery: boolean = true;
+  @State private udpPortRange: string = '';
   // 本地网络与代理
   @State private localSubnets: string = '';
+  @State private localAddresses: string = '';
   @State private knownProxies: string = '';
   @State private remoteIpFilter: string = '';
   @State private filterIsBlacklist: boolean = false;
@@ -97,10 +101,14 @@ struct NetworkSettingsPage {
     this.enableHttps = JsonUtil.getBoolean(this.base, 'EnableHttps', false);
     this.requireHttps = JsonUtil.getBoolean(this.base, 'RequireHttps', false);
     this.baseUrl = JsonUtil.getString(this.base, 'BaseUrl', '');
+    this.certificatePath = JsonUtil.getString(this.base, 'CertificatePath', '');
+    this.certificatePassword = JsonUtil.getString(this.base, 'CertificatePassword', '');
     this.enableIpv4 = JsonUtil.getBoolean(this.base, 'EnableIPV4', true);
     this.enableIpv6 = JsonUtil.getBoolean(this.base, 'EnableIPV6', false);
     this.autoDiscovery = JsonUtil.getBoolean(this.base, 'AutoDiscovery', true);
     this.localSubnets = NetworkSettingsPage.joinList(this.base, 'LocalNetworkSubnets');
+    this.localAddresses = NetworkSettingsPage.joinList(this.base, 'LocalNetworkAddresses');
+    this.udpPortRange = JsonUtil.getString(this.base, 'UDPPortRange', '');
     this.knownProxies = NetworkSettingsPage.joinList(this.base, 'KnownProxies');
     this.remoteIpFilter = NetworkSettingsPage.joinList(this.base, 'RemoteIPFilter');
     this.filterIsBlacklist = JsonUtil.getBoolean(this.base, 'IsRemoteIPFilterBlacklist', false);
@@ -146,10 +154,14 @@ struct NetworkSettingsPage {
     bag['EnableHttps'] = this.enableHttps;
     bag['RequireHttps'] = this.requireHttps;
     bag['BaseUrl'] = this.baseUrl.trim();
+    bag['CertificatePath'] = this.certificatePath.trim();
+    bag['CertificatePassword'] = this.certificatePassword;
     bag['EnableIPV4'] = this.enableIpv4;
     bag['EnableIPV6'] = this.enableIpv6;
     bag['AutoDiscovery'] = this.autoDiscovery;
+    bag['UDPPortRange'] = this.udpPortRange.trim();
     bag['LocalNetworkSubnets'] = NetworkSettingsPage.splitList(this.localSubnets);
+    bag['LocalNetworkAddresses'] = NetworkSettingsPage.splitList(this.localAddresses);
     bag['KnownProxies'] = NetworkSettingsPage.splitList(this.knownProxies);
     bag['RemoteIPFilter'] = NetworkSettingsPage.splitList(this.remoteIpFilter);
     bag['IsRemoteIPFilterBlacklist'] = this.filterIsBlacklist;
@@ -405,6 +417,18 @@ struct NetworkSettingsPage {
                     (value: string) => {
                       this.baseUrl = value;
                     })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.TextRow('证书路径', 'HTTPS 用的 PKCS#12 证书在服务器上的路径（不是手机上的路径）',
+                    this.certificatePath, '/etc/jellyfin/cert.pfx',
+                    (value: string) => {
+                      this.certificatePath = value;
+                    })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.TextRow('证书密码', '证书文件的口令；没有口令就留空',
+                    this.certificatePassword, '（可选）',
+                    (value: string) => {
+                      this.certificatePassword = value;
+                    })
                 }
                 .width('100%')
               }
@@ -426,6 +450,12 @@ struct NetworkSettingsPage {
                     this.autoDiscovery, (value: boolean) => {
                       this.autoDiscovery = value;
                     })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.TextRow('UDP 端口范围', '自动发现用的 UDP 端口范围；留空用系统默认（例如 5000-5020）',
+                    this.udpPortRange, '5000-5020',
+                    (value: string) => {
+                      this.udpPortRange = value;
+                    })
                 }
                 .width('100%')
               }
@@ -437,6 +467,12 @@ struct NetworkSettingsPage {
                     this.localSubnets, '192.168.1.0/24',
                     (value: string) => {
                       this.localSubnets = value;
+                    })
+                  Divider().color(this.colors().divider).strokeWidth(0.5)
+                  this.ListRow('局域网地址', '直接把某些地址当作局域网，每行一条（子网之外的单个地址）',
+                    this.localAddresses, '192.168.1.5',
+                    (value: string) => {
+                      this.localAddresses = value;
                     })
                   Divider().color(this.colors().divider).strokeWidth(0.5)
                   this.ListRow('已知代理', '反向代理的地址，每行一条；来自这些地址的请求按真实来源判断',
