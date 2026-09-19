@@ -288,6 +288,38 @@ export struct ShortVideoPage {
   /** 进入本页签之前窗口的首选方向（离开页签时还原；<0 表示还没记录） */
   private savedOrientationValue: number = -1;
 
+  // ─────────────────────── 主动全屏 ───────────────────────
+  //
+  // 与"进「视频」页就自动沉浸"（外壳隐藏系统栏）不是一回事：那是**被动**的默认态，
+  // 底部仍留着外壳的 56vp 页签栏，画面只占 2655/2844px。主动全屏是用户按一下按钮，
+  // **横屏 + 页签栏让位**，画面真正铺满整屏；再按一次回到进全屏之前的样子。
+  //
+  // 为什么页签栏要由外壳来收：它是 `MainShell` 画的（本页是嵌在 Tabs 里的组件），
+  // 因此这里用 `@Link` 回写一个信号给外壳，由外壳决定画不画那一条。
+  /** 是否处于主动全屏（= 横屏 + 外壳底部页签栏收起） */
+  @Link fullscreenActive: boolean;
+  /**
+   * 进全屏之前的方向选择，退出全屏时还原；`null` 表示当前不在全屏。
+   *
+   * 为什么单独存一份而不是直接改偏好：全屏是"这一刻要铺满看"的临时动作，
+   * 不该把用户「跟随系统 / 竖屏」的长期偏好改成横屏（偏好由「方向」按钮负责写）。
+   */
+  private orientationBeforeFullscreen: PlayerOrientation | null = null;
+  /**
+   * 全屏时底部控件要给系统手势提示条让出的高度（vp）。
+   *
+   * 页签栏收起后，本页的底部信息/进度第一次直接落在屏幕底边 —— 那一条上系统还会画
+   * 手势提示条（沉浸式下系统栏已隐藏，但提示条仍在画）。让出它才不会压住标题与进度线。
+   * 由本页自己量（窗口实例在本页手里，方向控制已在用）。
+   *
+   * 平台实测（模拟器 127.0.0.1:5555，进全屏时探针打印）：
+   * `TYPE_NAVIGATION_INDICATOR` 报 **visible=1 但 bottomRect.height=0**、
+   * `TYPE_SYSTEM` 同样是 0 —— 沉浸式下系统把避让区尺寸清零，"可见"并不带尺寸。
+   * 因此这个值**在本机恒为 0**（等于不额外留白），保留它的意义是真机手势导航下若报出真实高度，
+   * 底部就不会压在提示条上；本机横屏全屏实测底部也没有提示条绘制（截图逐行扫描未见），不存在重叠。
+   */
+  @State private fullscreenBottomInsetVp: number = 0;
+
   // ───────────────── 页内软解回退（硬解不支持时不再跳过）─────────────────
   //
   // 为什么能在本页做软解：软解需要一块 EGL 可渲染的显示面，本页的 XComponent 就有
@@ -358,6 +390,8 @@ export struct ShortVideoPage {
     if (this.activeTab !== kVideoTabIndex) {
       // 离开本页不再需要屏幕常亮（用户在看别的页面）
       this.applyScreenOn(false);
+      // 主动全屏要收回：底部页签栏是外壳画的，留着"收起"状态用户就切不回别的页签
+      this.leaveFullscreenState();
       // 方向也是窗口级的：离开本页签要还原，否则「媒体库/设置」会跟着横屏
       this.restoreOrientationOnLeave();
       if (this.softActive) {
@@ -1536,7 +1570,92 @@ export struct ShortVideoPage {
     this.orientation = next;
     // 记住选择（横竖屏是"躺着看/坐着看"的选择，不该每次进来重设）
     ShortVideoPrefs.saveOrientation(next);
+    // 全屏的语义就是"横屏铺满"：用户在全屏里把方向切成非横屏时，这个前提已经不成立，
+    // 直接退出全屏（底部页签栏回来）——否则会留下"竖屏 + 页签栏消失"这种自相矛盾的中间态，
+    // 而且页签栏不见了用户连别的页签都切不回去。
+    if (this.fullscreenActive && next !== 'landscape') {
+      this.orientationBeforeFullscreen = null;
+      this.fullscreenActive = false;
+      this.fullscreenBottomInsetVp = 0;
+    }
     await this.applyOrientation();
+  }
+
+  // ─────────────────────── 主动全屏：进入 / 退出 ───────────────────────
+
+  /** 全屏按钮的图标：未全屏是"展开"，已全屏是"收起" */
+  private fullscreenIcon(): Resource {
+    return this.fullscreenActive
+      ? $r('sys.symbol.arrow_down_right_and_arrow_up_left')
+      : $r('sys.symbol.arrow_up_left_and_arrow_down_right');
+  }
+
+  /** 全屏按钮：点一下进全屏，再点一下退出 */
+  private toggleFullscreen(): void {
+    if (this.fullscreenActive) {
+      this.exitFullscreen();
+      return;
+    }
+    this.enterFullscreen();
+  }
+
+  /**
+   * 进入主动全屏：**横屏 + 外壳底部页签栏收起**，画面铺满整屏。
+   *
+   * 为什么要"横屏 + 铺满"一起做：竖屏是 20:9 的窄长屏，横片按适应缩放后上下本是黑边，
+   * 单把页签栏收掉只多出 56vp；横过来才是短视频/横片真正"变大"的那一步
+   * （可用区域从窄长变成宽屏）。两者一起做才叫全屏。
+   *
+   * 进全屏前的方向选择先存起来，退出时原样还回去（见 exitFullscreen）。
+   */
+  private enterFullscreen(): void {
+    if (this.fullscreenActive) {
+      return;
+    }
+    this.orientationBeforeFullscreen = this.orientation;
+    this.orientation = 'landscape';
+    this.fullscreenActive = true;
+    // 页签栏收起后本页底部直接落在屏幕底边：量一下要给系统手势提示条让出多少（见字段说明）
+    const win: window.Window | null = this.windowRef;
+    this.fullscreenBottomInsetVp = win === null
+      ? 0 : WindowFullscreen.insets(win, true).bottom;
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'fullscreen enter bottomInset=%{public}d',
+      this.fullscreenBottomInsetVp);
+    this.applyOrientation();
+    // 刚进全屏时把控件亮出来（用户需要看到"我进了全屏"以及怎么退出去），随后照常自动隐藏
+    this.revealChrome(true);
+  }
+
+  /** 退出主动全屏：方向还原成进全屏之前的选择，底部页签栏回来 */
+  private exitFullscreen(): void {
+    if (!this.fullscreenActive) {
+      return;
+    }
+    const back: PlayerOrientation = this.orientationBeforeFullscreen !== null
+      ? this.orientationBeforeFullscreen : 'auto';
+    this.orientationBeforeFullscreen = null;
+    this.orientation = back;
+    this.fullscreenActive = false;
+    this.fullscreenBottomInsetVp = 0;
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'fullscreen exit orientation=%{public}s', back);
+    this.applyOrientation();
+    this.revealChrome(true);
+  }
+
+  /**
+   * 离开本页（切页签 / 销毁）时收回全屏状态。
+   *
+   * 必须收：底部页签栏是外壳画的，留着"收起"状态用户就切不回别的页签了
+   * （页签栏是唯一的页签入口；「视频」页连外壳顶栏都不画，抽屉也进不去）。
+   * 这里只改状态与方向偏好，窗口方向的还原交给 `restoreOrientationOnLeave`（同一处调用）。
+   */
+  private leaveFullscreenState(): void {
+    if (this.orientationBeforeFullscreen !== null) {
+      this.orientation = this.orientationBeforeFullscreen;
+      this.orientationBeforeFullscreen = null;
+    }
+    this.fullscreenActive = false;
+    this.fullscreenBottomInsetVp = 0;
   }
 
   /**
@@ -1930,6 +2049,22 @@ export struct ShortVideoPage {
       .borderRadius(ThemeConstants.CHIP_RADIUS)
       .onClick(() => { this.cycleOrientation(); })
 
+      // 主动全屏：横屏 + 外壳页签栏收起，画面铺满整屏；再点一次退出。
+      //
+      // 为什么做成图标按钮而不是像「方向」那样带文字：竖屏 373vp 宽的工具行里已经有
+      // 「方向」胶囊 + 「设置」圆钮，再塞一个文字胶囊会把左侧的页码/清晰度徽标挤到换行；
+      // 展开/收起是全平台通用的形状，图标本身就够表意（与「设置」同尺寸，一行对齐）。
+      Button({ type: ButtonType.Circle, stateEffect: false }) {
+        SymbolGlyph(this.fullscreenIcon())
+          .fontSize(ThemeConstants.ICON_MEDIUM)
+          .fontColor([this.colors().onOverlay])
+      }
+      .width(32)
+      .height(32)
+      .padding(0)
+      .backgroundColor(this.colors().overlayControl)
+      .onClick(() => { this.toggleFullscreen(); })
+
       // 设置：进入「短视频模式」媒体库选择
       Button({ type: ButtonType.Circle, stateEffect: false }) {
         SymbolGlyph($r('sys.symbol.gearshape'))
@@ -2132,10 +2267,11 @@ export struct ShortVideoPage {
             }
             .width('100%')
             .alignItems(VerticalAlign.Bottom)
+            // 底部：12 的常规留白 + 全屏时给系统手势提示条让位（见 fullscreenBottomInsetVp）
             .padding({
               left: ThemeConstants.PAGE_PADDING,
               right: ThemeConstants.PAGE_PADDING,
-              bottom: 12
+              bottom: 12 + this.fullscreenBottomInsetVp
             })
           } else {
             Row({ space: 8 }) {
@@ -2153,11 +2289,11 @@ export struct ShortVideoPage {
             }
             .width('100%')
             .alignItems(VerticalAlign.Bottom)
-            // 左右留白 + 底部让出进度线（见 BottomProgress）
+            // 左右留白 + 底部让出进度线（见 BottomProgress）+ 全屏时给系统手势提示条让位
             .padding({
               left: ThemeConstants.PAGE_PADDING,
               right: ThemeConstants.PAGE_PADDING,
-              bottom: 22
+              bottom: 22 + this.fullscreenBottomInsetVp
             })
           }
         }
@@ -2264,6 +2400,9 @@ export struct ShortVideoPage {
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.End)
+    // 全屏时页签栏已收起，进度线直接落在屏幕底边 —— 让出系统手势提示条那一条，
+    // 否则进度线会被压在提示条下面（见 fullscreenBottomInsetVp）
+    .padding({ bottom: this.fullscreenBottomInsetVp })
     // `Transparent` 而不是 `None`：设备实测里 `None` 的浮层**会把落在它身上的点按吃掉**
     // （暂停浮层挡住画面中部时，"再点一下继续"完全没反应）。
     // `Transparent` 的语义是"自身与子节点响应，且不阻塞兄弟节点"，正是浮层需要的。
