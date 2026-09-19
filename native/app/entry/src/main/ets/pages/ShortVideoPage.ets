@@ -86,6 +86,14 @@ const kSeekHintMs: number = 1200;
 const kPrepareTimeoutMs: number = 15000;
 
 /**
+ * 播放中多久没交互就把上下控件藏起来（毫秒）。
+ *
+ * 短视频是"一直在放"的场景：顶栏与底部信息长期挂在画面上既挡画面也容易误触，
+ * 主流做法是"播放一会儿自动让位、一碰就回来"。4 秒是"刚点完还能看清、又不至于赖着不走"的折中。
+ */
+const kChromeAutoHideMs: number = 4000;
+
+/**
  * 距离列表末尾还剩几条时就去取下一批。
  *
  * 为什么不是"滑到底再取"：滑到底才开始请求，中间必然出现一段空白等待；
@@ -202,6 +210,15 @@ export struct ShortVideoPage {
   @State private reachedEnd: boolean = false;
   /** 正在准备当前条目（取流 / 建播放器 / 缓冲）：显示转圈，避免"点了没反应"的观感 */
   @State private preparing: boolean = false;
+  /**
+   * 上下控件（顶部工具行 / 底部信息与操作栏）当前是否显示。
+   *
+   * 播放中会自动隐藏（见 `kChromeAutoHideMs`），任何点按/滑动都把它们唤回来 ——
+   * 这是"画面优先"的短视频该有的样子：控件是临时浮层，不是常驻栏。
+   * 暂停、起播失败、正在准备时**始终显示**（那时用户需要看到状态与按钮）。
+   */
+  @State private chromeVisible: boolean = true;
+  private chromeHideTimerId: number = -1;
   /** 自动跳过倒计时的剩余毫秒（0 = 不显示倒计时） */
   @State private skipLeftMs: number = 0;
   /** 双击快进的瞬时提示（非空即显示） */
@@ -322,6 +339,7 @@ export struct ShortVideoPage {
   aboutToDisappear(): void {
     this.stopProgressTicker();
     this.cancelAutoSkip();
+    this.cancelChromeAutoHide();
     this.clearPrepareWatchdog();
     this.cancelPendingTap();
     this.hideSeekHint();
@@ -774,6 +792,8 @@ export struct ShortVideoPage {
         this.startProgressTicker();
         this.applyScreenOn(true);
         this.reportProgress(false);
+        // 起播即开始"无交互自动隐藏"的计时
+        this.revealChrome(true);
       } else if (state === 'paused') {
         this.paused = true;
         this.reportProgress(true);
@@ -815,8 +835,14 @@ export struct ShortVideoPage {
     }
   }
 
-  /** 单击画面：暂停/继续 */
+  /** 单击画面：暂停/继续（控件已隐藏时先唤出控件，不改播放状态） */
   private togglePause(): void {
+    // 控件隐藏状态下的一次点按只负责"把控件唤回来"：直接暂停的话，用户会看到
+    // "我点了一下想找按钮，画面却停了"。与主流播放器一致（先显控件，再操作）。
+    if (!this.chromeVisible) {
+      this.revealChrome(true);
+      return;
+    }
     if (this.softActive) {
       // 软解没有暂停 API：暂停 = 停掉帧循环（画面停在最后一帧），恢复 = 重启帧循环
       if (this.paused) {
@@ -829,6 +855,7 @@ export struct ShortVideoPage {
         this.stopProgressTicker();
       }
       this.reportProgress(this.paused);
+      this.revealChrome(!this.paused);
       return;
     }
     if (this.avPlayer === null || this.playbackError.length > 0) {
@@ -836,8 +863,11 @@ export struct ShortVideoPage {
     }
     if (this.paused) {
       this.avPlayer.play();
+      this.revealChrome(true);
     } else {
       this.avPlayer.pause();
+      // 暂停时把控件留住（用户多半正要操作），并停掉自动隐藏计时
+      this.revealChrome(false);
     }
   }
 
@@ -896,6 +926,7 @@ export struct ShortVideoPage {
     }
     this.playbackError = message;
     this.preparing = false;
+    this.revealChrome(false);
     this.clearPrepareWatchdog();
     this.stopProgressTicker();
     this.releasePlayer();
@@ -940,6 +971,7 @@ export struct ShortVideoPage {
       return;
     }
     this.preparing = true;
+    this.revealChrome(false);
     this.startPrepareWatchdog();
     const raw: string = await JellyfinNative.playerOpen(item.id, ShortVideoPrefs.directOptionsJson());
     const result: NativeResult = JellyfinNative.parseResult(raw);
@@ -1010,6 +1042,50 @@ export struct ShortVideoPage {
       this.skipTickId = -1;
     }
     this.skipLeftMs = 0;
+  }
+
+  // ─────────────────── 上下控件的自动隐藏（画面优先）───────────────────
+
+  /**
+   * 重新计时：播放中 4 秒无交互就把上下控件藏起来。
+   *
+   * 什么时候**不**隐藏：暂停、正在准备、本条播不了、没有内容 —— 这些状态本身就是
+   * "用户需要看到的信息"，藏起来只会让人以为界面坏了。
+   */
+  private armChromeAutoHide(): void {
+    this.cancelChromeAutoHide();
+    if (this.paused || this.preparing || this.playbackError.length > 0
+      || !this.videoReady || this.items.length === 0) {
+      return;
+    }
+    this.chromeHideTimerId = setTimeout(() => {
+      this.chromeHideTimerId = -1;
+      if (this.paused || this.preparing || this.playbackError.length > 0) {
+        return;
+      }
+      this.chromeVisible = false;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'chrome hidden（播放中自动隐藏）');
+    }, kChromeAutoHideMs);
+  }
+
+  private cancelChromeAutoHide(): void {
+    if (this.chromeHideTimerId >= 0) {
+      clearTimeout(this.chromeHideTimerId);
+      this.chromeHideTimerId = -1;
+    }
+  }
+
+  /** 唤出上下控件；`autoHide=true` 时重新开始计时（用户还在看，稍后再收） */
+  private revealChrome(autoHide: boolean): void {
+    if (!this.chromeVisible) {
+      this.chromeVisible = true;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'chrome shown（交互唤出）');
+    }
+    if (autoHide) {
+      this.armChromeAutoHide();
+    } else {
+      this.cancelChromeAutoHide();
+    }
   }
 
   /** 就地软解：打开会话 → 按当前位置起播 → 自调度拉帧 */
@@ -1193,10 +1269,16 @@ export struct ShortVideoPage {
       return;
     }
     const touch: TouchObject = touches[0];
+    // 抬手时控件是不是藏着的 —— 必须在唤出**之前**记下来：单击动作是延后 380ms 执行的，
+    // 那时控件已经被唤出，再判断"藏没藏"就永远是"没藏"，于是"第一下只唤出控件"会变成
+    // "第一下既唤出又暂停"（设备实测踩到：日志里 chrome shown 与 singleTap paused=0 同时出现）。
+    const wasHidden: boolean = !this.chromeVisible;
+    // 任何抬手都算"用户在交互"：先把控件唤回来并重新计时
+    this.revealChrome(true);
     if (this.inChromeZone(touch.x, touch.y)) {
       return;
     }
-    this.handleTapUp(touch.x);
+    this.handleTapUp(touch.x, wasHidden);
   }
 
   /** 触摸点是否落在浮层控件（工具行 / 操作栏 / 底部信息）所占的区域里 */
@@ -1224,7 +1306,7 @@ export struct ShortVideoPage {
    *
    * 与播放页一致：单击必须**延后**执行，否则双击时画面会先暂停一下。
    */
-  private handleTapUp(x: number): void {
+  private handleTapUp(x: number, wasHidden: boolean): void {
     const now: number = Date.now();
     const width: number = this.areaW > 0 ? this.areaW : 360;
     const isDoubleTap: boolean = (now - this.lastTapUpAt) < kDoubleTapMs
@@ -1245,8 +1327,11 @@ export struct ShortVideoPage {
     this.cancelPendingTap();
     this.singleTapTimerId = setTimeout(() => {
       this.singleTapTimerId = -1;
-      hilog.info(LOG_DOMAIN, LOG_TAG, 'singleTap x=%{public}d paused=%{public}s',
-        Math.round(x), this.paused ? '1' : '0');
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'singleTap x=%{public}d paused=%{public}s wasHidden=%{public}s',
+        Math.round(x), this.paused ? '1' : '0', wasHidden ? '1' : '0');
+      // 单击始终是"暂停 / 继续"：自动隐藏只是让画面让位，不该改变点按的含义
+      // （本页的"单击暂停"已被文档与验收固定）。暂停分支里会 `revealChrome(false)`
+      // 把控件留住，用户立刻能看到状态与按钮。
       this.togglePause();
     }, kSingleTapDelayMs);
   }
@@ -2005,72 +2090,82 @@ export struct ShortVideoPage {
         })
 
       // 顶部工具行（Transparent：自身不挡下面的手势层，内部按钮照常响应）
-      Column() {
-        this.TopChrome(index)
-        Blank()
+      //
+      // 用 `if` 而不是 `opacity(0)`：透明度为 0 的按钮**仍然能被点到**，
+      // 控件"藏起来"却还吃触摸是最难查的一类 bug（本页此前在浮层上踩过）。
+      if (this.chromeVisible) {
+        Column() {
+          this.TopChrome(index)
+          Blank()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({
+          left: ThemeConstants.PAGE_PADDING,
+          right: ThemeConstants.PAGE_PADDING,
+          top: 10 + this.topInsetVp
+        })
+        .hitTestBehavior(HitTestMode.Transparent)
+        .transition(TransitionEffect.OPACITY.animation({ duration: 220, curve: Curve.EaseInOut }))
       }
-      .width('100%')
-      .height('100%')
-      .padding({
-        left: ThemeConstants.PAGE_PADDING,
-        right: ThemeConstants.PAGE_PADDING,
-        top: 10 + this.topInsetVp
-      })
-      .hitTestBehavior(HitTestMode.Transparent)
 
-      // 底部信息 + 操作栏
+      // 底部信息 + 操作栏（随上下控件一起自动隐藏）
       //
       // 布局分横竖两套（**不是**同一套量的缩放）：竖屏是 20:9 的窄长屏，竖排操作栏
       // 只占右侧一条；横屏可用高度只剩 ~306vp，竖排 4 个按钮（约 270vp）会直接顶到
       // 顶部工具行 —— 设备实测两者**重叠 85×108px**（收藏按钮压在「设置」上）。
       // 因此横屏把操作栏改成**右下角的横排**，信息区留在左侧。
-      Column() {
-        Blank()
-        if (this.landscape) {
-          Row({ space: 12 }) {
-            this.InfoBlock(item)
+      // 随上下控件自动隐藏：用 if 而不是 opacity(0)（透明按钮仍会被点到）
+      if (this.chromeVisible) {
+        Column() {
+          Blank()
+          if (this.landscape) {
             Row({ space: 12 }) {
-              this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
-              this.RailButton('played', item.id, () => { this.togglePlayed(item); })
-              this.RailButton('detail', item.id, () => { this.openDetail(item); })
-              this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
+              this.InfoBlock(item)
+              Row({ space: 12 }) {
+                this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
+                this.RailButton('played', item.id, () => { this.togglePlayed(item); })
+                this.RailButton('detail', item.id, () => { this.openDetail(item); })
+                this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
+              }
+              .alignItems(VerticalAlign.Bottom)
             }
+            .width('100%')
             .alignItems(VerticalAlign.Bottom)
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Bottom)
-          .padding({
-            left: ThemeConstants.PAGE_PADDING,
-            right: ThemeConstants.PAGE_PADDING,
-            bottom: 12
-          })
-        } else {
-          Row({ space: 8 }) {
-            this.InfoBlock(item)
-            // 操作栏：收藏 / 已看 / 详情 / 换一批
-            // （只传种类与条目 id，状态在 RailButton 内部读 —— 见该 Builder 的说明）
-            Column({ space: 14 }) {
-              this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
-              this.RailButton('played', item.id, () => { this.togglePlayed(item); })
-              this.RailButton('detail', item.id, () => { this.openDetail(item); })
-              this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
+            .padding({
+              left: ThemeConstants.PAGE_PADDING,
+              right: ThemeConstants.PAGE_PADDING,
+              bottom: 12
+            })
+          } else {
+            Row({ space: 8 }) {
+              this.InfoBlock(item)
+              // 操作栏：收藏 / 已看 / 详情 / 换一批
+              // （只传种类与条目 id，状态在 RailButton 内部读 —— 见该 Builder 的说明）
+              Column({ space: 14 }) {
+                this.RailButton('favorite', item.id, () => { this.toggleFavorite(item); })
+                this.RailButton('played', item.id, () => { this.togglePlayed(item); })
+                this.RailButton('detail', item.id, () => { this.openDetail(item); })
+                this.RailButton('shuffle', item.id, () => { this.loadFeed(); })
+              }
+              .width(kRailWidthVp - 24)
+              .alignItems(HorizontalAlign.Center)
             }
-            .width(kRailWidthVp - 24)
-            .alignItems(HorizontalAlign.Center)
+            .width('100%')
+            .alignItems(VerticalAlign.Bottom)
+            // 左右留白 + 底部让出进度线（见 BottomProgress）
+            .padding({
+              left: ThemeConstants.PAGE_PADDING,
+              right: ThemeConstants.PAGE_PADDING,
+              bottom: 22
+            })
           }
-          .width('100%')
-          .alignItems(VerticalAlign.Bottom)
-          // 左右留白 + 底部让出进度线（见 BottomProgress）
-          .padding({
-            left: ThemeConstants.PAGE_PADDING,
-            right: ThemeConstants.PAGE_PADDING,
-            bottom: 22
-          })
         }
+        .width('100%')
+        .height('100%')
+        .hitTestBehavior(HitTestMode.Transparent)
+        .transition(TransitionEffect.OPACITY.animation({ duration: 220, curve: Curve.EaseInOut }))
       }
-      .width('100%')
-      .height('100%')
-      .hitTestBehavior(HitTestMode.Transparent)
     }
     .width('100%')
     .height('100%')
@@ -2403,6 +2498,7 @@ export struct ShortVideoPage {
             }
             // 滑到哪条就播哪条（这就是"连续刷"）
             this.currentIndex = index;
+            this.revealChrome(true);
             this.prefetchIfNearEnd();
             this.playCurrent();
           })
