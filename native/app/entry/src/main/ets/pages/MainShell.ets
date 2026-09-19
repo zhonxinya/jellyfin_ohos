@@ -264,17 +264,24 @@ struct MainShell {
   build() {
     Stack() {
       Column() {
-        AppTopBar({
-          title: 'Jellyfin',
-          showBack: true,
-          backIcon: $r('sys.symbol.list_bullet'),
-          onBackTap: () => {
-            this.drawerOpen = true;
-          },
-          action: () => {
-            this.TopBarActions();
-          }
-        })
+        // 「视频」页不显示外壳顶栏（沉浸式视频流）。
+        //
+        // 为什么：该页的心智是"打开就刷"，顶栏的抽屉/搜索入口在这条动线上用不上，
+        // 而 56vp 的顶栏是从画面里直接扣掉的 —— 竖屏手机上这接近可见高度的 1/10。
+        // 页面自己的浮层工具行已经提供「方向 / 设置」入口，底部页签仍可切换到别的页。
+        if (this.shellTabIndex !== kVideoTabIndex) {
+          AppTopBar({
+            title: 'Jellyfin',
+            showBack: true,
+            backIcon: $r('sys.symbol.list_bullet'),
+            onBackTap: () => {
+              this.drawerOpen = true;
+            },
+            action: () => {
+              this.TopBarActions();
+            }
+          })
+        }
 
         Tabs({ barPosition: BarPosition.End, index: this.shellTabIndex }) {
           TabContent() {

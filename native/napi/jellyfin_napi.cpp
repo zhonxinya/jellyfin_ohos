@@ -128,6 +128,16 @@ jellyfin::api::ProgressReporter &Progress()
 std::string CurrentItemId;
 std::string CurrentPlaySessionId;
 std::string CurrentMediaSourceId;
+/**
+ * 当前这次播放的**实际播放方式**（`DirectPlay` / `DirectStream` / `Transcode`）。
+ *
+ * 为什么必须记录：进度上报里的 `PlayMethod` 曾经**写死 `DirectStream`**，
+ * 于是"服务端转码播放"在服务端那边看不出是转码 —— 设备实测：客户端日志是
+ * `playerOpen method=Transcode hls=1`，而 `/Sessions` 仍报 `DirectStream`、
+ * `TranscodingInfo` 为空。Jellyfin 的播放方式由客户端上报，写死等于把"转码"
+ * 瞒着服务端：仪表盘的转码统计、码率限速与"是否在转码"的判断都会失真。
+ */
+std::string CurrentPlayMethod;
 std::mutex g_playbackMutex;
 
 nlohmann::json MakeResult(bool ok, int code, const std::string &message,
@@ -512,6 +522,10 @@ napi_value Logout(napi_env env, napi_callback_info /*info*/)
 {
     Progress().reset();
     CurrentItemId.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_playbackMutex);
+        CurrentPlayMethod.clear();
+    }
     jellyfin::SessionManager::instance().clearAuth();
     std::string err;
     jellyfin::player::PlayerEngine::instance().stop(err);
@@ -1155,10 +1169,12 @@ nlohmann::json BuildProgressBody(const std::string &itemId, int64_t positionTick
         {"ItemId", itemId},
         {"PositionTicks", positionTicks},
         {"IsPaused", isPaused},
-        {"PlayMethod", "DirectStream"},
         {"CanSeek", true},
     };
     std::lock_guard<std::mutex> lock(g_playbackMutex);
+    // 播放方式按**实际**情况上报（见 CurrentPlayMethod 的说明）；未知时按 DirectStream
+    // （本工程的直连串流是最常见形态，也是改造前的上报值）。
+    body["PlayMethod"] = CurrentPlayMethod.empty() ? "DirectStream" : CurrentPlayMethod;
     if (!CurrentMediaSourceId.empty()) {
         body["MediaSourceId"] = CurrentMediaSourceId;
     }
@@ -1617,6 +1633,19 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
             return MakeResult(true, 200, "ok", out).dump();
         }
         out["playMethod"] = jellyfin::player::PlayMethodToString(pbSession.method);
+        // 软解会话消费的是**直连文件**（FFmpeg 按 Range 取字节，见 softPlayOpen 的说明），
+        // 因此进度上报按 DirectStream 记账；同时刷新 MediaSource / PlaySession，
+        // 否则软解期间上报的 MediaSourceId 还停在上一次硬解用的那个源上。
+        {
+            std::lock_guard<std::mutex> lock(g_playbackMutex);
+            CurrentPlayMethod = "DirectStream";
+            if (!pbSession.playSessionId.empty()) {
+                CurrentPlaySessionId = pbSession.playSessionId;
+            }
+            if (!pbSession.mediaSourceId.empty()) {
+                CurrentMediaSourceId = pbSession.mediaSourceId;
+            }
+        }
 
         // EGL 渲染器：**只复用、不初始化**。
         //
@@ -2367,6 +2396,8 @@ napi_value PlayerOpen(napi_env env, napi_callback_info info)
             CurrentItemId = pbSession.itemId;
             CurrentPlaySessionId = pbSession.playSessionId;
             CurrentMediaSourceId = pbSession.mediaSourceId;
+            // 进度上报要如实带上播放方式（转码必须让服务端知道，见 CurrentPlayMethod）
+            CurrentPlayMethod = jellyfin::player::PlayMethodToString(pbSession.method);
         }
         Progress().reset();
 
