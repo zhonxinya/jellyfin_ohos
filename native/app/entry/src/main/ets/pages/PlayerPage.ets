@@ -23,9 +23,21 @@ import { PlaybackState } from '../common/PlaybackState';
 
 /** 控制条自动隐藏延时（毫秒）：给用户留出"看到并点中控件"的时间 */
 const kControlsAutoHideMs: number = 5000;
-
 /** 双击快进/快退的步长（毫秒）—— 与屏幕上 ±10s 按钮一致，符合主流播放器习惯 */
 const kSkipStepMs: number = 10000;
+
+/**
+ * 底部工具行按钮的最小宽度（vp）。
+ *
+ * 工具行用 `Flex` 换行排布，各按钮原先按内容自适应宽度：纯文字按钮（「软解」没有图标）
+ * 比带图标的窄 40vp 以上，换行后两行长度差距明显（设备实测 294vp vs 220vp），观感参差。
+ *
+ * 取 96vp 的依据：`音频/字幕`（最宽，含 4 个汉字）实测 102.8vp，`适应`（2 字）76.7vp ——
+ * 96vp 落在两者之间，既让窄按钮撑到接近而不浪费太多宽度，又不会把宽按钮撑得更宽
+ * （`constraintSize` 只在内容更窄时生效）。三个按钮 × 96vp + 间隙 ≈ 312vp，
+ * 仍在竖屏可用宽度（约 340vp）之内。
+ */
+const kToolMinWidthVp: number = 96;
 
 /**
  * 单击/双击判定窗口（毫秒）。
@@ -631,6 +643,33 @@ struct PlayerPage {
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
+  }
+
+  /**
+   * 画质 / 播放方式徽标：`1080p`、`1080p · 转码`、`1080p · 软解`。
+   *
+   * 为什么要给用户看：用户"到底在直连原画还是看服务端转码""现在是不是在吃本机软解"
+   * 此前完全不可见 —— 只能靠画面糊不糊、有没有卡顿去猜。出问题时（糊、无字幕、音轨不对）
+   * 这是第一件要分清的事，而播放页恰好是排查入口。
+   * 与短视频页的 `qualityBadge` 同一套口径，避免两个页面说法不一致。
+   *
+   * 显示优先级（越"特殊"越优先，避免"1080p"盖掉更重要的信息）：
+   * 软解 > 转码 > 直连。软解最该被看见：它没有音频输出，是最容易让人困惑的状态。
+   */
+  private qualityBadge(): string {
+    const parts: string[] = [];
+    if (this.videoHeightPx > 0) {
+      // ≥2000 行用 `4K` 这种短名：`2160p` 在窄徽标里又长又不直观
+      parts.push(this.videoHeightPx >= 2000 ? '4K' : `${this.videoHeightPx}p`);
+    }
+    if (this.softPlaying) {
+      parts.push('软解');
+    } else if (this.isTranscodePlayback()) {
+      parts.push('转码');
+    } else if (this.playMethod.length > 0 || this.playUrl.length > 0) {
+      parts.push('直连');
+    }
+    return parts.length > 0 ? parts.join(' · ') : '—';
   }
 
   private scheduleHideControls(): void {
@@ -3334,13 +3373,32 @@ struct PlayerPage {
             .fontColor(this.colors().onOverlay)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          if (this.typeLabel.length > 0) {
-            Text(this.typeLabel)
+          // 副行：集数/季信息 + 画质/播放方式徽标。
+          //
+          // 为什么要显示画质与播放方式（对齐短视频页 `qualityBadge` 的做法，且播放页更该有）：
+          // 用户"到底在直连原画还是看服务端转码"此前**完全不可见** —— 只能靠画面糊不糊猜。
+          // 出问题时（糊、无字幕、音轨不对）这是第一件要分清的事，而本页恰好是排障入口。
+          // 用 `Flex` + wrap：窄屏放不下时徽标换到下一行，不挤掉标题。
+          Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+            if (this.typeLabel.length > 0) {
+              Text(this.typeLabel)
+                .fontSize(ThemeConstants.LABEL_SMALL)
+                .fontColor(this.colors().onOverlayMuted)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .margin({ right: 8 })
+            }
+            Text(this.qualityBadge())
               .fontSize(ThemeConstants.LABEL_SMALL)
-              .fontColor(this.colors().onOverlayMuted)
+              .fontColor(this.isTranscodePlayback()
+                ? this.colors().onBrand : this.colors().onOverlayMuted)
+              .padding({ left: 7, right: 7, top: 2, bottom: 2 })
+              .backgroundColor(this.isTranscodePlayback()
+                ? this.colors().brandPrimary : this.colors().overlayControl)
+              .borderRadius(ThemeConstants.BADGE_RADIUS)
               .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
+          .width('100%')
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -3399,10 +3457,12 @@ struct PlayerPage {
       // 主流播放器（Infuse/iina）都是这个形态：时间紧贴进度条两端，视觉上一一对应。
       Row({ space: 10 }) {
         Text(this.formatTime(this.positionMs))
-          .fontSize(ThemeConstants.META_SMALL)
+          .fontSize(ThemeConstants.META_MEDIUM)
           .fontColor(this.colors().onOverlay)
           .fontWeight(FontWeight.Medium)
-          .width(58)
+          // 宽度按"最长可能的时间文案"留足：`1:32:37` 这类带小时的值在 12fp/58vp 时
+          // 会把进度条挤窄且自身被截断。给到 66vp 后，小时级时长也能完整显示。
+          .width(66)
           .textAlign(TextAlign.Start)
         Slider({
           value: this.positionMs,
@@ -3415,18 +3475,23 @@ struct PlayerPage {
           .selectedColor(this.colors().brandPrimary)
           // 轨道用半透明白：视频画面明暗不定，纯灰轨道在亮画面上会"看不见"
           .trackColor(this.colors().overlayControl)
-          .trackThickness(5)
-          .blockSize({ width: 16, height: 16 })
+          // 轨道 6vp、滑块 18vp：原 5/16 在 1260px 宽屏上偏细，"已播多少"不易一眼读出；
+          // 滑块同时是拖动热区，放大后更好抓。
+          .trackThickness(6)
+          .blockSize({ width: 18, height: 18 })
           .blockColor(this.colors().onOverlay)
+          // Slider 自身高度决定拖动热区（视觉上仍是细轨道）：40vp ≥ 最小触达标准的一半以上，
+          // 竖屏单手拖进度条时不容易滑脱。
+          .height(40)
           .onChange((value: number) => {
             // 统一走 seekTo：硬解与软解（软解此前拖动进度条完全没有反应）都能定位
             this.seekTo(Math.floor(value));
             this.revealControls();
           })
         Text(this.rightTimeLabel())
-          .fontSize(ThemeConstants.META_SMALL)
+          .fontSize(ThemeConstants.META_MEDIUM)
           .fontColor(this.colors().onOverlayMuted)
-          .width(64)
+          .width(72)
           .textAlign(TextAlign.End)
           .onClick(() => {
             this.showRemaining = !this.showRemaining;
@@ -3452,6 +3517,7 @@ struct PlayerPage {
           icon: $r('sys.symbol.aspectratio'),
           label: PlayerAspect.label(this.aspectMode),
           selected: this.aspectMode !== 'contain',
+          minWidth: kToolMinWidthVp,
           onTap: () => {
             this.cycleAspect();
           }
@@ -3463,6 +3529,7 @@ struct PlayerPage {
           icon: this.orientationIcon(),
           label: this.orientationLabel(),
           selected: this.orientation !== 'auto',
+          minWidth: kToolMinWidthVp,
           onTap: () => {
             this.cycleOrientation();
           }
@@ -3473,6 +3540,7 @@ struct PlayerPage {
           icon: $r('sys.symbol.speaker_wave_2'),
           label: '音频/字幕',
           selected: this.showTrackSheet,
+          minWidth: kToolMinWidthVp,
           onTap: () => {
             this.openTrackSheet();
           }
@@ -3482,6 +3550,7 @@ struct PlayerPage {
           icon: $r('sys.symbol.video_speed'),
           label: `${this.playbackSpeed}x`,
           selected: this.playbackSpeed !== 1,
+          minWidth: kToolMinWidthVp,
           onTap: () => {
             this.cycleSpeed();
           }
@@ -3492,16 +3561,25 @@ struct PlayerPage {
           icon: $r('sys.symbol.circle_grid_2x2'),
           label: this.pipActive ? '退出小窗' : '画中画',
           selected: this.pipActive,
+          minWidth: kToolMinWidthVp,
           onTap: () => {
             this.togglePiP();
           }
         })
           .margin({ left: 4, right: 4, top: 4 })
-        // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放
+        // 软解开关：硬解解不了的编码（如模拟器上的 HEVC）可切到 FFmpeg 软解回放。
+        // 本轮补上图标：它原先是唯一没有图标的按钮，既与同行按钮宽度不齐，
+        // 也少了"这是哪一类开关"的视觉提示。
+        // 符号取 `arrow_2_circlepath`（循环/换路的意象，与"切到本机换一条解码路径"相符）：
+        // 该名字在 SDK 的系统符号清单（`ets-loader/sysResource.js` 的 symbol 段）中确认存在，
+        // 且本项目其它页面已在用。**不要凭语义猜符号名** —— `rotate`、`speedometer`、`cpu`
+        // 这类名字看着贴切，但不在 symbol 段里（`rotate` 在 media 段），写成 `$r('sys.symbol.*')`
+        // 会直接构建失败（`Unknown resource name`）。
         PlayerToolButton({
-          showIcon: false,
+          icon: $r('sys.symbol.arrow_2_circlepath'),
           label: '软解',
           selected: this.softPlaying,
+          minWidth: kToolMinWidthVp,
           onTap: () => {
             if (this.softPlaying) {
               this.stopSoftPlay();

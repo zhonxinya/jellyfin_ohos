@@ -22,6 +22,15 @@ export struct PlayerToolButton {
   @Prop selected: boolean = false;
   /** 无底色变体：用于不希望有底块的位置 */
   @Prop transparent: boolean = false;
+  /**
+   * 最小宽度（vp）；0 = 不设下限（按内容自适应）。
+   *
+   * 为什么要它：播放页底部工具行用 `Flex` 换行排布，各按钮按内容自适应宽度 ——
+   * 纯文字按钮（如「软解」，无图标）比带图标的窄 40vp 以上，换行后两行长度差距明显
+   * （设备实测：第一行 294vp、第二行 220vp），观感参差。
+   * 给一个统一下限后，同一行内按钮宽度接近，换行也显得整齐。
+   */
+  @Prop minWidth: number = 0;
   onTap: () => void = () => {};
 
   private colors(): ThemeColors {
@@ -71,6 +80,11 @@ export struct PlayerToolButton {
       .alignItems(VerticalAlign.Center)
     }
     .height(48)
+    // 统一高度与最小宽度：让换行后的两行长度接近（见 minWidth 的说明）。
+    // `constraintSize` 只在内容比下限窄时才生效，宽按钮不受影响。
+    .constraintSize(this.minWidth > 0
+      ? { minWidth: this.minWidth, minHeight: 48 }
+      : { minHeight: 48 })
     .padding({ left: 14, right: 14 })
     .backgroundColor(this.resolvedBackground())
     .border({
