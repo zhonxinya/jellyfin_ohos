@@ -26,6 +26,18 @@ struct ClientPlaybackCapabilities {
     std::vector<std::string> audioCodecs;
     /** 直接播放的容器 */
     std::vector<std::string> containers;
+    /**
+     * 能直接播放的最高视频位深（bit）。
+     *
+     * 为什么必须单独声明（设备实测的"花屏"根因）：`videoCodecs` 里的 `h264` 是**按编码名**
+     * 匹配的，不区分位深 —— 于是 **H.264 High 10（`yuv420p10le`，10-bit）** 也被判成"可直连"，
+     * 交给系统硬解后画面**花屏**（部分区域呈马赛克）。
+     * 服务端只在 `CodecProfiles` 的条件里才会检查位深，因此这里配套下发一条
+     * `VideoBitDepth <= 8` 的约束，让 10-bit 走服务端转码成 8-bit 后再硬解。
+     *
+     * 0 = 不限制（不声明该条件）。
+     */
+    int maxVideoBitDepth = 8;
     /** 转码目标：容器 / 视频编码 / 音频编码 / 协议 */
     std::string transcodeContainer = "ts";
     std::string transcodeVideoCodec = "h264";
@@ -52,6 +64,10 @@ struct ClientPlaybackCapabilities {
  *    交给服务端转码成 H.264 后可以走硬件解码，帧率与音频都正常。
  *    需要在"服务器不能转码"的场景下仍然能播 AV1 时，见 postPlaybackInfo 的
  *    `includeDeviceProfile=false` 重试路径（退回直连 + 本机软解）。
+ *  - **10-bit 视频不直接播放**（`maxVideoBitDepth = 8`）：`h264`/`hevc` 这些编码名不区分位深，
+ *    而系统硬解 10-bit（High 10 / Main 10）会**花屏**（部分区域马赛克）。设备实测：
+ *    某 H.264 High 10（yuv420p10le / 1920x1080 / Level 5.1）条目被直连后，硬解花屏、
+ *    约 30 秒后报错才回退转码；下发位深约束后服务端直接转码成 8-bit，画面正常。
  */
 ClientPlaybackCapabilities DefaultClientPlaybackCapabilities();
 

@@ -84,6 +84,55 @@ static void testDefaultProfileExcludesAv1()
            "常见音频（aac/flac）允许直接播放");
 }
 
+/**
+ * 10-bit 视频必须被"拒绝直连"。
+ *
+ * 为什么这条值得单测：`h264`/`hevc` 是按**编码名**匹配的，不区分位深 —— 少了这条约束，
+ * H.264 High 10 会被判成可直连，交给系统硬解后**画面花屏**（部分区域马赛克）。
+ * 本测试守住的是"DeviceProfile 里确实下发了 VideoBitDepth 约束"这一件事。
+ */
+static void testCodecProfileLimitsVideoBitDepth()
+{
+    using jellyfin::api::BuildDeviceProfile;
+    using jellyfin::api::DefaultClientPlaybackCapabilities;
+
+    const auto caps = DefaultClientPlaybackCapabilities();
+    expect(caps.maxVideoBitDepth == 8, "默认能力把直接播放的位深上限设为 8 bit");
+
+    const nlohmann::json profile = BuildDeviceProfile(caps);
+    expect(profile.contains("CodecProfiles") && profile["CodecProfiles"].is_array() &&
+           !profile["CodecProfiles"].empty(),
+           "DeviceProfile 含非空 CodecProfiles（否则服务端不检查位深）");
+
+    bool found = false;
+    for (const auto &cp : profile["CodecProfiles"]) {
+        if (cp.value("Type", "") != "Video") {
+            continue;
+        }
+        if (!cp.contains("Conditions") || !cp["Conditions"].is_array()) {
+            continue;
+        }
+        for (const auto &cond : cp["Conditions"]) {
+            if (cond.value("Property", "") == "VideoBitDepth") {
+                found = true;
+                expect(cond.value("Condition", "") == "LessThanEqual",
+                       "位深条件用 LessThanEqual（大于上限即需转码）");
+                expect(cond.value("Value", "") == "8", "位深上限值为 8");
+                expect(cond.value("IsRequired", true) == false,
+                       "IsRequired=false（不是硬性要求，仅在不满足时触发转码）");
+            }
+        }
+    }
+    expect(found, "**下发了 VideoBitDepth 条件**（10-bit 因此被转码，避免硬解花屏）");
+
+    // 置 0 表示"不限制"：此时不应下发任何位深条件
+    auto unlimited = caps;
+    unlimited.maxVideoBitDepth = 0;
+    const nlohmann::json p2 = BuildDeviceProfile(unlimited);
+    expect(p2.contains("CodecProfiles") && p2["CodecProfiles"].empty(),
+           "maxVideoBitDepth=0 时不声明位深条件（空 CodecProfiles）");
+}
+
 static void testTranscodingProfileIsHlsH264()
 {
     using jellyfin::api::BuildDeviceProfile;
@@ -157,6 +206,7 @@ int main()
     std::printf("== DeviceProfile 主机单测 ==\n");
     testDefaultProfileExcludesAv1();
     testTranscodingProfileIsHlsH264();
+    testCodecProfileLimitsVideoBitDepth();
     testPlayableUrlDetection();
 
     if (gFailed == 0) {

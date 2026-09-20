@@ -116,9 +116,41 @@ nlohmann::json BuildDeviceProfile(const ClientPlaybackCapabilities &caps)
     }
     profile["SubtitleProfiles"] = subtitles;
 
-    // 不声明任何 CodecProfiles：本工程对 profile/level 没有额外约束，
-    // 交给服务端按"编码能否直接播放"判断即可（声明空数组比不写更明确）。
-    profile["CodecProfiles"] = nlohmann::json::array();
+    // ── CodecProfiles：直接播放的**额外**约束 ────────────────────────────────
+    //
+    // 目前只有一条，但它修的是一个真实缺陷（设备实测"硬解花屏"）：
+    // `DirectPlayProfiles.VideoCodec` 里的 `h264` 是**按编码名**匹配的，不区分位深 ——
+    // **H.264 High 10（10-bit，`yuv420p10le`）** 因此也被判成"可直连"，
+    // 交给系统硬解后画面花屏（部分区域马赛克）。设备实测的时序：
+    //   19:30:58 PlayMethod=DirectPlay（reason=0）→ 硬解 10-bit，画面花屏；
+    //   19:31:30 PlayMethod=Transcode（reason=DirectPlayError）→ 约 30 秒后报错才回退。
+    // 服务端只在 CodecProfiles 的条件里检查位深
+    // （`StreamBuilder.GetVideoDirectPlayProfile`：条件不满足 → `videoCodecProfileReasons`
+    // 非 0 → 直连判定 `failureReasons == 0` 不成立 → 落到转码），所以位深约束必须写在这里。
+    //
+    // 注意 `DirectPlayProfile` **不支持** Conditions（见其模型定义，只有容器/编码字段），
+    // 因此这条约束没别处可写。
+    //
+    // 条件本身：`VideoBitDepth <= 8`。10-bit 源（H.264 High 10 / HEVC Main 10）于是被转码
+    // 成 8-bit H.264，走系统硬解 —— 画质无损观感损失（源本身多为 8-bit 内容重新编码成 10-bit），
+    // 换来的是不花屏。
+    nlohmann::json codecProfiles = nlohmann::json::array();
+    if (caps.maxVideoBitDepth > 0) {
+        codecProfiles.push_back({
+            {"Type", "Video"},
+            {"Codec", video},
+            {"Container", container},
+            {"Conditions", nlohmann::json::array({
+                {
+                    {"Condition", "LessThanEqual"},
+                    {"Property", "VideoBitDepth"},
+                    {"Value", std::to_string(caps.maxVideoBitDepth)},
+                    {"IsRequired", false},
+                },
+            })},
+        });
+    }
+    profile["CodecProfiles"] = codecProfiles;
 
     return profile;
 }
