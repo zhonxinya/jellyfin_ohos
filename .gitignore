@@ -82,4 +82,5 @@ AGENTS.md
 
 # Git worktrees (local isolation)
 .worktrees/
+.omo/
 
