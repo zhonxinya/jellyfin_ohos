@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -20,7 +21,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -183,12 +184,17 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
     deadline.tv_sec += timeoutSec;
 
     while (sock < 0 && !pending.empty()) {
-        fd_set writeSet;
-        FD_ZERO(&writeSet);
-        int maxFd = -1;
+        // 用 `poll()` 而不是 `select()`：OpenHarmony 的 `FD_SET` 会在 fd ≥ 1024 时
+        // 经 `__fd_chk` **直接 abort**，而本进程 fd 上限是 32768（设备实测
+        // `/proc/<pid>/limits`）。详情页并发加载图片时 fd 很容易越过 1024，
+        // 崩溃点就在这里（设备实测栈 `__fd_chk → ConnectTcp:190`）。详见 socket_util.h。
+        std::vector<struct pollfd> fds;
+        fds.reserve(pending.size());
         for (const int fd : pending) {
-            FD_SET(fd, &writeSet);
-            maxFd = std::max(maxFd, fd);
+            struct pollfd pfd {};
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            fds.push_back(pfd);
         }
         timespec now{};
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -198,10 +204,8 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             lastErrno = ETIMEDOUT;
             break;
         }
-        timeval tv{};
-        tv.tv_sec = static_cast<long>(remainingMs / 1000);
-        tv.tv_usec = static_cast<suseconds_t>((remainingMs % 1000) * 1000);
-        const int rc = select(maxFd + 1, nullptr, &writeSet, nullptr, &tv);
+        const int rc = poll(fds.data(), static_cast<nfds_t>(fds.size()),
+                            static_cast<int>(remainingMs > INT_MAX ? INT_MAX : remainingMs));
         if (rc < 0) {
             if (errno == EINTR) {
                 continue;
@@ -214,12 +218,17 @@ int ConnectTcp(const std::string &host, int port, int timeoutSec, std::string &e
             break;
         }
         std::vector<int> next;
-        for (int fd : pending) {
+        for (size_t i = 0; i < pending.size(); ++i) {
+            // 注意：这里必须是**引用** —— `closeOnce` 要求 `int&`（它会把 fd 置 -1，
+            // 这是"绝不重复关闭"的保证）。
+            int &fd = pending[i];
             if (sock >= 0) {
                 next.push_back(fd);
                 continue;
             }
-            if (!FD_ISSET(fd, &writeSet)) {
+            // revents 非 0 即"有事件"（POLLOUT 成功 / POLLERR / POLLHUP 都算），
+            // 具体是成功还是失败由下面的 SO_ERROR 决定。
+            if (fds[i].revents == 0) {
                 next.push_back(fd);
                 continue;
             }

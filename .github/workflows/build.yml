@@ -58,6 +58,11 @@ jobs:
               test_device_profile)
                 # 客户端能力声明：决定服务端会不会转码（av1 必须在直接播放列表之外）
                 extra="native/core/api/device_profile.cpp" ;;
+              test_socket_util)
+                # socket_util.h 是 header-only（WaitSocketReady 为 inline），无需额外源文件。
+                # 守住的是"别再用 select()/FD_SET"：OpenHarmony 的 FD_SET 对 fd>=1024 直接 abort，
+                # 而本应用 fd 上限是 32768（曾导致详情页约 20 秒必崩）。
+                extra="" ;;
               *)
                 echo "::error::新增的测试 $name 尚未在本工作流登记编译源文件"
                 fail=1
