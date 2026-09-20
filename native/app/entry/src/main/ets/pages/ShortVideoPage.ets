@@ -875,14 +875,15 @@ export struct ShortVideoPage {
     }
   }
 
-  /** 单击画面：暂停/继续（控件已隐藏时先唤出控件，不改播放状态） */
+  /**
+   * 单击画面：暂停 / 继续。
+   *
+   * 「控件隐藏时先唤出、不暂停」这条规则**在上游 `handleTapUp` 就拦掉了**，
+   * 这里进来时一定是"用户真的要切播放状态"。之所以不在这里判断 `chromeVisible`：
+   * 单击是延后 `kSingleTapDelayMs` 执行的，那时控件早被 `onCardTouch` 唤出了，
+   * 在这里再判一次会**永远为假**（这正是"点一下想找按钮、画面却停了"那个 bug 的成因）。
+   */
   private togglePause(): void {
-    // 控件隐藏状态下的一次点按只负责"把控件唤回来"：直接暂停的话，用户会看到
-    // "我点了一下想找按钮，画面却停了"。与主流播放器一致（先显控件，再操作）。
-    if (!this.chromeVisible) {
-      this.revealChrome(true);
-      return;
-    }
     if (this.softActive) {
       // 软解没有暂停 API：暂停 = 停掉帧循环（画面停在最后一帧），恢复 = 重启帧循环
       if (this.paused) {
@@ -1389,9 +1390,13 @@ export struct ShortVideoPage {
   }
 
   /**
-   * 一次"抬手"到达：判定单击（暂停/继续）还是双击（两侧快进/快退）。
+   * 一次"抬手"到达：判定单击还是双击（两侧快进/快退）。
    *
    * 与播放页一致：单击必须**延后**执行，否则双击时画面会先暂停一下。
+   *
+   * @param wasHidden 抬手那一刻控件是否处于隐藏状态。
+   *   **必须由调用方在唤出之前采集**并传进来（见 `onCardTouch`）——
+   *   到这里的 380ms 之后控件早已被唤出，此刻再读 `chromeVisible` 永远是"没隐藏"。
    */
   private handleTapUp(x: number, wasHidden: boolean): void {
     const now: number = Date.now();
@@ -1414,11 +1419,22 @@ export struct ShortVideoPage {
     this.cancelPendingTap();
     this.singleTapTimerId = setTimeout(() => {
       this.singleTapTimerId = -1;
-      hilog.info(LOG_DOMAIN, LOG_TAG, 'singleTap x=%{public}d paused=%{public}s wasHidden=%{public}s',
-        Math.round(x), this.paused ? '1' : '0', wasHidden ? '1' : '0');
-      // 单击始终是"暂停 / 继续"：自动隐藏只是让画面让位，不该改变点按的含义
-      // （本页的"单击暂停"已被文档与验收固定）。暂停分支里会 `revealChrome(false)`
-      // 把控件留住，用户立刻能看到状态与按钮。
+      // 控件**隐藏时**的第一下只负责"唤出来"，不改播放状态。
+      //
+      // 为什么：这一刻用户的意图是"我要找按钮"，不是在操作播放。顺着按下暂停的话，
+      // 他看到的正好相反 —— "我点了一下想找按钮，画面却停了"，还得再点一下才能继续。
+      // 上下控件的自动隐藏只该让画面让位，不该把"一次点按"的含义变成暂停。
+      //
+      // 判据用抬手那一刻的 `wasHidden`（见本方法注释）；到这里 `chromeVisible` 必然已是 true。
+      if (wasHidden) {
+        hilog.info(LOG_DOMAIN, LOG_TAG,
+          'singleTap x=%{public}d → 只唤出控件（控件原为隐藏），不改播放状态', Math.round(x));
+        return;
+      }
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'singleTap x=%{public}d paused=%{public}s',
+        Math.round(x), this.paused ? '1' : '0');
+      // 控件本来就可见：单击就是"暂停 / 继续"（暂停分支里会 `revealChrome(false)`
+      // 把控件留住，用户立刻能看到状态与按钮）。
       this.togglePause();
     }, kSingleTapDelayMs);
   }
