@@ -58,6 +58,12 @@ Invoke-CompileAndRun -Name "test_url_util" -Sources @(
     (Join-Path $Core "url_util.cpp")
 )
 
+# socket_util.h 是 header-only，单独编译即可（无需额外 .cpp）。
+# 守的是"fd ≥ 1024 不能 abort"这条 OpenHarmony 特有的约束，见该测试文件头说明。
+Invoke-CompileAndRun -Name "test_socket_util" -Sources @(
+    (Join-Path $Core "tests\test_socket_util.cpp")
+)
+
 Invoke-CompileAndRun -Name "test_playback_resolve" -Sources @(
     (Join-Path $Core "tests\test_playback_resolve.cpp"),
     (Join-Path $Core "url_util.cpp"),
