@@ -383,6 +383,13 @@ struct PlayerPage {
    * 而重新请求一次详情只为拿类型是多余的往返。
    */
   private itemType: string = '';
+  /**
+   * 当前条目的视频位深（bit；0 = 未知）。
+   *
+   * 用途：**10-bit 源不能交给系统硬解** —— 硬解 10-bit 会静默花屏（部分区域马赛克），
+   * 且**不报错**，因此"硬解失败 → 软解兜底"那条路永远不会触发（见 `openPlayer` 里的守卫）。
+   */
+  private videoBitDepth: number = 0;
   /** 转码流起播失败后是否已改走"直连 + 本机软解"（只试一次，避免来回切） */
   private transcodeFallbackTried: boolean = false;
   /**
@@ -1302,7 +1309,7 @@ struct PlayerPage {
    */
   private async startSoftPlay(): Promise<void> {
     // 转码流（HLS）无法用本机软解读：与其一路失败到超时，不如立刻说清原因
-    if (this.playMethod === 'Transcode' || this.playUrl.includes('.m3u8')) {
+    if (this.isTranscodePlayback()) {
       const msg: string = '当前是服务器转码流（HLS），不支持本机软解；可直接用系统播放器播放';
       this.setSoftNotice(msg, false);
       return;
@@ -2768,6 +2775,38 @@ struct PlayerPage {
     await this.openPlayer();
   }
 
+  /** 当前播放是不是服务端转码流（HLS）—— 软解读不了 HLS，它是"能否回退软解"的硬边界 */
+  private isTranscodePlayback(): boolean {
+    return this.playMethod === 'Transcode' || this.playUrl.includes('.m3u8');
+  }
+
+  /**
+   * 从 `playerOpen` 返回的 `playbackInfo` 里取视频流位深（取不到记 0 = 未知）。
+   *
+   * 为什么不用宿主传来的 `mediaStreams`：那是**当前详情条目**的流列表，
+   * 而详情页里播的常常是别的条目（剧集播的是某一集），拿到的会是剧的流（无视频流）。
+   * `playbackInfo` 是这次播放**真正解析出来**的媒体源，位深一定对得上。
+   */
+  private applyVideoBitDepth(data: ESObject | null): void {
+    this.videoBitDepth = 0;
+    const info: ESObject | null = JsonUtil.getObject(data, 'playbackInfo');
+    if (info === null) {
+      return;
+    }
+    const sources: Object[] = JsonUtil.getArray(info, 'MediaSources');
+    if (sources.length === 0) {
+      return;
+    }
+    const streams: Object[] = JsonUtil.getArray(sources[0] as ESObject, 'MediaStreams');
+    for (let i = 0; i < streams.length; i++) {
+      const stream: ESObject = streams[i] as ESObject;
+      if (JsonUtil.getString(stream, 'Type', '') === 'Video') {
+        this.videoBitDepth = JsonUtil.getNumber(stream, 'BitDepth', 0);
+        return;
+      }
+    }
+  }
+
   private async openPlayer(): Promise<void> {
     this.status = UiState.LOADING;
     // 用 **itemId** 作为 `playerOpen` 的目标，而不是"已拿到的 playUrl"。
@@ -2803,6 +2842,31 @@ struct PlayerPage {
     this.playMethod = JsonUtil.getString(result.data, 'playMethod', '');
     // 记下最终播放地址：转码流的判据（`.m3u8`）与"是否允许回退软解"都依赖它
     this.playUrl = resolvedUrl;
+    // 视频位深：用于挡住"把 10-bit 交给系统硬解"这条会花屏的路（见下面的守卫）
+    this.applyVideoBitDepth(result.data);
+
+    // ── 客户端侧兜底：10-bit 源绝不能交给系统硬解 ──────────────────────────
+    //
+    // 服务端侧已经挡了一道（DeviceProfile 里下发 `VideoBitDepth <= 8`，见 device_profile.cpp）：
+    // 带 DeviceProfile 时服务端不会对 10-bit 给直连。但**"转码流失败 → 回退直连"**那条路
+    // （`fallbackFromTranscode`）会去掉 DeviceProfile，服务端于是重新给出直连原文件 ——
+    // 而 10-bit 交给硬解会**静默花屏**（部分区域马赛克），**且不报错**，
+    // 所以"硬解失败 → 软解兜底"永远不会被触发，用户只能盯着花屏看。
+    // 设备实测正是如此：20:44 转码正常播放 → 20:45:56 回退直连（`DirectPlay` + `stream.mkv`）→ 花屏。
+    //
+    // 因此这里再挡一道：位深 > 8 且拿到的是**直连**（非 HLS）地址时，不交给 AVPlayer，
+    // 直接走 FFmpeg 软解（软解用 FFmpeg 的 h264 解码器，能正确解 High 10）。
+    // 代价：软解路径只解码视频、**没有音频**（本工程软解的已知限制），
+    // 但这总好过静默花屏；且此分支只在"服务端转码也失败"这种降级场景才会走到。
+    if (this.videoBitDepth > 8 && !this.isTranscodePlayback()) {
+      if (this.positionMs > 1000) {
+        this.softFallbackStartMs = this.positionMs;
+      }
+      this.setSoftNotice('10-bit 视频（系统硬解会花屏）→ 改用 FFmpeg 软解播放', false);
+      this.maybeFallbackToSoftDecode('10-bit 视频（硬解会花屏）');
+      return;
+    }
+
     // 创建 AVPlayer 进行实际视频渲染
     this.createAvPlayer(resolvedUrl);
     // 进入系统媒体会话体系（后台播放/媒体控件）；失败不影响播放
@@ -2977,7 +3041,7 @@ struct PlayerPage {
     // 转码流（HLS）不能回退软解：软解会话是"HTTP Range 顺序读一个文件"，
     // 读不了 m3u8 + TS 分片（会一路失败到超时）。这时先尝试"关掉 DeviceProfile 改直连"，
     // 直连失败后再由下面的软解回退接手（见 fallbackFromTranscode）。
-    const transcodeStream: boolean = this.playMethod === 'Transcode' || this.playUrl.includes('.m3u8');
+    const transcodeStream: boolean = this.isTranscodePlayback();
     if (transcodeStream && !this.transcodeFallbackTried) {
       this.fallbackFromTranscode(message);
       return;
