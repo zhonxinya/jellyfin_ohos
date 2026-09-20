@@ -11,6 +11,7 @@ import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
+import { EpisodeCard } from '../components/EpisodeCard';
 import { HorizontalShelf } from '../components/HorizontalShelf';
 import { AppIconButton } from '../components/AppIconButton';
 import { PrimaryButton } from '../components/PrimaryButton';
@@ -19,6 +20,18 @@ import { TextButton } from '../components/TextButton';
 
 /** 音轨/字幕下拉里的「未选择」项（= 不指定轨道，交给服务端用默认轨） */
 const TRACK_UNSELECTED: string = '未选择';
+
+/** 剧集卡片宽度（16:9 剧照；高度由 `EpisodeCard` 按宽度推出） */
+const EPISODE_CARD_WIDTH: number = 176;
+/**
+ * 横向剧集列表的固定高度。
+ *
+ * 横向 `List` 必须显式给高度，否则在纵向 `Scroll` 里会塌成 0（什么都看不见）。
+ * 取值 = 卡片最大内容高度（剧照 99 + 间距 6 + 标题 2 行 36 + 间距 6 + 元信息 15 = 162）+ 余量。
+ */
+const EPISODE_SHELF_HEIGHT: number = 170;
+/** 季标签栏高度（含选中下划线） */
+const SEASON_TABS_HEIGHT: number = 48;
 
 /** 预计算的媒体流条目，供 Builder 使用 */
 interface StreamEntry {
@@ -37,8 +50,25 @@ struct DetailPage {
   @State private seasons: MediaItem[] = [];
   @State private similar: MediaItem[] = [];
   @State private people: Object[] = [];
-  @State private expandedSeasonId: string = '';
+  /**
+   * 当前选中的季在 `seasons` 中的下标（-1 = 尚未选中）。
+   *
+   * 取代了旧的 `expandedSeasonId` 手风琴：旧实现"点一季 → 往下展开一段纵向分集列表"，
+   * 多季剧集里想翻到第 5 季要先滚过前四季的全部集数；而且展开状态叠在长列表里，
+   * 用户很难判断"我现在看的是第几季"。改成 TAB 后，"选哪一季"与"这一季有哪几集"分开呈现。
+   */
+  @State private activeSeasonIndex: number = -1;
+  /** 当前选中季的分集（横向剧集列表的数据源） */
   @State private episodes: MediaItem[] = [];
+  /** 分集列表的加载状态（`UiState` 常量） */
+  @State private episodesStatus: string = UiState.INITIAL;
+  /**
+   * 分集请求序号：每次切季 +1，响应回来时序号已过期就丢弃。
+   *
+   * 为什么必须要有：快速连点不同季标签时，先发的请求可能后到，
+   * 不加这层会把**上一季的分集**盖到当前选中季的下面（内容与标签不符）。
+   */
+  private episodesSeq: number = 0;
   /**
    * 弹层状态 —— 参考项目用「一个 bindSheet 节点 + sheetKind 判别」承载所有详情页弹层，
    * 不再为每个弹层手写全屏遮罩 + 居中卡片 + 点遮罩关闭（原来有 4 套这样的代码）。
@@ -102,22 +132,86 @@ struct DetailPage {
       this.mediaStreams = JsonUtil.getArray(src, 'MediaStreams');
     }
     this.status = UiState.SUCCESS;
+    // 剧集详情默认选中第一季并加载分集：TAB 栏一进来就该有内容，
+    // 而不是"空白一片等用户自己点一下"（旧的手风琴实现就是这样）。
+    if (this.item.type === 'Series' && this.seasons.length > 0) {
+      await this.loadSeasonEpisodes(0);
+    }
   }
 
-  private async loadEpisodes(seasonId: string): Promise<void> {
-    if (this.expandedSeasonId === seasonId) {
-      this.expandedSeasonId = '';
-      this.episodes = [];
+  /** 选中某一季（季标签栏的点击入口）；重复点已选中的季不重新请求，避免整排剧集闪烁重建 */
+  private async selectSeason(index: number): Promise<void> {
+    if (index === this.activeSeasonIndex) {
       return;
     }
-    this.expandedSeasonId = seasonId;
-    const raw: string = await JellyfinNative.getSeasonEpisodes(this.itemId, seasonId);
+    await this.loadSeasonEpisodes(index);
+  }
+
+  /** 分集加载失败后的重试入口（重新请求当前季） */
+  private async retrySeasonEpisodes(): Promise<void> {
+    await this.loadSeasonEpisodes(this.activeSeasonIndex);
+  }
+
+  /** 加载指定季的分集 */
+  private async loadSeasonEpisodes(index: number): Promise<void> {
+    if (index < 0 || index >= this.seasons.length) {
+      return;
+    }
+    this.activeSeasonIndex = index;
+    this.episodes = [];
+    this.episodesStatus = UiState.LOADING;
+    const seq: number = ++this.episodesSeq;
+    const raw: string = await JellyfinNative.getSeasonEpisodes(this.itemId, this.seasons[index].id);
+    // 用户在等待期间又切了季 → 这次响应已过期，直接丢弃
+    if (seq !== this.episodesSeq) {
+      return;
+    }
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok) {
-      this.episodes = [];
+      this.episodesStatus = UiState.ERROR;
       return;
     }
     this.episodes = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    this.episodesStatus = this.episodes.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
+  }
+
+  /**
+   * 季标签文案。
+   *
+   * Jellyfin 的季名默认是英文 `Season 1`（服务器未做中文化时），而界面其余部分都是中文，
+   * 直接显示很突兀。这里把 `Season N` 归一为 `第 N 季`、`Specials` 归一为 `特别篇`；
+   * 其余名称（服务器自定义过季名的场景）原样显示，不擅自改写服务端数据。
+   */
+  private seasonTabLabel(season: MediaItem): string {
+    const name: string = season.name.trim();
+    if (name.length === 0) {
+      return '未知季';
+    }
+    const prefix: string = 'season ';
+    if (name.length > prefix.length && name.substring(0, prefix.length).toLowerCase() === prefix) {
+      const num: string = name.substring(prefix.length).trim();
+      if (this.isAllDigits(num)) {
+        return `第 ${num} 季`;
+      }
+    }
+    if (name.toLowerCase() === 'specials') {
+      return '特别篇';
+    }
+    return name;
+  }
+
+  /** 纯数字判断（不依赖正则，避免 ArkTS 上 RegExp 的兼容差异） */
+  private isAllDigits(text: string): boolean {
+    if (text.length === 0) {
+      return false;
+    }
+    for (let i = 0; i < text.length; i++) {
+      const code: number = text.charCodeAt(i);
+      if (code < 48 || code > 57) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private async toggleFavorite(): Promise<void> {
@@ -254,6 +348,11 @@ struct DetailPage {
       return compact ? '继续播放'
                      : `继续播放 · ${formatTicks(this.item.playbackPositionTicks)}`;
     }
+    // 剧集（Series）按钮点下去播的是**当前选中季的第一集**（见 `startPlayback`），
+    // 说成"本集"并不成立（详情页没有"当前集"这个概念）；单集（Episode）才是真的本集。
+    if (this.item.type === 'Series') {
+      return '播放';
+    }
     return compact ? '播放本集' : '播放';
   }
 
@@ -278,6 +377,12 @@ struct DetailPage {
    */
   private async startPlayback(): Promise<void> {
     if (this.item.type === 'Series') {
+      // 优先播"当前选中那一季的第一集"：用户在第 3 季标签下按播放，播的应该是第 3 季，
+      // 而不是被跳回第 1 季（旧实现固定取 `seasons[0]`，与界面上选中的季无关）。
+      if (this.episodes.length > 0) {
+        this.playItem(this.episodes[0].id);
+        return;
+      }
       if (this.seasons.length === 0) {
         this.errorMsg = '该剧集暂无可播放的分集';
         return;
@@ -738,6 +843,51 @@ struct DetailPage {
     .alignItems(HorizontalAlign.Center)
   }
 
+  /**
+   * 季标签栏（横向可滚动）。
+   *
+   * 用横向 `List` 而不是 `Row() + ForEach`：季数多的剧（20+ 季）在 `Row` 里会被挤到
+   * 每季只剩几个字，`List` 则可以滑动。选中态 = 品牌色文字 + 品牌色下划线。
+   */
+  @Builder
+  SeasonTabs() {
+    List({ space: 14 }) {
+      ForEach(this.seasons, (season: MediaItem, index: number) => {
+        ListItem() {
+          Column({ space: 4 }) {
+            Text(this.seasonTabLabel(season))
+              .fontSize(ThemeConstants.META_MEDIUM)
+              .fontWeight(index === this.activeSeasonIndex ? FontWeight.Medium : FontWeight.Regular)
+              .fontColor(index === this.activeSeasonIndex
+                ? this.colors().brandPrimary
+                : this.colors().textSecondary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 选中下划线：未选中用透明色占位，保证所有标签高度一致、不会因选中而跳动
+            Row()
+              .width(24)
+              .height(2)
+              .borderRadius(1)
+              .backgroundColor(index === this.activeSeasonIndex
+                ? this.colors().brandPrimary
+                : Color.Transparent)
+          }
+          .height(SEASON_TABS_HEIGHT)
+          .justifyContent(FlexAlign.End)
+          .alignItems(HorizontalAlign.Center)
+          .onClick(() => {
+            this.selectSeason(index);
+          })
+        }
+      }, (season: MediaItem, index: number) => `${season.id}_${index}`)
+    }
+    .listDirection(Axis.Horizontal)
+    .scrollBar(BarState.Off)
+    .height(SEASON_TABS_HEIGHT)
+    .padding({ left: 16, right: 16 })
+    .width('100%')
+  }
+
   /** 演职人员横滑 */
   @Builder
   PeopleRow(people: Object[]) {
@@ -1025,75 +1175,69 @@ struct DetailPage {
               this.MediaInfoRow();
             }
 
-            // 季-集浏览（Series 类型）
+            // 季-集浏览（Series 类型）：季用 TAB 切换，分集横向排列
             if (this.item.type === 'Series' && this.seasons.length > 0) {
               Column() {
                 Text('\u5b63\u4e0e\u96c6')
                   .fontSize(ThemeConstants.TITLE_SMALL)
                   .fontColor(this.colors().textPrimary)
-                  .padding({ left: 16, top: 8, bottom: 8 })
+                  .padding({ left: 16, top: 8, bottom: 4 })
                   .width('100%')
-                ForEach(this.seasons, (season: MediaItem) => {
-                  Column() {
-                    Row() {
-                      Text(season.name)
-                        .fontSize(ThemeConstants.BODY_MEDIUM)
-                        .fontColor(this.colors().textPrimary)
-                        .layoutWeight(1)
-                      SymbolGlyph(this.expandedSeasonId === season.id
-                        ? $r('sys.symbol.chevron_down')
-                        : $r('sys.symbol.chevron_right'))
-                        .fontSize(ThemeConstants.TITLE_MEDIUM)
-                        .fontColor([this.colors().textTertiary])
-                    }
-                    .width('100%')
-                    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-                    .backgroundColor(this.colors().cardBackground)
-                    .onClick(() => {
-                      this.loadEpisodes(season.id);
-                    })
 
-                    if (this.expandedSeasonId === season.id) {
-                      List({ space: 10 }) {
-                        ForEach(this.episodes, (ep: MediaItem) => {
-                          ListItem() {
-                            Row({ space: 10 }) {
-                              JellyfinImage({
-                                url: ep.imageUrl(300, 'Primary'),
-                                imgWidth: 128,
-                                imgHeight: 72,
-                                cornerRadius: 8
-                              })
-                              Column({ space: 4 }) {
-                                Text(ep.displayTitle())
-                                  .fontSize(ThemeConstants.BODY_MEDIUM)
-                                  .fontColor(this.colors().textPrimary)
-                                  .maxLines(2)
-                                Text(ep.metaLine())
-                                  .fontSize(ThemeConstants.LABEL_SMALL)
-                                  .fontColor(this.colors().textSecondary)
-                              }
-                              .alignItems(HorizontalAlign.Start)
-                              .layoutWeight(1)
-                            }
-                            .width('100%')
-                            .padding({ left: 16, right: 16 })
-                            .onClick(() => {
-                              this.playItem(ep.id);
-                            })
-                          }
-                        }, (ep: MediaItem) => ep.id)
-                      }
-                      .height(Math.min(320, this.episodes.length * 88 + 8))
-                      .scrollBar(BarState.Auto)
-                      .width('100%')
-                    }
+                this.SeasonTabs()
+
+                if (this.episodesStatus === UiState.LOADING) {
+                  Row() {
+                    LoadingProgress()
+                      .width(28)
+                      .height(28)
+                      .color(this.colors().brandPrimary)
                   }
                   .width('100%')
-                  .margin({ bottom: 4 })
-                }, (season: MediaItem) => season.id)
+                  .height(EPISODE_SHELF_HEIGHT)
+                  .justifyContent(FlexAlign.Center)
+                } else if (this.episodes.length === 0) {
+                  Row() {
+                    Text(this.episodesStatus === UiState.ERROR
+                      ? '\u5206\u96c6\u52a0\u8f7d\u5931\u8d25\uff0c\u70b9\u51fb\u91cd\u8bd5'
+                      : '\u672c\u5b63\u6682\u65e0\u53ef\u64ad\u653e\u7684\u5206\u96c6')
+                      .fontSize(ThemeConstants.META_SMALL)
+                      .fontColor(this.episodesStatus === UiState.ERROR
+                        ? this.colors().brandPrimary
+                        : this.colors().textTertiary)
+                  }
+                  .width('100%')
+                  .height(EPISODE_SHELF_HEIGHT)
+                  .justifyContent(FlexAlign.Center)
+                  .onClick(() => {
+                    // 只有"加载失败"值得重试；"本季没有分集"重试也不会有变化
+                    if (this.episodesStatus === UiState.ERROR) {
+                      this.retrySeasonEpisodes();
+                    }
+                  })
+                } else {
+                  List({ space: ThemeConstants.CARD_GAP }) {
+                    ForEach(this.episodes, (ep: MediaItem) => {
+                      ListItem() {
+                        EpisodeCard({
+                          item: ep,
+                          cardWidth: EPISODE_CARD_WIDTH,
+                          onTap: (target: MediaItem) => {
+                            this.playItem(target.id);
+                          }
+                        })
+                      }
+                    }, (ep: MediaItem) => `${ep.id}_${ep.isPlayed ? 1 : 0}`)
+                  }
+                  .listDirection(Axis.Horizontal)
+                  .scrollBar(BarState.Off)
+                  .height(EPISODE_SHELF_HEIGHT)
+                  .padding({ left: 16, right: 16 })
+                  .width('100%')
+                }
               }
               .width('100%')
+              .padding({ bottom: 8 })
             }
 
             // 相关推荐
