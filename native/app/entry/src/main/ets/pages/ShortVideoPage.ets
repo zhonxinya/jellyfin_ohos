@@ -155,10 +155,13 @@ export struct ShortVideoPage {
   /** 外壳当前页签下标：非「视频」页时暂停播放（见 onTabIndexChanged） */
   @Prop @Watch('onTabIndexChanged') activeTab: number = kVideoTabIndex;
   /**
-   * 沉浸式全屏下工具层要避让的顶部像素（vp）。
+   * 顶部工具行要避让的像素（vp），由外壳算出后下发。
    *
-   * 「视频」页默认全屏沉浸式（外壳已隐藏系统栏）：**画面铺满整屏**，
-   * 但工具行不能被挖孔或状态栏压住，因此浮层按这个值内缩。
+   * 「视频」页保留**系统状态栏**（见 `WindowFullscreen.enterWithStatusBar`）：顶部那条
+   * 高度属于系统空间，应用的工具行不该侵占它 —— 因此这个值在「视频」页 = 整条状态栏高度，
+   * 工具行整体落在状态栏之下。沉浸式页签（状态栏已隐藏）才按挖孔内缩。
+   *
+   * 画面本身仍然铺满整屏（背景与视频面不受此值影响），只有浮层控件内缩。
    */
   @Prop topInsetVp: number = 0;
 
