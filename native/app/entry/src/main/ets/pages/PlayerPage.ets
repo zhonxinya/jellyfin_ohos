@@ -132,6 +132,16 @@ const kTouchPollBackoffLimit: number = 120;
 const kBottomControlZoneVp: number = 200;
 
 /**
+ * 进度条拖动"看门狗"超时（毫秒）。
+ *
+ * 拖动期间每来一个 `onChange` 都会刷新时刻戳；若连续这么久没有任何拖动事件，
+ * 说明本次拖动已经结束（或 `End` 事件丢了没送到）—— 此时必须解除进度回写冻结，
+ * 否则进度条会永久停在原地。取值比正常的 `Moving` 间隔（约 16ms）宽几个数量级，
+ * 只有"真的没有事件了"才会触发；同时也不能太大，否则丢 `End` 时进度条会明显卡顿。
+ */
+const kSliderDragStaleMs: number = 1500;
+
+/**
  * 软解单次拉帧的最长容忍时间（毫秒）。超过即判定"原生侧卡死"并进入终态。
  *
  * 依据：正常一帧的耗时是几十毫秒（模拟器 4K 软解约 100ms 级）；
@@ -491,6 +501,19 @@ struct PlayerPage {
    * 抬手 `End` 时再 seek 并解除冻结，由播放器进度重新接管。
    */
   private sliderDragging: boolean = false;
+  /**
+   * 最近一次进度条拖动事件的时刻（毫秒）。配合 `sliderDragging` 做**看门狗**。
+   *
+   * 为什么需要（实测的丢事件场景）：`SliderChangeMode.Begin` 与 `End` 是一对，
+   * 但事件序列可能**中断** —— 例如触摸被系统手势/来电抢占、或注入式触摸只投递了
+   * `Down` 而丢了 `Move/Up`（本机 `uitest uiInput swipe` 实测约三成丢事件）。
+   * 此时 `sliderDragging` 会永久为 true → `refreshState()` 一直提前返回 →
+   * **进度条再也不走、字幕也不再刷新**，这比原缺陷更糟。
+   *
+   * 因此记录最后事件时刻：若超过 `kSliderDragStaleMs` 没有任何拖动事件，
+   * 判定为"拖动已丢失/结束"，自动解除冻结（见 `refreshState`）。
+   */
+  private sliderDragTs: number = 0;
   private avPlayer: media.AVPlayer | null = null;
   private surfaceId: string = '';
   /** XComponent 控制器：surface 就绪后用它拿到 surfaceId（软解 EGL 渲染与 AVPlayer 共用） */
@@ -2691,7 +2714,9 @@ struct PlayerPage {
     this.volumeLastY = y;
     // 兜底：能走到这里说明按下点**不在**底部控制区，本次触摸不可能是在拖滑块，
     // 因此把可能残留的拖动标志清掉（防止 Begin 之后没收到 End/Cancel 而永久冻结进度回写）。
+    // 另有 `kSliderDragStaleMs` 看门狗兜住"事件整条丢失"的情况（见 `refreshState`）。
     this.sliderDragging = false;
+    this.sliderDragTs = Date.now();
     // 手势方向判定用"相对按下点的累计位移"，不用单次 Move 的位移。
     //
     // 为什么必须这样（设备实测的缺陷）：注入/慢速滑动时每个 Move 事件的位移常常只有 1–5px，
@@ -3354,9 +3379,18 @@ struct PlayerPage {
     // `avPlayer.currentTime` 覆写，滑块会被弹回播放位置，手指与滑块脱开，
     // 表现即"时间轴拖不动"。拖动期间滑块只跟手指走，抬手（End）后再交还播放器。
     //
-    // 注意：字幕仍按**真实播放位置**刷新，不受拖动影响（拖动时字幕跟着预览位置跑没有意义，
-    // 而且会在松手 seek 前显示错误的一段台词）。
-    if (this.sliderDragging || this.gestureAxis === 'seek') {
+    // 看门狗：`Begin`/`End` 事件序列可能中断（系统手势抢占、注入式触摸丢 Up），
+    // 若只靠 `End` 解除冻结，标志会永久为 true → 进度条与字幕**再也不刷新**。
+    // 因此这里按"最近一次拖动事件"判断是否已过期，过期即自动解除。
+    if (this.sliderDragging) {
+      if (Date.now() - this.sliderDragTs > kSliderDragStaleMs) {
+        this.sliderDragging = false;
+      } else {
+        return;
+      }
+    }
+    // 手势层正在横向拖（`seek`）：同样冻结回写，避免与手势的 positionMs 预览互相打架
+    if (this.gestureAxis === 'seek') {
       return;
     }
     if (this.softPlaying) {
@@ -3705,7 +3739,9 @@ struct PlayerPage {
             if (mode === SliderChangeMode.Begin || mode === SliderChangeMode.Moving) {
               // 置位后 `refreshState()` 会停止回写进度，否则每秒一次的回写会把滑块弹回播放位置，
               // 手指与滑块脱开（设备实测的"时间轴拖不动"）。
+              // 同时刷新时刻戳：`refreshState` 用它做看门狗，防止 `End` 丢事件时永久冻结。
               this.sliderDragging = true;
+              this.sliderDragTs = Date.now();
               this.positionMs = Math.floor(value);
               this.revealControls();
               return;
@@ -3713,6 +3749,7 @@ struct PlayerPage {
             // End / Click：真正落地。先解除冻结，再 seek（软解 seek 是排队执行，
             // 位置由 `seekTo` 写入，随后由解码帧时间戳接管）。
             this.sliderDragging = false;
+            this.sliderDragTs = Date.now();
             this.positionMs = Math.floor(value);
             this.seekTo(Math.floor(value));
             this.revealControls();
