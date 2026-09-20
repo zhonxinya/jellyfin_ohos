@@ -375,8 +375,24 @@ struct PlayerPage {
   private mediaSourceId: string = '';
   /** 本次播放方式（DirectPlay / DirectStream / Transcode）；转码时禁止回退软解 */
   private playMethod: string = '';
+  /**
+   * 本次播放的条目类型（`Movie` / `Episode` / ……，由宿主页面传入；空 = 未知）。
+   *
+   * 用途：**电影与剧集在硬解失败时优先试服务器转码，而不是直接回退本机软解**（见
+   * `handlePlaybackFailure`）。类型必须由宿主传进来 —— 播放页只拿得到 itemId，
+   * 而重新请求一次详情只为拿类型是多余的往返。
+   */
+  private itemType: string = '';
   /** 转码流起播失败后是否已改走"直连 + 本机软解"（只试一次，避免来回切） */
   private transcodeFallbackTried: boolean = false;
+  /**
+   * 硬解/直连失败后是否已改走"服务器转码"（只试一次）。
+   *
+   * 与 `transcodeFallbackTried` 方向**相反**，两者不能混用：
+   * - `transcodeFallbackTried`：当前已经是转码流、转码失败 → 退回直连 + 软解；
+   * - 本标志：当前是直连、本机解不了 → 换成服务器转码再试。
+   */
+  private serverTranscodeTried: boolean = false;
   /** 起播看门狗定时器（见 kPrepareTimeoutMs） */
   private prepareTimerId: number = -1;
   /** 因播放器状态不合法而被推迟的 seek 目标（毫秒，<0 表示没有）；prepared 后补做 */
@@ -462,6 +478,7 @@ struct PlayerPage {
   aboutToAppear(): void {
     // 每次进入播放页都是新的一次播放：不沿用上一次的转码/软解回退状态
     this.transcodeFallbackTried = false;
+    this.serverTranscodeTried = false;
     this.playMethod = '';
     this.pendingAvSeekMs = -1;
     this.clearPrepareTimer();
@@ -472,8 +489,12 @@ struct PlayerPage {
       const urlVal: Object | undefined = params['playUrl'];
       const optsVal: Object | undefined = params['playbackOptions'];
       const startVal: Object | undefined = params['startPositionMs'];
+      const typeVal: Object | undefined = params['itemType'];
       if (typeof idVal === 'string') {
         this.itemId = idVal;
+      }
+      if (typeof typeVal === 'string') {
+        this.itemType = typeVal;
       }
       if (typeof startVal === 'number' && startVal > 1000) {
         this.startPositionMs = startVal;
@@ -2749,8 +2770,18 @@ struct PlayerPage {
 
   private async openPlayer(): Promise<void> {
     this.status = UiState.LOADING;
-    const target: string = this.playUrl.length > 0 ? this.playUrl : this.itemId;
-    const raw: string = await JellyfinNative.playerOpen(target, this.playbackOptions);
+    // 用 **itemId** 作为 `playerOpen` 的目标，而不是"已拿到的 playUrl"。
+    //
+    // 为什么（设备实测的真实缺陷）：原来这里写的是
+    // `this.playUrl.length > 0 ? this.playUrl : this.itemId`，意图是"宿主已经算好地址就直接用它"。
+    // 但 `playUrl` 是**上一次**播放留下的地址（首次是直连的静态流 URL），当
+    // `tryServerTranscode` / `fallbackFromTranscode` 改参数**重新**解析播放地址时，
+    // 这行会把那个旧 URL 当成 itemId 传给 `playerOpen` → 服务端 `POST /Items/<url>/PlaybackInfo`
+    // → **HTTP 404**（设备实测：转码兜底路径必然失败，界面停在"HTTP 404"）。
+    // 播放地址必须由原生侧按当前播放参数**重新解析**，所以这里恒传 itemId。
+    // （宿主想直接指定地址的场景由 `playUrl` 参数覆盖，见 `aboutToAppear` 对 params['playUrl'] 的处理，
+    //   那一路不会走到这里。）
+    const raw: string = await JellyfinNative.playerOpen(this.itemId, this.playbackOptions);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok) {
       this.status = UiState.ERROR;
@@ -2905,18 +2936,42 @@ struct PlayerPage {
   }
 
   /**
-   * 播放失败统一入口：进入错误态，并尝试**自动回退到 FFmpeg 软解**。
+   * 这条内容是否"应当优先由服务器解码"（电影 / 剧集）。
    *
-   * 这是"播放功能（硬解 + 软解）"的落地：系统硬解解不了的编码（如模拟器上的 HEVC、
-   * 设备上不支持的 profile）不应直接把用户丢在错误页，而应自动改用 CPU 软解续播。
-   * 只回退一次，避免与用户手动"重试"互相打架。
+   * 为什么只认电影与剧集：这两类是"坐下来完整看一部"的场景，画面与声音的完整度最重要 ——
+   * 本机软解只解码视频、**没有音频输出**，且吃 CPU、容易掉帧。因此本机解不了时应先让
+   * 服务端转成 H.264/AAC 走系统硬解。其它类型（音乐、短视频页里的条目等）沿用原有顺序。
+   *
+   * `Movie` 之外的剧集条目在服务端有 `Episode` 与（部分服务器）`Series` 两种类型，
+   * 这里一并算剧集。
+   */
+  private prefersServerTranscode(): boolean {
+    return this.itemType === 'Movie' || this.itemType === 'Episode' || this.itemType === 'Series';
+  }
+
+  /**
+   * 播放失败统一入口：进入错误态，并尝试**自动回退**。
+   *
+   * 这是"播放功能（硬解 + 软解 + 服务器转码）"的落地：系统硬解解不了的编码不应直接把用户
+   * 丢在错误页，而应换一条路续播。只回退一次，避免与用户手动"重试"互相打架。
+   *
+   * 回退顺序（**电影/剧集与其它类型不同**，见 `prefersServerTranscode`）：
+   *
+   * | 当前这条路 | 电影 / 剧集 | 其它类型 |
+   * |---|---|---|
+   * | 直连（本机硬解/直接串流） | **先换服务器转码**（服务端解成 H.264/AAC，客户端仍走硬解） → 再软解 | 直接回退本机软解 |
+   * | 服务器转码流 | 退回直连 + 本机软解 | 同左 |
+   *
+   * 为什么电影/剧集要把转码排在软解**前面**：本工程软解路径只解码视频（无音频），
+   * 且由 CPU 逐帧软解、帧率有限（设备实测 HEVC 1080p 约 7 fps）；能换来硬解 + 有声音的
+   * 转码明显更值得一试。转码本身失败时下面的软解仍会接手，不会把用户卡死。
    */
   private handlePlaybackFailure(message: string): void {
     // ── 无感切换：别先闪一次"播放出错"整屏覆盖层 ──────────────────────────
     // 原来的顺序是"置 ERROR → 再尝试软解"，于是用户会看到：硬解报错 → 整屏红色错误页
     // → 半秒后被软解画面顶掉。这就是"有感"的来源。
-    // 现在：只要还有软解可回退，就保持**加载态**（转圈 + 标题 + "正在切换软解…"），
-    // 只有软解也起不来时才进错误态（那时错误页是必要的终态）。
+    // 现在：只要还有别的路可回退，就保持**加载态**（转圈 + 标题 + 提示文案），
+    // 只有所有路都走不通时才进错误态（那时错误页是必要的终态）。
     this.resumeApplied = false;
     this.clearPrepareTimer();
     // 转码流（HLS）不能回退软解：软解会话是"HTTP Range 顺序读一个文件"，
@@ -2925,6 +2980,18 @@ struct PlayerPage {
     const transcodeStream: boolean = this.playMethod === 'Transcode' || this.playUrl.includes('.m3u8');
     if (transcodeStream && !this.transcodeFallbackTried) {
       this.fallbackFromTranscode(message);
+      return;
+    }
+    // 直连播放失败 + 电影/剧集 → 先让**服务器解码**（强制转码）再试一次。
+    // 这一步排在本机软解**之前**：软解无音频、吃 CPU，而服务端转码后能走系统硬解且有声音。
+    //
+    // `!this.transcodeFallbackTried` 这个条件是必需的：若本次播放**已经**试过转码、
+    // 失败后才回退到的直连（见上面的 fallbackFromTranscode），说明这台服务端转不了这条内容，
+    // 再试一次只会白跑一趟并让流程看起来像在"转码↔直连"之间来回弹。
+    if (!transcodeStream && !this.serverTranscodeTried && !this.transcodeFallbackTried
+      && this.prefersServerTranscode()) {
+      this.serverTranscodeTried = true;
+      this.tryServerTranscode(message);
       return;
     }
     const willFallback: boolean = !transcodeStream && !this.softFallbackTried && !this.softPlaying;
@@ -2942,6 +3009,44 @@ struct PlayerPage {
     this.stateText = '正在切换软解…';
     this.setSoftNotice(`硬解不可用（${message}）→ 正在切换 FFmpeg 软解…`, true);
     this.maybeFallbackToSoftDecode(message);
+  }
+
+  /**
+   * 改走**服务器转码**续播（电影/剧集在本机硬解解不了直连流时的首选兜底）。
+   *
+   * 做法：把播放参数改成"关掉直连/直接串流、强制转码"再重新请求一次 ——
+   * 服务端于是把视频与音频都转成客户端真能解的 H.264/AAC（HLS），由系统硬解播放，
+   * **有声音**，也不吃本机 CPU。与短视频页 `playCurrentServerDecode` 同一套做法与理由
+   * （为什么不能只转音频：DeviceProfile 的能力表按 FFmpeg 解码器列表声明，服务端会认为
+   * "你本机能解"，所以必须整体关掉直连逼它把音频一起转）。
+   *
+   * 位置保留：从失败那一刻的位置继续，而不是回到进播放页时的续播点
+   * （否则"看到 10 分钟报错 → 转码后从 0 开始"）。
+   */
+  private async tryServerTranscode(reason: string): Promise<void> {
+    if (this.positionMs > 1000) {
+      this.softFallbackStartMs = this.positionMs;
+    }
+    // 先记住"续播点"，openPlayer 不会自己带位置，靠 prepared 后的 seekAvPlayer 落位
+    this.startPositionMs = this.softFallbackStartMs > 1000
+      ? this.softFallbackStartMs : this.startPositionMs;
+    this.resumeApplied = false;
+    try {
+      const opts: ESObject = JSON.parse(this.playbackOptions) as ESObject;
+      opts['enableDirectPlay'] = false;
+      opts['enableDirectStream'] = false;
+      opts['enableTranscoding'] = true;
+      opts['includeDeviceProfile'] = true;
+      this.playbackOptions = JSON.stringify(opts);
+    } catch (err) {
+      this.playbackOptions = '{"enableDirectPlay":false,"enableDirectStream":false,'
+        + '"enableTranscoding":true,"includeDeviceProfile":true}';
+    }
+    this.status = UiState.LOADING;
+    this.stateText = '正在切换服务器转码…';
+    this.setSoftNotice(`本机解不了（${reason}）→ 正在让服务器转码后再播…`, false);
+    this.playMethod = '';
+    await this.openPlayer();
   }
 
   private async maybeFallbackToSoftDecode(reason: string): Promise<void> {

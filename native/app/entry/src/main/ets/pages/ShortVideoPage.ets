@@ -1845,6 +1845,9 @@ export struct ShortVideoPage {
       url: 'pages/PlayerPage',
       params: {
         itemId: item.id,
+        // 播放页据此决定"硬解失败后是否先让服务器转码"（电影/剧集优先转码，见 PlayerPage）。
+        // 这里用条目自身的 type：折叠后的剧集条目仍是 `Episode`。
+        itemType: item.type,
         // 标题用剧名 + 集号两段拼，而不是 `displayTitle()`（那条路会给出 `E1 洛基`）：
         // 播放页顶部空间有限，`第 1 集` 比 `E1` 更易读。
         title: item.episodeLabel.length > 0
