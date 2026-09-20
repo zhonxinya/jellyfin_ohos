@@ -128,6 +128,49 @@ fd 数量随图片数快速上升，越过 1024 就崩。这也解释了"为什�
 
 判据：对比 `/data/log/faultlog/faultlogger/` 最新文件名与基准名 —— 全程未产生新文件。
 
+### 补充实测（第二轮，最严苛样本）
+
+用**演职人员最多**的条目压测并发图片请求（106 人 → 详情页会并发加载 106 张图，
+远高于普通条目）：
+
+| 判定 | 结果 |
+|---|---|
+| 打开详情页后滚到「演职人员」区（触发 106 张图并发加载） | — |
+| 停留 **103 秒**（旧崩溃窗口约 20 秒） | 进程存活，`pid` **与打开前一致**（= 从未重启） |
+| 详情页是否仍正常渲染 | 是（演职人员行仍在，`uitest dumpLayout` 可读到古天乐/洪金宝/林峯等） |
+| 滚动位置是否保持 | 保持（同一批 `y` 坐标）→ 佐证未重启 |
+
+### 产物级验证（编译结果确已不含该 abort 路径）
+
+| 检查对象 | `poll` | `select` | `__fd_chk` |
+|---|---|---|---|
+| `http_client.cpp.o`（本次构建） | **1** | **0** | **0** |
+| `http_tls.cpp.o`（本次构建） | **1** | **0** | **0** |
+| 主机侧单编 `http_client.cpp` | 1 | 0 | 0 |
+
+即**自有代码已完全不引用** `select`/`__fd_chk`（`__fd_chk` 是 `FD_SET` 展开后的唯一入口，
+它的存在就等于"仍有 FD_SET 路径"）。
+
+> 排查提醒：构建目录里存在**多套路径变体**的目标文件
+> （`vol3/@appdata/dsh-qddev/...`、`vol1/home/zhonxinya/...`、`home/zhonxinya/...`），
+> 前两套是**别的用户/更早构建的陈旧产物**。用 `find ... | head -1` 取到的可能是它们，
+> 会得出"仍有 select"的**错误结论**。本次构建真正使用的是相对路径那套
+> （时间戳与构建时刻一致），判定前务必核对时间戳。
+
+### 残留的第三方 `select` 引用（已确认不可达）
+
+链接产物里仍能查到 `select`/`__fd_chk`，来自 **mbedTLS** 的
+`library/net_sockets.c`（`FD_SET`）。它**不在本应用的 I/O 路径上**：
+
+- `http_tls.cpp` 用 `mbedtls_ssl_set_bio(&ssl, &socketFd_, BioSend, BioRecv, nullptr)`
+  —— 自己提供收发回调，**不使用** mbedTLS 的 `net_sockets` 系列；
+  `#include <mbedtls/net_sockets.h>` 只为取错误码常量；
+- mbedTLS 自己的 `net_sockets.c` 还带 `if (for_select && fd >= FD_SETSIZE)` 前置保护；
+- 本次崩溃路径是**纯 HTTP**（`http://…:8097`），根本不经过 TLS。
+
+因此它是"被静态链接进产物、但运行期不可达"的代码。若将来改用 mbedTLS 的
+`net_sockets` 做 I/O，需重新评估这一点。
+
 ### 回归
 
 全部主机侧单测通过：`test_items_query`、`test_socket_util`、`test_url_util`、
@@ -157,4 +200,11 @@ fd 数量随图片数快速上升，越过 1024 就崩。这也解释了"为什�
 - 该约束是 OpenHarmony 特有的（musl FORTIFY + 定制 `select.h`），
   换平台不会有同样的崩溃 —— 但用 `poll()` 本身也是更稳妥的选择（无 fd 宽度限制）。
 - 若后续新增任何 fd 等待/多路复用代码，**一律用 `poll()`**，不要再引入 `select()`。
-  已确认仓库内生产代码当前无 `select()`/`FD_SET` 残留。
+  已确认仓库内生产代码当前无 `select()`/`FD_SET` 残留
+  （逐一核对：自有 C/C++ 里只剩**说明性注释**；ArkTS 的 `.select(...)` 是列表选中，
+  与 socket 无关）。产物层面也只剩 mbedTLS 里运行期不可达的那份（见上）。
+- **新增单测必须同时登记 CI**：`.github/workflows/build.yml` 会遍历
+  `native/core/tests/test_*.cpp`，遇到未登记的测试直接报错并让整个任务失败
+  （`新增的测试 $name 尚未在本工作流登记编译源文件`）。本次 `test_socket_util` 就漏了这一步，
+  已在同一 PR 内补上（`extra=""`，因 `socket_util.h` 是 header-only）。
+  `scripts/force-build.ps1` 那份登记当时已加，两处需一起维护。
