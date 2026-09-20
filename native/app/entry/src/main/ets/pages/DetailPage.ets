@@ -297,6 +297,22 @@ struct DetailPage {
     this.sheetShow = true;
   }
 
+  /**
+   * 待播放条目的类型（交给播放页决定回退顺序）。
+   *
+   * 本页播的往往**不是**当前详情条目：剧集播的是某一集、容器（合集/季/文件夹）播的是
+   * 第一个子项。因此先按 id 在已加载的分集里找，找不到再退回当前条目类型 ——
+   * 剧集播出的分集类型是 `Episode`，按 `Series` 判断同样会走转码优先，两者行为一致。
+   */
+  private itemTypeOf(id: string): string {
+    for (let i = 0; i < this.episodes.length; i++) {
+      if (this.episodes[i].id === id) {
+        return this.episodes[i].type;
+      }
+    }
+    return this.item.type;
+  }
+
   private buildPlaybackOptions(): string {
     const opts: Record<string, Object> = {
       'audioStreamIndex': this.audioStreamIndex,
@@ -322,6 +338,9 @@ struct DetailPage {
       url: 'pages/PlayerPage',
       params: {
         itemId: id,
+        // 播放页据此决定"硬解失败后是否先让服务器转码"（见 PlayerPage.prefersServerTranscode）：
+        // 电影/剧集优先转码，其余类型沿用直连→软解。
+        itemType: this.itemTypeOf(id),
         title: this.item.name,
         playbackOptions: this.buildPlaybackOptions(),
         startPositionMs: resumeMs,

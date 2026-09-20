@@ -47,7 +47,8 @@ export class MediaItemMenu {
     }
     router.pushUrl({
       url: 'pages/PlayerPage',
-      params: { itemId: item.id, title: item.displayTitle() }
+      // itemType 让播放页决定"硬解失败后是否先让服务器转码"（电影/剧集优先，见 PlayerPage）
+      params: { itemId: item.id, itemType: item.type, title: item.displayTitle() }
     });
   }
 

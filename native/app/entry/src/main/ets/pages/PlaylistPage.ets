@@ -93,7 +93,12 @@ struct PlaylistPage {
     }
     router.pushUrl({
       url: 'pages/PlayerPage',
-      params: { itemId: item.id, title: item.displayTitle() }
+      params: {
+        itemId: item.id,
+        // 播放页据此决定"硬解失败后是否先让服务器转码"（电影/剧集优先转码，见 PlayerPage）
+        itemType: item.type,
+        title: item.displayTitle()
+      }
     });
   }
 
