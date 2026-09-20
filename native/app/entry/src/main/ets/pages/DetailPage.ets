@@ -17,6 +17,9 @@ import { PrimaryButton } from '../components/PrimaryButton';
 import { SecondaryButton } from '../components/SecondaryButton';
 import { TextButton } from '../components/TextButton';
 
+/** 音轨/字幕下拉里的「未选择」项（= 不指定轨道，交给服务端用默认轨） */
+const TRACK_UNSELECTED: string = '未选择';
+
 /** 预计算的媒体流条目，供 Builder 使用 */
 interface StreamEntry {
   type: string;
@@ -43,7 +46,7 @@ struct DetailPage {
    */
   @State private sheetShow: boolean = false;
   @State private sheetKind: string = '';
-  /** FFmpeg 软解探测：诊断文本 + 首帧 PNG 路径（用于验证软解链路） */
+  /** 播放起播参数：-1 表示不指定轨道（交给服务端用默认轨），下拉里显示为「未选择」 */
   @State private audioStreamIndex: number = -1;
   @State private subtitleStreamIndex: number = -1;
   @State private forceTranscode: boolean = false;
@@ -394,35 +397,100 @@ struct DetailPage {
     }
   }
 
-  private streamIndexAt(optionIndex: number): number {
-    if (optionIndex < 0 || optionIndex >= this.mediaStreams.length) {
+  /** 按类型取媒体流（与播放页 `streamsOfType` 同一口径） */
+  private streamsOfType(type: string): Object[] {
+    const out: Object[] = [];
+    for (let i = 0; i < this.mediaStreams.length; i++) {
+      const s: ESObject = this.mediaStreams[i] as ESObject;
+      if (JsonUtil.getString(s, 'Type', '') === type) {
+        out.push(this.mediaStreams[i]);
+      }
+    }
+    return out;
+  }
+
+  private audioStreams(): Object[] {
+    return this.streamsOfType('Audio');
+  }
+
+  private subtitleStreams(): Object[] {
+    return this.streamsOfType('Subtitle');
+  }
+
+  /** 下拉项下标 → 媒体流真实 Index（下标 0 固定是「未选择」，不参与映射） */
+  private streamIndexAt(list: Object[], optionIndex: number): number {
+    if (optionIndex < 0 || optionIndex >= list.length) {
       return -1;
     }
-    return JsonUtil.getNumber(this.mediaStreams[optionIndex] as ESObject, 'Index', -1);
+    return JsonUtil.getNumber(list[optionIndex] as ESObject, 'Index', -1);
   }
 
+  /** 当前选中的流在下拉里的位置（0 = 未选择） */
+  private optionIndexOf(list: Object[], streamIndex: number): number {
+    if (streamIndex < 0) {
+      return 0;
+    }
+    for (let i = 0; i < list.length; i++) {
+      if (JsonUtil.getNumber(list[i] as ESObject, 'Index', -1) === streamIndex) {
+        return i + 1;
+      }
+    }
+    return 0;
+  }
+
+  /** 下拉项标题：DisplayTitle 优先，缺失时退回 `Audio 1` / `Subtitle 2` 这类可读文本 */
+  private streamOptionValue(stream: ESObject, kind: string): string {
+    const displayTitle: string = JsonUtil.getString(stream, 'DisplayTitle',
+      JsonUtil.getString(stream, 'Language', ''));
+    if (displayTitle.length > 0) {
+      return displayTitle;
+    }
+    return `${kind} ${JsonUtil.getNumber(stream, 'Index', -1)}`;
+  }
+
+  /**
+   * 「音频」下拉：第 0 项固定「未选择」（不指定音轨，服务端按默认音轨起播），
+   * 之后只列 Audio 流 —— 此前把视频流、字幕流也一并列了出来，
+   * 与播放页按 `streamsOfType('Audio')` 取轨的口径不一致。
+   */
   private audioOptions(): SelectOption[] {
-    const options: SelectOption[] = [];
-    for (let i = 0; i < this.mediaStreams.length; i++) {
-      const stream: ESObject = this.mediaStreams[i] as ESObject;
-      const index: number = JsonUtil.getNumber(stream, 'Index', -1);
-      const displayTitle: string = JsonUtil.getString(stream, 'DisplayTitle',
-        JsonUtil.getString(stream, 'Language', ''));
-      options.push({ value: displayTitle.length > 0 ? displayTitle : `Audio ${index}` });
+    const options: SelectOption[] = [{ value: TRACK_UNSELECTED }];
+    const list: Object[] = this.audioStreams();
+    for (let i = 0; i < list.length; i++) {
+      options.push({ value: this.streamOptionValue(list[i] as ESObject, 'Audio') });
     }
     return options;
   }
 
+  /** 「字幕」下拉：第 0 项「未选择」取代原来的「关闭」（两者含义同为不指定字幕轨） */
   private subtitleOptions(): SelectOption[] {
-    const options: SelectOption[] = [{ value: '\u5173\u95ed' }];
-    for (let i = 0; i < this.mediaStreams.length; i++) {
-      const stream: ESObject = this.mediaStreams[i] as ESObject;
-      const index: number = JsonUtil.getNumber(stream, 'Index', -1);
-      const displayTitle: string = JsonUtil.getString(stream, 'DisplayTitle',
-        JsonUtil.getString(stream, 'Language', ''));
-      options.push({ value: displayTitle.length > 0 ? displayTitle : `Subtitle ${index}` });
+    const options: SelectOption[] = [{ value: TRACK_UNSELECTED }];
+    const list: Object[] = this.subtitleStreams();
+    for (let i = 0; i < list.length; i++) {
+      options.push({ value: this.streamOptionValue(list[i] as ESObject, 'Subtitle') });
     }
     return options;
+  }
+
+  /**
+   * 关闭态按钮上的文字。
+   *
+   * 注意：`Select` 的 `.selected(n)` 只决定"选中第几项"，按钮上显示的文本由 `.value()` 给定
+   * （SDK：value "Sets the text display of the select button itself"）。不设 `.value()` 时按钮是空的，
+   * 于是"未选择"这个状态在界面上完全看不出来。
+   */
+  private audioOptionText(): string {
+    const list: Object[] = this.audioStreams();
+    const index: number = this.optionIndexOf(list, this.audioStreamIndex);
+    return index === 0 ? TRACK_UNSELECTED
+                       : this.streamOptionValue(list[index - 1] as ESObject, 'Audio');
+  }
+
+  private subtitleOptionText(): string {
+    const list: Object[] = this.subtitleStreams();
+    const index: number = this.optionIndexOf(list, this.subtitleStreamIndex);
+    return index === 0 ? TRACK_UNSELECTED
+                       : this.streamOptionValue(list[index - 1] as ESObject, 'Subtitle');
   }
 
   /** 构建媒体信息行 */
@@ -708,8 +776,13 @@ struct DetailPage {
       .height(110)
       .scrollBar(BarState.Off)
       .padding({ left: 16, right: 16 })
+      // 横向 List 的宽度默认随内容自适应：演职人员少时整排会缩成内容宽，
+      // 再被外层 Column 的默认居中排到屏幕中间。这里显式占满宽度，
+      // 让第一位始终贴 16vp 左边界（与海报/简介/标题以及货架列表一致）。
+      .width('100%')
     }
     .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   build() {
@@ -895,8 +968,10 @@ struct DetailPage {
                   .padding({ left: 16, bottom: 4 })
                   .width('100%')
                 Row({ space: 12 }) {
-                  // 音频轨选择
+                  // 音频轨选择（未选择 = 不指定音轨，由服务端用默认音轨）
                   Select(this.audioOptions())
+                    .value(this.audioOptionText())
+                    .selected(this.optionIndexOf(this.audioStreams(), this.audioStreamIndex))
                     .backgroundColor(this.colors().surfacePressed)
                     .fontColor(this.colors().textPrimary)
                     .height(40)
@@ -904,10 +979,14 @@ struct DetailPage {
                     .border({ width: 1, color: this.colors().divider, radius: 4 })
                     .padding({ left: 12, right: 12 })
                     .onSelect((index: number, _value: string) => {
-                      this.audioStreamIndex = this.streamIndexAt(index);
+                      this.audioStreamIndex = index === 0
+                        ? -1
+                        : this.streamIndexAt(this.audioStreams(), index - 1);
                     })
-                  // 字幕轨选择
+                  // 字幕轨选择（未选择 = 不指定字幕轨，由服务端决定）
                   Select(this.subtitleOptions())
+                    .value(this.subtitleOptionText())
+                    .selected(this.optionIndexOf(this.subtitleStreams(), this.subtitleStreamIndex))
                     .backgroundColor(this.colors().surfacePressed)
                     .fontColor(this.colors().textPrimary)
                     .height(40)
@@ -915,7 +994,9 @@ struct DetailPage {
                     .border({ width: 1, color: this.colors().divider, radius: 4 })
                     .padding({ left: 12, right: 12 })
                     .onSelect((index: number, _value: string) => {
-                      this.subtitleStreamIndex = index === 0 ? -1 : this.streamIndexAt(index - 1);
+                      this.subtitleStreamIndex = index === 0
+                        ? -1
+                        : this.streamIndexAt(this.subtitleStreams(), index - 1);
                     })
                 }
                 .width('100%')

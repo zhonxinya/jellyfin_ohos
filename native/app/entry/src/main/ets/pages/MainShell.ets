@@ -1,7 +1,7 @@
 import router from '@ohos.router';
 import window from '@ohos.window';
 import common from '@ohos.app.ability.common';
-import { WindowFullscreen } from '../common/WindowFullscreen';
+import { WindowFullscreen, FullscreenResult } from '../common/WindowFullscreen';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { AppIconButton } from '../components/AppIconButton';
@@ -126,20 +126,28 @@ struct MainShell {
   }
 
   /**
-   * 按页签应用窗口外观：**三个页签都整屏沉浸**（隐藏状态栏与导航栏 + 铺满整屏）。
+   * 按页签应用窗口外观。
    *
-   * 为什么非沉浸式页签也要铺满（用户口径："媒体库和设置页没有侵入底部空间，比视频页高"）：
+   * 现状（本轮之后）：
+   * - 「视频」页：**保留系统状态栏**（隐藏导航栏 + 铺满整屏）—— 顶部 131px 让给系统，
+   *   画面与浮层控件都从状态栏下方开始（用户口径："短视频顶部避免侵占系统空间"）；
+   * - 「媒体库」「设置」页：全沉浸（隐藏状态栏与导航栏 + 铺满整屏）。
+   *
+   * 两种模式都隐藏导航栏，底部页签行都贴在屏幕最底边，PR #54/#56 的结论不受影响。
+   *
+   * 为什么非沉浸式页签当初也要铺满（用户口径："媒体库和设置页没有侵入底部空间，比视频页高"）：
    * 应用只能在**自身内容框**内接收点击。非沉浸式窗口的内容框被系统按可见系统栏内缩
    * （模拟器实测底部少 94px），底部页签行因此停在 y=2750，而沉浸式的「视频」页内容铺满整屏、
    * 页签行在 y=2655..2844 —— 同一个页签行在两处差了整整一个系统导航条。
    * 把它"画"下去没用：内容框外的部分**画得出来但点不动**（实测：负下边距把页签行推到
    * y=2656..2844 后，从非沉浸式页签点它的下半部分完全无响应；单独关掉系统导航条也一样）。
    *
-   * 备选方案"铺满但保留状态栏"实测被平台挡住：该模式下平台会把**外壳顶栏压扁**
-   * （190px → 59px，标题只剩 2px、肉眼不可见），`flexShrink(0)` / `constraintSize({minHeight})`
-   * / 插入 0 高度垫片都挡不住；而把状态栏一起隐藏时一切正常。因此统一走沉浸式。
+   * 注意"铺满 + 保留状态栏"这一档**不能用在画了外壳顶栏的页签上**：实测该模式下平台会把外壳顶栏
+   * 压扁（190px → 59px，标题只剩肉眼不可见的 2px），`flexShrink(0)` / `constraintSize({minHeight})`
+   * / 插入 0 高度垫片都挡不住。「视频」页签不画外壳顶栏（见 build 里对 kVideoTabIndex 的判断），
+   * 所以它可以用这一档；「媒体库」「设置」仍走全沉浸。
    *
-   * 沉浸式下顶部不再由系统避让，挖孔（刘海/胶囊）要应用自己躲 —— 见 `kTopInsetKey`。
+   * 沉浸式下顶部不再由系统避让，挖孔（刘海/胶囊）要应用自己躲 —— 见 `kTopInsetKey` 与 `refreshTopInset`。
    *
    * 为什么每次都重新应用、不按"状态没变就跳过"提前返回：播放页 / 详情页会自己进出沉浸式，
    * 它们改的是**同一个窗口**。返回外壳时若按缓存布尔值跳过，窗口就会停在别人留下的状态上。
@@ -153,10 +161,36 @@ struct MainShell {
       this.videoFullscreen = false;
     }
     this.immersiveForVideoTab = wantImmersive;
-    // 三个页签都进沉浸式：内容框铺满整屏，底部页签行才既贴屏幕底边又点得到
-    WindowFullscreen.enter(this.windowRef);
+    // 「视频」页保留系统状态栏（顶部 131px 让给系统，页面内容整体从状态栏下方开始），
+    // 其余页签全沉浸；两种模式都隐藏导航栏，底部页签行都贴屏幕最底边。
+    const win: window.Window | null = this.windowRef;
+    const applied: Promise<FullscreenResult> = wantImmersive
+      ? WindowFullscreen.enterWithStatusBar(win)
+      : WindowFullscreen.enter(win);
+    // 避让必须在系统栏状态**切换完成之后**再算：状态栏让不让出直接决定顶部安全区
+    // （保留状态栏时挖孔就落在状态栏里，页面自己不用再缩）。先算一次是为了栏还没切完时也有值，
+    // 切完再算一次覆盖它 —— 这两次都是幂等的。
+    this.refreshTopInset(win, wantImmersive);
+    applied.then(() => {
+      this.refreshTopInset(win, wantImmersive);
+    }).catch(() => {
+      this.refreshTopInset(win, wantImmersive);
+    });
+  }
+
+  /**
+   * 重算并下发顶部避让。
+   *
+   * @param statusBarKept 该页签是否保留了系统状态栏（「视频」页）。保留时平台已经把状态栏那条
+   *        高度让给系统，挖孔就在状态栏里，页面自己只需补"挖孔比状态栏更高"的那部分差额。
+   */
+  private refreshTopInset(win: window.Window | null, statusBarKept: boolean): void {
     // 系统栏隐藏后仍要避让挖孔：insets 的 visible 判定在 WindowFullscreen 里统一处理
-    this.applyTopInset(WindowFullscreen.insets(this.windowRef, false).top);
+    const cutout: number = WindowFullscreen.insets(win, false).top;
+    this.applyTopInset(cutout);
+    this.videoTopInsetVp = statusBarKept
+      ? Math.max(0, cutout - WindowFullscreen.statusBarTopVp(win))
+      : cutout;
   }
 
   /**

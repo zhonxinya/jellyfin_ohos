@@ -80,6 +80,39 @@ export class WindowFullscreen {
   }
 
   /**
+   * 进入「保留状态栏」的全屏：**只显示系统状态栏**（导航栏仍隐藏）+ 布局铺满整屏。
+   *
+   * 为什么「视频」页用这一档（用户口径："短视频顶部避免侵占系统空间"）：
+   * 全沉浸时应用连窗口安全区一起铺，页面顶部是浮层工具行，它就压在系统状态栏区域里 ——
+   * 模拟器实测：系统状态栏窗口 rect = `[0,0,1260,131]`（顶部 131px = 38.8vp），
+   * 而工具行从屏幕 y=33px 起、标题「短视频」在 y=33..96px，整条都在里面。
+   * 保留状态栏后平台把顶部 131px 让给系统，画面与控件都从状态栏下方开始。
+   *
+   * 导航栏仍然隐藏：底部页签行照旧贴屏幕最底边，PR #54/#56 的结论不受影响
+   * （那条结论只与"窗口内容框底部有没有被系统栏内缩"有关）。
+   */
+  static async enterWithStatusBar(win: window.Window | null): Promise<FullscreenResult> {
+    const result: FullscreenResult = { barsHidden: false, layoutFullscreen: false };
+    if (win === null) {
+      return result;
+    }
+    try {
+      // 只留状态栏：导航栏继续隐藏，底部页签行才不会被系统栏顶上来
+      await win.setWindowSystemBarEnable(['status']);
+      result.barsHidden = true;
+    } catch (_e) {
+      result.barsHidden = false;
+    }
+    try {
+      await win.setWindowLayoutFullScreen(true);
+      result.layoutFullscreen = true;
+    } catch (_e) {
+      result.layoutFullscreen = false;
+    }
+    return result;
+  }
+
+  /**
    * 退出沉浸式全屏：还原系统状态栏与导航栏，并取消沉浸式布局。
    *
    * 不向上抛异常：退出路径上还要释放播放器与软解会话，
@@ -242,6 +275,24 @@ export class WindowFullscreen {
       left: Math.max(0, Math.round(left / density)),
       right: Math.max(0, Math.round(right / density))
     };
+  }
+
+  /**
+   * 系统状态栏自身的高度（vp）；不可用或当前不显示时返回 0。
+   *
+   * 用途：「视频」页**保留状态栏**时，平台已经把这条高度让给系统了，
+   * 页面自己不必再为挖孔内缩（挖孔就落在状态栏里）—— 除去这一份，否则会重复避让。
+   */
+  static statusBarTopVp(win: window.Window | null): number {
+    if (win === null) {
+      return 0;
+    }
+    const area: window.AvoidArea | null =
+      WindowFullscreen.avoidArea(win, window.AvoidAreaType.TYPE_SYSTEM);
+    if (area === null || !area.visible) {
+      return 0;
+    }
+    return Math.max(0, Math.round(area.topRect.height / WindowFullscreen.density()));
   }
 
   /** 读取单个避让区；失败返回 null（该类型在当前窗口上不可用时不能影响其它类型的计算） */

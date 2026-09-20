@@ -245,6 +245,21 @@ export class ShortVideoPrefs {
   }
 
   /**
+   * **强制服务端转码**（不限码率）—— 让服务器解码，客户端只解 H.264/AAC。
+   *
+   * 用途：「自动」档下**直连地址在本机解不了**时的兜底（见 `ShortVideoPage.onItemFailed`）。
+   * 关掉直连与直接串流，服务端只能转码 —— 于是音频（例如直连里解不了的 DTS）与视频
+   * 都会被转成客户端真能解的编码，走**系统硬解**，比本机 FFmpeg 软解省电得多，
+   * 而且软解路径没有音频输出。
+   *
+   * 与档位表里 `forceTranscode` 的档位同形，只是不设码率上限（「自动」档的口径就是不限码率）。
+   */
+  static transcodeOptionsJson(): string {
+    return '{"enableDirectPlay":false,"enableDirectStream":false,'
+      + '"enableTranscoding":true,"includeDeviceProfile":true}';
+  }
+
+  /**
    * **直连**播放参数：只给本机软解（FFmpeg）用。
    *
    * 为什么软解必须强制直连：本工程的 FFmpeg 是 `--disable-network` 构建的
