@@ -177,7 +177,8 @@ export struct ShortVideoPage {
   // 为什么必须页内播放而不是"点一下跳播放页"：短视频的心智是**连续**刷 ——
   // 每条都要退回上一页再点开，动线立刻就断了。这里给「视频」页自己一个
   // XComponent + AVPlayer：滑到哪条就自动播哪条，播完自动下一条，单击暂停/继续。
-  // 硬解不支持的内容在本页用 FFmpeg 软解接着播（见 startSoftPlayback）。
+  // 直连在本机解不了时，先让**服务器解码**（强制转码）再试一次；仍不行才用 FFmpeg 软解接着播
+  // （见 onItemFailed / startSoftPlayback）。
   /** XComponent 控制器：surface 就绪后取 surfaceId 交给 AVPlayer */
   private surfaceController: XComponentController = new XComponentController();
   private surfaceId: string = '';
@@ -198,12 +199,12 @@ export struct ShortVideoPage {
    */
   @State private playMethod: string = '';
   /**
-   * 本条是否已经试过"转码流失败 → 改直连"这一次回退。
+   * 本条是否已经用掉**唯一一次"换条路再试"**的机会（见 `onItemFailed`）。
    *
-   * 服务器转码本身可能失败（例如本机 Jellyfin 的 ffmpeg 拿不稳 AV1 extradata，
-   * 转码任务一启动就退出，分片接口 500）。不给回退的话用户看到的是"永久转圈"。
+   * 为什么只给一次：两条坏路之间来回弹会把"刷"变成"等"，而且用户在失败卡片上看到的是
+   * 反复重试却始终不出画面。一次换路之后仍失败就交给本机软解 / 自动跳过。
    */
-  private transcodeFallbackTried: boolean = false;
+  private retryTried: boolean = false;
   /** 当前播放地址是不是 HLS（`.m3u8`）—— 转码流的判据之一（另一个是 playMethod） */
   private lastUrlWasHls: boolean = false;
   /** 是否已滑到列表末尾且**再也取不到新内容**（末尾给"换一批"，不假装永远刷不完） */
@@ -723,7 +724,7 @@ export struct ShortVideoPage {
    * 播当前这一条：取播放地址 → 建 AVPlayer → 绑 surface → prepare → play。
    *
    * 每一步都可能失败（取流、建播放器、编码不支持…），失败统一走 `onItemFailed`：
-   * **就地软解 → 提示 + 自动跳过**，不让"刷"停下来。
+   * **换条路再试一次 → 就地软解 → 提示 + 自动跳过**，不让"刷"停下来。
    */
   private async playCurrent(): Promise<void> {
     const item: MediaItem | null = this.currentItem();
@@ -738,7 +739,7 @@ export struct ShortVideoPage {
     this.positionMs = 0;
     this.durationMs = 0;
     this.playMethod = '';
-    this.transcodeFallbackTried = false;
+    this.retryTried = false;
     if (item === null) {
       this.preparing = false;
       return;
@@ -945,18 +946,40 @@ export struct ShortVideoPage {
     this.playCurrent();
   }
 
-  /** 条目播放失败：转码流→直连回退 → 就地软解 → 提示 + 自动跳过（见 kAutoSkipMs） */
+  /**
+   * 条目播放失败：**换条路再试一次** → 就地软解 → 提示 + 自动跳过（见 `kAutoSkipMs`）。
+   *
+   * 换哪条路由"刚刚失败的是哪条"决定，且**每条内容只换一次**（`retryTried`）：
+   *
+   * | 刚失败的是 | 换到 | 为什么 |
+   * |---|---|---|
+   * | 服务端转码流 | 直连 | 转码任务本身可能起不来（ffmpeg 崩 / 分片 500），直连往往还能放 |
+   * | 直连且档位是「自动」 | **服务端转码（让服务器解码）** | 直连是本机硬解，解不了就是解不了（典型：容器里带 DTS/TrueHD 音轨，系统解码器不认）；交给服务端转成 H.264/AAC 后走硬解，比本机 FFmpeg 软解省电，而且软解路径**没有音频输出** |
+   * | 直连且档位是「原画直连」 | （不换，直接软解） | 用户明确选了"不请求转码、解不了走本机软解"，不该偷偷改成转码 |
+   */
   private onItemFailed(message: string): void {
     hilog.warn(LOG_DOMAIN, LOG_TAG, 'onItemFailed method=%{public}s msg=%{public}s',
       this.playMethod, message);
-    // ── 服务器转码流失败 → 改直连再试一次 ─────────────────────────────────
-    // 服务端转码本身可能失败（ffmpeg 起不来 / 分片 500），此时换直连往往能放
-    // （本机硬解或软解都行）。只试一次，避免在两条坏路之间来回弹。
-    if (!this.transcodeFallbackTried && this.isTranscodeStream()) {
-      this.transcodeFallbackTried = true;
-      hilog.warn(LOG_DOMAIN, LOG_TAG, '转码流失败，回退直连播放');
-      this.playCurrentDirect();
-      return;
+    if (!this.retryTried) {
+      // ── ① 服务器转码流失败 → 改直连再试一次 ─────────────────────────────
+      // 服务端转码本身可能失败（ffmpeg 起不来 / 分片 500），此时换直连往往能放
+      // （本机硬解或软解都行）。只试一次，避免在两条坏路之间来回弹。
+      if (this.isTranscodeStream()) {
+        this.retryTried = true;
+        hilog.warn(LOG_DOMAIN, LOG_TAG, '转码流失败，回退直连播放');
+        this.playCurrentDirect();
+        return;
+      }
+      // ── ② 直连失败 + 「自动」档 → 让**服务器解码**（强制转码）再试一次 ──
+      // 本机硬解拿不下直连流时（实测：视频是 h264、音轨是 DTS —— 系统解码器不认 DTS），
+      // 「自动」档的意图就是"本机解不了的交给服务端"。这一步排在本机软解**之前**：
+      // 软解吃 CPU/电量、容易掉帧，且本工程的软解路径没有音频输出。
+      if (ShortVideoPrefs.quality().id === 'auto') {
+        this.retryTried = true;
+        hilog.warn(LOG_DOMAIN, LOG_TAG, '直连本机解不了，改由服务端解码（强制转码）再试一次');
+        this.playCurrentServerDecode();
+        return;
+      }
     }
     this.playbackError = message;
     this.preparing = false;
@@ -982,12 +1005,34 @@ export struct ShortVideoPage {
   }
 
   /**
-   * 用**直连参数**重开当前这一条（转码流失败后的回退，也用于软解兜底）。
+   * 用**直连参数**重开当前这一条（转码流失败后的回退）。
    *
    * 与 `playCurrent` 的差别只有播放参数：去掉 DeviceProfile、关掉转码，
    * 让服务端回到 `/Videos/{id}/stream?static=true`。
    */
   private async playCurrentDirect(): Promise<void> {
+    await this.reopenCurrentWith(ShortVideoPrefs.directOptionsJson(), 'DirectPlay');
+  }
+
+  /**
+   * 用**强制服务端转码**参数重开当前这一条（「自动」档下本机解不了直连流时的兜底）。
+   *
+   * 让服务器解码：视频与音频都会被转成客户端真能解的编码（H.264/AAC，走系统硬解）。
+   * 为什么不用「直连 + 只转音频」的省服务器做法：那要求 DeviceProfile 不声明支持该音频编码，
+   * 而当前能力表是按 FFmpeg 解码器列表写的（含 dts/truehd），服务端会认为"你本机能解"
+   * —— 所以这里必须关掉直连/直接串流，逼服务端把音频一起转掉。
+   */
+  private async playCurrentServerDecode(): Promise<void> {
+    await this.reopenCurrentWith(ShortVideoPrefs.transcodeOptionsJson(), 'Transcode');
+  }
+
+  /**
+   * 用指定播放参数重开当前这一条（`playCurrentDirect` / `playCurrentServerDecode` 的共同实现）。
+   *
+   * @param options 交给 `playerOpen` 的播放参数
+   * @param presetMethod 请求返回前的预期播放方式（只用于日志与失败时的判据，返回后会被真实值覆盖）
+   */
+  private async reopenCurrentWith(options: string, presetMethod: string): Promise<void> {
     const item: MediaItem | null = this.currentItem();
     this.cancelAutoSkip();
     this.stopSoftPlayback();
@@ -998,7 +1043,7 @@ export struct ShortVideoPage {
     this.paused = false;
     this.positionMs = 0;
     this.durationMs = 0;
-    this.playMethod = 'DirectPlay';
+    this.playMethod = presetMethod;
     this.lastUrlWasHls = false;
     if (item === null) {
       this.preparing = false;
@@ -1007,7 +1052,7 @@ export struct ShortVideoPage {
     this.preparing = true;
     this.revealChrome(false);
     this.startPrepareWatchdog();
-    const raw: string = await JellyfinNative.playerOpen(item.id, ShortVideoPrefs.directOptionsJson());
+    const raw: string = await JellyfinNative.playerOpen(item.id, options);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.onItemFailed(result.message.length > 0 ? `获取播放地址失败：${result.message}` : '获取播放地址失败');
@@ -1018,6 +1063,9 @@ export struct ShortVideoPage {
     if (method.length > 0) {
       this.playMethod = method;
     }
+    this.lastUrlWasHls = playUrl.includes('.m3u8');
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'reopen method=%{public}s hls=%{public}s',
+      this.playMethod, this.lastUrlWasHls ? '1' : '0');
     if (playUrl.length === 0) {
       this.onItemFailed('服务器没有给出播放地址');
       return;
