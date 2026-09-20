@@ -20,11 +20,24 @@ import { AppIconButton } from '../components/AppIconButton';
 import { PlayerToolButton } from '../components/PlayerToolButton';
 import { EmptyState } from '../components/EmptyState';
 import { PlaybackState } from '../common/PlaybackState';
+import { SubtitleCue, parseSubtitleVtt, subtitleTextAt } from '../common/SubtitleTrack';
 
 /** 控制条自动隐藏延时（毫秒）：给用户留出"看到并点中控件"的时间 */
 const kControlsAutoHideMs: number = 5000;
 /** 双击快进/快退的步长（毫秒）—— 与屏幕上 ±10s 按钮一致，符合主流播放器习惯 */
 const kSkipStepMs: number = 10000;
+
+/**
+ * "字幕已加载但播放器未暴露字幕轨"时的哨兵值（用作 `avSubtitleIndex`）。
+ *
+ * 为什么需要：外挂字幕加载成功后，AVPlayer 未必把它列进 `getTrackDescription()`，
+ * 但会通过 `subtitleUpdate` 事件推送文本由应用渲染 —— 即**字幕是可用的**。
+ * 此时没有真实的轨 index 可记，用这个哨兵表示"已加载、无需 selectTrack"。
+ * 取 -9：`getTrackDescription()` 的 `track_index` 不会是负数（代码里"取不到"用的是 -1/-2），
+ * 负数哨兵还能让既有的 `avSubtitleIndex >= 0` 判断（关轨/换轨前先 deselect）自然跳过，
+ * 无需额外分支。
+ */
+const kSubtitleLoadedNoTrack: number = -9;
 
 /**
  * 底部工具行按钮的最小宽度（vp）。
@@ -381,6 +394,14 @@ struct PlayerPage {
   @State private avSubtitleIndex: number = -1;
   /** 当前字幕文本：外挂字幕由 `subtitleUpdate` 推给应用，需要应用自己渲染 */
   @State private subtitleText: string = '';
+  /**
+   * 应用自绘字幕的时间轴（见 `common/SubtitleTrack.ets`）。
+   *
+   * 为什么要有它：`addSubtitleFromUrl` 在"网络 URL 播放"下是静默空操作
+   * （契约要求视频源经 `fdSrc` 设置），因此字幕不能交给播放器加载 ——
+   * 改由应用取回文本、解析成时间轴，再按播放位置查表渲染。
+   */
+  private subtitleCues: SubtitleCue[] = [];
   /** 轨道面板内的提示（切换结果、失败原因、软解模式限制等） */
   @State private trackNote: string = '';
   /** 当前 MediaSourceId（Jellyfin 字幕端点需要它） */
@@ -2031,26 +2052,53 @@ struct PlayerPage {
    * 加载并显示某条 Jellyfin 字幕流。
    *
    * 两条路：
-   * 1）**内嵌字幕（首选）**：文件里就有这条字幕轨（AVPlayer 的轨道列表里有 type=2 的轨），
-   *    直接 `selectTrack`，不联网、不中断播放 —— 设备实测这样就够用。
-   * 2）**外挂字幕（兜底）**：字幕是独立文件（Jellyfin 的 External 字幕），
-   *    先用原生构造的字幕地址 `addSubtitleFromUrl` 加进来，再 selectTrack。
+   * 1）**内嵌字幕（首选）**：文件里就有这条字幕轨，且播放器把它暴露在
+   *    `getTrackDescription()` 里 → 直接 `selectTrack`，不联网、不中断播放。
+   * 2）**应用自绘（主路径，见下）**：其余情况一律走这里。
+   *
+   * 为什么第 2 条是"应用自己取文本"而不是 `addSubtitleFromUrl`（**根因修复**）：
+   * HarmonyOS 的 `addSubtitleFromUrl()` 官方契约要求视频源经 **`fdSrc`** 设置
+   * （SDK 文档原话："the external subtitle must be set after fdSrc of the video resource is set"），
+   * 而本工程播放走 `avPlayer.url = <网络地址>` —— 该调用于是变成**静默空操作**：
+   * Promise 正常 resolve（所以上层误以为"字幕已加载"），但播放器**根本不去取字幕**
+   * （服务端日志可证：客户端从未发出字幕请求），也不触发 `subtitleUpdate`，
+   * 画面上永远没有字幕。`setMediaSource` 也解决不了：`MediaSource` 只有
+   * `setMimeType` / `enableOfflineCache` / `setMediaResourceLoaderDelegate`，**没有字幕字段**。
+   *
+   * 因此改为：应用自己取字幕文本 → `parseSubtitleVtt` 解析时间轴 → 按播放位置渲染
+   * （播放页本就有 `subtitleText` 的自绘路径，原生 SURFACE 上也画不了文本）。
    */
   private async applySubtitleStream(streamIndex: number, codec: string): Promise<void> {
     if (this.avPlayer === null) {
       this.trackNote = '播放器未就绪，无法切换字幕';
       return;
     }
-    // 1）内嵌字幕：按序号映射到播放器的字幕轨
+    // 1）内嵌字幕：只有播放器**确实暴露**了这条轨时才走（否则 selectTrack 必然失败）
     const ordinal: number = this.jfSubtitleOrdinalOf(streamIndex);
     if (this.avSubtitleTracks.length > 0 && ordinal >= 0
       && ordinal < this.avSubtitleTracks.length) {
       const avIdx: number = JsonUtil.getNumber(this.avSubtitleTracks[ordinal] as ESObject, 'idx', -1);
+      if (avIdx >= 0) {
+        await this.selectSubtitleTrack(avIdx, streamIndex);
+        return;
+      }
+    }
+    // 2）应用自绘：取文本 → 解析 → 交给渲染
+    await this.loadSubtitleByFetch(streamIndex, codec);
+  }
 
-      await this.selectSubtitleTrack(avIdx, streamIndex);
+  /**
+   * 取回字幕文本并解析成时间轴（应用自绘路径）。
+   *
+   * 为什么由应用取文本而不是交给播放器：见 `applySubtitleStream` 的说明 ——
+   * `addSubtitleFromUrl` 在本工程（网络 URL 播放）下是静默空操作。
+   */
+  private async loadSubtitleByFetch(streamIndex: number, codec: string): Promise<void> {
+    if (isImageSubtitleCodec(codec)) {
+      // 图形字幕是位图，本机没有 OCR/位图叠加能力，如实说明而不是让用户等一个不会来的字幕
+      this.trackNote = '图形字幕（PGS/VOBSUB）本机暂不支持';
       return;
     }
-    // 2）外挂字幕
     const raw: string = JellyfinNative.subtitleUrl(this.itemId, this.mediaSourceId, streamIndex, codec);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
@@ -2058,42 +2106,46 @@ struct PlayerPage {
       return;
     }
     const url: string = JsonUtil.getString(result.data as ESObject, 'url', '');
-    const format: string = JsonUtil.getString(result.data as ESObject, 'format', '');
     if (url.length === 0) {
       this.trackNote = '字幕地址为空';
       return;
     }
-    try {
-      const before: number[] = await this.subtitleTrackIndexes();
-
-      await this.avPlayer.addSubtitleFromUrl(url);
-
-      const after: number[] = await this.subtitleTrackIndexes();
-      let target: number = -1;
-      for (let i = 0; i < after.length; i++) {
-        let known: boolean = false;
-        for (let j = 0; j < before.length; j++) {
-          if (before[j] === after[i]) {
-            known = true;
-          }
-        }
-        if (!known) {
-          target = after[i];
-        }
-      }
-      if (target < 0 && after.length > 0) {
-        target = after[after.length - 1];
-      }
-      if (target < 0) {
-        this.trackNote = '字幕已加载，但播放器未暴露该字幕轨';
-
-        return;
-      }
-      await this.selectSubtitleTrack(target, streamIndex);
-    } catch (err) {
-      this.trackNote = `切换字幕失败：${(err as Error).message}`;
-
+    this.trackNote = '正在加载字幕…';
+    const fetched: NativeResult =
+      JellyfinNative.parseResult(await JellyfinNative.fetchSubtitleText(url));
+    if (!fetched.ok || fetched.data === null) {
+      this.trackNote = fetched.message.length > 0
+        ? `字幕加载失败：${fetched.message}` : '字幕加载失败';
+      return;
     }
+    const text: string = JsonUtil.getString(fetched.data as ESObject, 'text', '');
+    if (text.length === 0) {
+      this.trackNote = '字幕文件是空的';
+      return;
+    }
+    const cues: SubtitleCue[] = parseSubtitleVtt(text);
+    if (cues.length === 0) {
+      this.trackNote = '字幕解析失败（无可显示内容）';
+      return;
+    }
+    // 应用自绘路径与播放器轨互斥：先关掉可能选中的播放器字幕轨，避免两套字幕叠加
+    if (this.avPlayer !== null && this.avSubtitleIndex >= 0) {
+      try {
+        await this.avPlayer.deselectTrack(this.avSubtitleIndex);
+      } catch (_e) {
+        // 关不掉也不影响自绘（播放器本来就没真加载成功）
+      }
+    }
+    this.subtitleCues = cues;
+    this.avSubtitleIndex = kSubtitleLoadedNoTrack;
+    this.subtitleStreamIndex = streamIndex;
+    this.subtitleText = subtitleTextAt(cues, this.positionMs);
+    this.persistTrackOptions();
+    this.trackNote = `字幕已加载（${cues.length} 条）`;
+    // 留痕：字幕条数是"解析是否正常"的唯一直接证据（设备上无法用读屏观察播放画面）。
+    // 实测踩过：界面显示"字幕已加载"但画面上没字幕，此时只有条数能区分
+    // "解析出 0 条"与"那一刻恰好无字幕"。
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'subtitle loaded cues=%{public}d', cues.length);
   }
 
   /** 选中某条播放器字幕轨（先关掉上一条，避免多轨叠加） */
@@ -2134,6 +2186,8 @@ struct PlayerPage {
     this.avSubtitleIndex = -1;
     this.subtitleStreamIndex = -1;
     this.subtitleText = '';
+    // 清掉自绘时间轴：否则下一帧 `syncDrawnSubtitle` 又会把字幕贴回来
+    this.subtitleCues = [];
     this.persistTrackOptions();
     this.trackNote = '字幕已关闭';
   }
@@ -2334,8 +2388,12 @@ struct PlayerPage {
       }
 
       this.TrackSectionTitle('字幕')
-      this.TrackRow('关闭字幕',
-        this.avSubtitleIndex < 0 && this.subtitleStreamIndex < 0, 'suboff', -1)
+      // 「关闭字幕」的选中态只看 Jellyfin 侧的字幕流索引。
+      //
+      // 为什么不带 `avSubtitleIndex < 0`：外挂字幕加载成功后播放器未必暴露字幕轨，
+      // 此时 `avSubtitleIndex` 是哨兵 `kSubtitleLoadedNoTrack`（负数）——
+      // 若把它也算作"关着"，用户选完字幕会看到「关闭字幕」与所选字幕**同时打勾**。
+      this.TrackRow('关闭字幕', this.subtitleStreamIndex < 0, 'suboff', -1)
       ForEach(this.streamsOfType('Subtitle'), (item: Object) => {
         this.TrackRow(this.subtitleLabel(item as ESObject),
           this.subtitleStreamIndex === JsonUtil.getNumber(item as ESObject, 'Index', -2),
@@ -2846,6 +2904,42 @@ struct PlayerPage {
     }
   }
 
+  /**
+   * 从 `playerOpen` 返回的 `playbackInfo` 里补齐**媒体流列表**（音轨/字幕轨）。
+   *
+   * 为什么必须在这里补（设备实测的真实缺陷）：音轨/字幕面板的数据源是 `mediaStreams`，
+   * 而它此前**只由宿主页面传参**（`DetailPage.playItem` 的 `mediaStreams` 参数）。
+   * 页面从其它入口进来时这个参数是空的：
+   *   - 「继续观看」直接进播放页（`ContinueWatchingPage.continuePlay`）；
+   *   - 首页/播放列表/条目菜单的播放动作；
+   *   - 短视频页的「去播放页」。
+   * 于是面板里只剩「关闭字幕」+ 一句「**该视频没有字幕**」——**字幕完全无法使用**
+   * （即使文件里明明有字幕轨）。实测：同一部片从详情页进 = 2 条 ASS 字幕可选，
+   * 从「继续观看」进 = 「该视频没有字幕」。
+   *
+   * 修法：`playerOpen` 的返回里本来就带 `playbackInfo`，其中的
+   * `MediaSources[0].MediaStreams` 与服务端判定播放方式时用的是同一份数据，
+   * 因此**永远存在且准确**（含 `Index`/`Codec`/`Language`/`DisplayTitle` 等面板需要的字段）。
+   *
+   * 只在宿主没传或传空时才覆盖：详情页传的那份是"当前条目"的流，
+   * 而本次播放的可能是**另一集**（剧集），播放器自己解析出来的这份更贴近实际播放的内容。
+   * 两者都有值时以 `playbackInfo` 为准。
+   */
+  private applyMediaStreamsFromPlaybackInfo(data: ESObject | null): void {
+    const info: ESObject | null = JsonUtil.getObject(data, 'playbackInfo');
+    if (info === null) {
+      return;
+    }
+    const sources: Object[] = JsonUtil.getArray(info, 'MediaSources');
+    if (sources.length === 0) {
+      return;
+    }
+    const streams: Object[] = JsonUtil.getArray(sources[0] as ESObject, 'MediaStreams');
+    if (streams.length > 0) {
+      this.mediaStreams = streams;
+    }
+  }
+
   private async openPlayer(): Promise<void> {
     this.status = UiState.LOADING;
     // 用 **itemId** 作为 `playerOpen` 的目标，而不是"已拿到的 playUrl"。
@@ -2883,6 +2977,9 @@ struct PlayerPage {
     this.playUrl = resolvedUrl;
     // 视频位深：用于挡住"把 10-bit 交给系统硬解"这条会花屏的路（见下面的守卫）
     this.applyVideoBitDepth(result.data);
+    // 媒体流列表：字幕/音轨面板的数据源。宿主没传（或本次播的是另一集）时用播放器解析出来的
+    // 这一份 —— 否则面板会显示"该视频没有字幕"，字幕功能整个不可用（见方法注释）。
+    this.applyMediaStreamsFromPlaybackInfo(result.data);
 
     // ── 客户端侧兜底：10-bit 源绝不能交给系统硬解 ──────────────────────────
     //
@@ -3194,12 +3291,32 @@ struct PlayerPage {
       // 软解路径的进度来自解码帧的时间戳（见 pullSoftFrame），
       // 此前这里只读 avPlayer（软解时它已停掉），于是**软解播放时进度条一直不走**。
       this.positionMs = this.softPositionMs;
+      this.syncDrawnSubtitle();
       return;
     }
     if (this.avPlayer !== null) {
       this.positionMs = this.avPlayer.currentTime;
       this.durationMs = this.avPlayer.duration;
       this.isPlaying = this.avPlayer.state === 'playing';
+    }
+    this.syncDrawnSubtitle();
+  }
+
+  /**
+   * 按当前播放位置刷新**应用自绘**的字幕文本。
+   *
+   * 为什么必须由进度驱动（而不是等播放器推）：`addSubtitleFromUrl` 在本工程
+   * （网络 URL 播放）下是静默空操作，`subtitleUpdate` 事件永远不会来 ——
+   * 字幕文本只能由我们自己按位置查表。
+   * 没有字幕时不写状态（避免每秒触发一次无意义的 UI 更新）。
+   */
+  private syncDrawnSubtitle(): void {
+    if (this.subtitleCues.length === 0) {
+      return;
+    }
+    const next: string = subtitleTextAt(this.subtitleCues, this.positionMs);
+    if (next !== this.subtitleText) {
+      this.subtitleText = next;
     }
   }
 

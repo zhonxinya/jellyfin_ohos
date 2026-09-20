@@ -719,6 +719,21 @@ export class JellyfinNative {
     }
   }
 
+  /**
+   * 取字幕文本（应用侧自行解析并渲染）。返回 JSON：{ ok, data: { text } }
+   *
+   * 为什么不用播放器的 `addSubtitleFromUrl`：该 API 的契约要求视频源经 `fdSrc` 设置，
+   * 而本工程用 `avPlayer.url`（网络地址）—— 调用会静默成功但**永不取流**
+   * （服务端日志可证），字幕因此一直不显示。详见 `common/SubtitleTrack.ets`。
+   */
+  static fetchSubtitleText(url: string): string {
+    try {
+      return jellyfinNative.fetchSubtitleText(url);
+    } catch (error) {
+      return JellyfinNative.fail('fetchSubtitleText', error);
+    }
+  }
+
   static setImageCacheDir(dir: string): string {
     try {
       return jellyfinNative.setImageCacheDir(dir);

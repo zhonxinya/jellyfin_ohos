@@ -175,6 +175,15 @@ declare module 'libjellyfin_native.so' {
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;
     /** 构造外挂字幕地址（播放中切换字幕）：返回 JSON { ok, data: { url, format, codec, imageSubtitle } } */
     subtitleUrl(itemId: string, mediaSourceId: string, streamIndex: number, codec: string): string;
+    /**
+     * 取字幕文本：返回 JSON { ok, data: { text } }。
+     *
+     * 为什么要它：HarmonyOS 的 `AVPlayer.addSubtitleFromUrl()` 要求视频源经 **fdSrc** 设置，
+     * 而本工程用 `avPlayer.url`（网络地址）—— 该调用因此是静默空操作（不报错、也不取流）。
+     * 字幕改由应用自己取回文本、解析时间轴并按播放位置渲染。
+     * 仅接受**当前 Jellyfin 服务器**下的地址（原生侧同源校验）。
+     */
+    fetchSubtitleText(url: string): string;
     setImageCacheDir(dir: string): string;
     setCaBundlePath(path: string): string;
     hasCaBundle(): string;
