@@ -15,7 +15,7 @@ import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
-import { ShortVideoPrefs, kShortVideoBatchSize } from '../common/ShortVideoPrefs';
+import { ShortVideoPrefs, kShortVideoBatchSize, kShortVideoSamplePoolSize } from '../common/ShortVideoPrefs';
 import { formatSeconds, stripMarkup } from '../common/format';
 import { JellyfinImage } from '../components/JellyfinImage';
 import { LoadingState } from '../components/LoadingState';
@@ -579,6 +579,11 @@ export struct ShortVideoPage {
     query.includeItemTypes = 'Movie,Episode,Video,MusicVideo';
     query.sortBy = 'Random';
     query.recursive = true;
+    // 本地随机抽样：不让服务端执行 SortBy=Random。
+    // 服务端 `RandomComparer` 的比较器不自洽（每次比较都返回随机结果），会随机抛 400 ——
+    // 一次取不到就会走 `batchError`，用户看到"短视频取不到内容"。
+    // 详见 `ItemsQueryOptions.randomSamplePoolSize`。
+    query.randomSamplePoolSize = kShortVideoSamplePoolSize;
     // 元信息按"卡片上真的要显示什么"取：简介、年份、时长、分级、类型、系列名。
     // 多要字段会让响应变大，少要则卡片上只能是空白（例如没有分级就只能不画那个徽标）。
     query.fields = 'Overview,PrimaryImageAspectRatio,RunTimeTicks,ProductionYear,'

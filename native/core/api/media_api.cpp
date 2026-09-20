@@ -2,14 +2,46 @@
 
 #include "url_util.h"
 
+#include <algorithm>
+#include <random>
 #include <sstream>
 
 namespace jellyfin {
 namespace api {
 
+namespace {
+
+/**
+ * 把服务端返回的 `Items` 数组就地随机抽样成 `limit` 条。
+ *
+ * 用法：见 `queryItems()` 里 `randomSamplePoolSize` 的分支。
+ * 抽不出来（池子比 limit 还小）时原样返回 —— 少几条也比"整块消失"好。
+ */
+void ShuffleAndTruncate(nlohmann::json &data, int limit)
+{
+    if (!data.is_object() || !data.contains("Items") || !data["Items"].is_array()) {
+        return;
+    }
+    auto &items = data["Items"];
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::shuffle(items.begin(), items.end(), gen);
+    if (limit > 0 && static_cast<int>(items.size()) > limit) {
+        items.erase(items.begin() + limit, items.end());
+    }
+}
+
+} // namespace
+
 ApiResult queryItems(JellyfinApiClient &client, const std::string &userId, const ItemsQuery &query)
 {
-    return client.getJson(BuildItemsQueryPath(userId, query));
+    auto result = client.getJson(BuildItemsQueryPath(userId, query));
+    // 本地随机抽样：服务端已按稳定排序返回了候选池（Limit 由 BuildItemsQueryPath
+    // 换成了 randomSamplePoolSize），这里再随机挑出调用方要的条数。
+    if (UsesLocalRandomSample(query) && result.ok()) {
+        ShuffleAndTruncate(result.data, query.limit);
+    }
+    return result;
 }
 
 ApiResult getItems(JellyfinApiClient &client, const std::string &userId, const std::string &parentId,

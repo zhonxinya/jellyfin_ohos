@@ -235,9 +235,62 @@ void TestSortAndPaging()
     ExpectContains(path, "EnableTotalRecordCount=false", "可关闭总数统计");
 }
 
-void TestFieldsOverride()
+/**
+ * `SortBy=Random` 的绕行：不能让 `Random` 进 query string。
+ *
+ * 背景（设备实测 + 服务端源码）：Jellyfin 10.8 的 `RandomComparer.Compare()` 是
+ * `Guid.NewGuid().CompareTo(Guid.NewGuid())` —— 同一个元素跟自己比较都可能不相等，
+ * 属于**不自洽的比较器**。.NET 的 `ArraySortHelper` 发现后会抛
+ * `ArgumentException: Unable to sort because the IComparer.Compare() method returns
+ * inconsistent results`，服务端把它变成 **HTTP 400**。实测约 8% 的请求命中，
+ * 首页推荐因此"偶尔整个消失"。
+ *
+ * 这里断言的是"退路"：只要 `randomSamplePoolSize > 0`，请求里就**绝不能**出现
+ * `SortBy=Random`，而是换成稳定排序（本地再抽样）。
+ */
+void TestRandomSortAvoidedWhenLocalSampling()
 {
-    std::printf("自定义 Fields / 自定义 userId 转义\n");
+    std::printf("Random 排序：本地抽样时不下发给服务端\n");
+
+    jellyfin::api::ItemsQuery sampled = BaseQuery();
+    sampled.sortBy = "Random";
+    sampled.limit = 6;
+    sampled.randomSamplePoolSize = 60;
+    const std::string sampledPath = jellyfin::api::BuildItemsQueryPath("u", sampled);
+    ExpectTrue(sampledPath.find("Random") == std::string::npos,
+               "本地抽样时 query 里不含 Random（服务端比较器不自洽会抛 400）");
+    ExpectParam(sampledPath, "SortBy", "SortName", "改用稳定排序取候选池");
+    ExpectParam(sampledPath, "Limit", "60",
+                "Limit 换成抽样池大小（抽样后才是调用方要的 6 条）");
+    ExpectTrue(jellyfin::api::UsesLocalRandomSample(sampled),
+               "UsesLocalRandomSample 与 BuildItemsQueryPath 判断一致（走抽样）");
+
+    // 关闭本地抽样时保持原行为（显式传 Random 的调用方自己负责）
+    jellyfin::api::ItemsQuery native = BaseQuery();
+    native.sortBy = "Random";
+    native.limit = 6;
+    native.randomSamplePoolSize = 0;
+    const std::string nativePath = jellyfin::api::BuildItemsQueryPath("u", native);
+    ExpectParam(nativePath, "SortBy", "Random", "未启用本地抽样时仍可按要求下发给服务端");
+    ExpectParam(nativePath, "Limit", "6", "未启用本地抽样时 Limit 就是调用方要的条数");
+    ExpectTrue(!jellyfin::api::UsesLocalRandomSample(native), "未启用本地抽样时不走抽样分支");
+
+    // 非 Random 排序不受影响，且仍带排序方向
+    jellyfin::api::ItemsQuery normal = BaseQuery();
+    normal.sortBy = "SortName";
+    normal.sortOrder = "Descending";
+    normal.limit = 6;
+    normal.randomSamplePoolSize = 60;
+    const std::string normalPath = jellyfin::api::BuildItemsQueryPath("u", normal);
+    ExpectParam(normalPath, "SortBy", "SortName", "普通排序不受本地抽样影响");
+    ExpectContains(normalPath, "SortOrder=Descending", "普通排序仍带排序方向");
+    ExpectParam(normalPath, "Limit", "6", "普通排序的 Limit 不被抽样池改写");
+    ExpectTrue(!jellyfin::api::UsesLocalRandomSample(normal),
+               "排序里没有 Random 时即使开了池子也不抽样");
+}
+
+void TestFieldsOverride()
+{    std::printf("自定义 Fields / 自定义 userId 转义\n");
     jellyfin::api::ItemsQuery query = BaseQuery();
     query.fields = "UserData,Overview";
     query.enableUserData = false;
@@ -262,6 +315,7 @@ int main()
     TestFacetFilters();
     TestBooleanSwitches();
     TestSortAndPaging();
+    TestRandomSortAvoidedWhenLocalSampling();
     TestFieldsOverride();
     if (g_failures != 0) {
         std::printf("== 失败 %d 项 ==\n", g_failures);

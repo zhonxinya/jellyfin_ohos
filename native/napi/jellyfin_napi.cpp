@@ -322,6 +322,10 @@ jellyfin::api::ItemsQuery ParseItemsQueryJson(const nlohmann::json &j)
     query.is4k = j.value("is4k", false);
     query.hasSubtitles = j.value("hasSubtitles", false);
     query.enableTotalRecordCount = j.value("enableTotalRecordCount", true);
+    // 本地随机抽样池（0 = 关闭，走服务端原生 Random 排序）。
+    // 为什么由客户端抽样：服务端 RandomComparer 的比较器不自洽，会随机抛 400
+    // （见 `ItemsQuery::randomSamplePoolSize` 的说明）。
+    query.randomSamplePoolSize = j.value("randomSamplePoolSize", 0);
     return query;
 }
 
