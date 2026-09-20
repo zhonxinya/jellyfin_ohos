@@ -181,28 +181,27 @@ struct MainShell {
   /**
    * 重算并下发顶部避让。
    *
-   * @param statusBarKept 该页签是否保留了系统状态栏（「视频」页）。保留时平台已经把状态栏那条
-   *        高度让给系统，挖孔就在状态栏里，页面自己只需补"挖孔比状态栏更高"的那部分差额。
+   * @param statusBarKept 该页签是否保留了系统状态栏（「视频」页）。
+   *
+   * 两个值分开用，**不能混**（设备实测的坑，见下）：
+   *  - `cutout`：挖孔高度。沉浸式（系统栏已隐藏）的页签要避让它，否则内容被刘海/胶囊压住；
+   *  - `statusBarVp`：**整条系统状态栏**的高度。保留状态栏的页签（「视频」页）要避让它。
+   *
+   * 为什么「视频」页要避让整条状态栏、而不是"挖孔减去状态栏"：
+   * 本窗口是 `setWindowLayoutFullScreen(true)`，页面从 **y=0 全屏绘制** ——
+   * `dumpLayout` 报的 root `y=132` 只是系统的内容框元数据，**不是绘制原点**。
+   * 设备实测（1260×2844，density 3.375；状态栏 rect=[0,0,1260,131]）：
+   * 工具行 `padding.top=10vp(34px)` 实际画在 y≈40，与系统时钟/电量（y=25..106）**重叠**；
+   * 补偿整条状态栏（39vp）后，工具行落在 y≈165 —— 已在状态栏之下。
+   * 挖孔就在状态栏那条里，因此保留状态栏时无需再叠加 `cutout`。
    */
   private refreshTopInset(win: window.Window | null, statusBarKept: boolean): void {
     // 系统栏隐藏后仍要避让挖孔：insets 的 visible 判定在 WindowFullscreen 里统一处理
     const cutout: number = WindowFullscreen.insets(win, false).top;
-    this.applyTopInset(cutout);
-    this.videoTopInsetVp = statusBarKept
-      ? Math.max(0, cutout - WindowFullscreen.statusBarTopVp(win))
-      : cutout;
-  }
-
-  /**
-   * 下发"挖孔要避让多少"：外壳顶栏与压栈页面的顶栏都按它内缩。
-   *
-   * 为什么走 `AppStorage` 而不是只放 `@State`：`AppTopBar` / `PageHeader` 是外壳与几十个
-   * 压栈页面共用的顶栏组件，各自异步取窗口既啰嗦、也可能拿到不同窗口实例。
-   * 键在 `aboutToAppear` 里**先建出来**（`@StorageProp` 只在键已存在时才会收到后续更新）。
-   */
-  private applyTopInset(vp: number): void {
-    AppStorage.setOrCreate(kTopInsetKey, vp);
-    this.videoTopInsetVp = vp;
+    // 压栈页面（详情/播放/设置…）与外壳顶栏都按挖孔内缩
+    AppStorage.setOrCreate(kTopInsetKey, cutout);
+    // 「视频」页的工具行是压在画面上的浮层，另行按整条状态栏内缩
+    this.videoTopInsetVp = statusBarKept ? WindowFullscreen.statusBarTopVp(win) : cutout;
   }
 
   private colors(): ThemeColors {
