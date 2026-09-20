@@ -1,4 +1,5 @@
 import router from '@ohos.router';
+import hilog from '@ohos.hilog';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
@@ -7,6 +8,9 @@ import { MediaItem } from '../models/MediaItem';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import display from '@ohos.display';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
+
+const HERO_DOMAIN: number = 0x0000;
+const HERO_TAG: string = 'JellyfinHero';
 
 /**
  * HeroBanner —— 首页顶部推荐横幅。
@@ -181,11 +185,13 @@ export struct HeroBannerLoader {
   onBannerTap: () => void = () => {};
 
   /**
-   * 推荐条目。
+   * 展示几条推荐。
    *
    * 为什么是 6 条而不是 1 条：需求要"滑动切换推荐作品"，至少得够滑几下；
    * 也不宜太多 —— 每条背景图都要下载，而这是首页首屏最贵的一批图。
    */
+  private static readonly SLIDE_COUNT: number = 6;
+
   @State private items: MediaItem[] = [];
   @State private status: string = UiState.LOADING;
   @State private errorMsg: string = '';
@@ -198,18 +204,43 @@ export struct HeroBannerLoader {
     this.status = UiState.LOADING;
     const query: ItemsQueryOptions = new ItemsQueryOptions();
     query.includeItemTypes = 'Movie,Series';
-    query.limit = 6;
+    query.limit = HeroBannerLoader.SLIDE_COUNT;
     query.sortBy = 'Random';
     query.fields = 'Overview,CommunityRating,RunTimeTicks,ProductionYear,Genres,BackdropImageTags';
+    // 本地随机抽样：不让服务端执行 SortBy=Random。
+    // 原因见 `ItemsQueryOptions.randomSamplePoolSize` —— 服务端那个比较器不自洽，
+    // 会随机抛 400，表现就是"首页推荐偶尔整个消失"。
+    query.randomSamplePoolSize = 60;
     const raw: string = await JellyfinNative.queryItems(query.toJson());
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok) {
-      this.status = UiState.ERROR;
-      this.errorMsg = result.message.length > 0 ? result.message : '加载失败';
+      // 走到这里已经是异常路径（没了服务端 Random 排序，理论上不该再有 400）。
+      // 仍然保留一次同参数重试：网络抖动、服务端重启之类的瞬时失败也能自愈，
+      // 不必等用户下拉刷新 —— 推荐位消失一整轮是很显眼的回归。
+      const retryRaw: string = await JellyfinNative.queryItems(query.toJson());
+      const retry: NativeResult = JellyfinNative.parseResult(retryRaw);
+      if (!retry.ok) {
+        hilog.warn(HERO_DOMAIN, HERO_TAG,
+          'loadBanner failed twice: code=%{public}d msg=%{public}s', retry.code, retry.message);
+        this.status = UiState.ERROR;
+        this.errorMsg = retry.message.length > 0 ? retry.message : '加载失败';
+        return;
+      }
+      this.applyItems(retry);
       return;
     }
+    this.applyItems(result);
+  }
+
+  /**
+   * 把查询结果落成横幅数据。
+   *
+   * 只保留**有横图（Backdrop）**的条目 —— 否则滑到那一条是纯色块，观感很差。
+   * 注意：本地抽样池（60 条）里可能含少量无横图条目，抽样后剩几条就展示几条，
+   * 不再回补 —— 回补需要再发请求，而"少一条"远好过"多一次网络往返"。
+   */
+  private applyItems(result: NativeResult): void {
     const rawItems: Object[] = JsonUtil.extractItems(result.data);
-    // 横幅用的是横图（Backdrop）：没有横图的条目跳过 —— 否则滑到那一条是纯色块，观感很差
     const keep: MediaItem[] = [];
     for (let i = 0; i < rawItems.length; i++) {
       const item: MediaItem = MediaItem.fromJson(rawItems[i]);
@@ -218,6 +249,8 @@ export struct HeroBannerLoader {
       }
     }
     if (keep.length === 0) {
+      hilog.warn(HERO_DOMAIN, HERO_TAG, 'no items with backdrop in %{public}d candidates',
+        rawItems.length);
       this.items = [];
       this.status = UiState.ERROR;
       this.errorMsg = '暂无推荐内容';

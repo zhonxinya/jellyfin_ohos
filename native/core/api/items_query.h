@@ -58,7 +58,41 @@ struct ItemsQuery {
      * 为什么需要：界面要显示"共 N 项"，而 N 必须是**库里的总数**而不是"已加载条数"。
      */
     bool enableTotalRecordCount = true;
+    /**
+     * **本地**随机抽样池大小；0 表示关闭（走服务端原生排序）。
+     *
+     * 为什么需要它（这是一个**服务端缺陷的绕行**）：
+     * `SortBy=Random` 会让 Jellyfin 10.8 的 `RandomComparer.Compare()` 每次比较都返回
+     * `Guid.NewGuid().CompareTo(Guid.NewGuid())` —— 同一个元素与自己比较的结果都不同，
+     * 是个**不自洽的比较器**。.NET 的 `ArraySortHelper` 检测到这种比较器会抛
+     * `ArgumentException: Unable to sort because the IComparer.Compare() method returns
+     * inconsistent results`，Kestrel 把它变成 **HTTP 400**（实测约 8% 的请求命中，
+     * 响应体为空）—— 客户端侧表现为"首页推荐偶尔整个消失"。
+     *
+     * 服务端源码见 `docs/jellyfin-10.8.12/Emby.Server.Implementations/Sorting/RandomComparer.cs`。
+     *
+     * 改为本地抽样：用稳定排序（如 `SortName`）取一批候选，再在客户端随机选 `limit` 条。
+     * 这样既拿到随机效果，又完全不碰服务端那个坏比较器 —— 对**任何** Jellyfin 版本都成立。
+     * 见 `items_query.cpp` 的 `BuildItemsQueryPath()`。
+     */
+    int randomSamplePoolSize = 0;
 };
+
+/**
+ * 本次查询是否走"本地随机抽样"路径。
+ *
+ * 两个条件缺一不可：调用方**要求**本地抽样（`randomSamplePoolSize > 0`），
+ * 且排序里确实含 `Random`（否则没有随机的必要，按普通排序走即可）。
+ *
+ * 抽成函数是因为 `BuildItemsQueryPath()`（拼 URL）与 `queryItems()`（真正抽样）
+ * 必须对"走不走这条路"给出**一致**的判断 —— 一边按抽样改 Limit、另一边没改，
+ * 或者一边不下发 Random、另一边却去抽样，都会得到错误的结果集。
+ */
+inline bool UsesLocalRandomSample(const ItemsQuery &query)
+{
+    return query.randomSamplePoolSize > 0 &&
+           query.sortBy.find("Random") != std::string::npos;
+}
 
 /**
  * 构造 `/Users/{userId}/Items` 查询路径（纯函数）。

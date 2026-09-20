@@ -45,6 +45,19 @@ export class ItemsQueryOptions {
   hasSubtitles: boolean = false;
   /** 请求总数（`EnableTotalRecordCount`）：界面要显示"共 N 项"而不是"已加载 N 项" */
   enableTotalRecordCount: boolean = true;
+  /**
+   * **本地**随机抽样池大小；0 表示关闭（`sortBy = 'Random'` 时交给服务端排序）。
+   *
+   * 为什么需要它：Jellyfin 10.8 的 `SortBy=Random` 用一个**不自洽的比较器**
+   * （`Guid.NewGuid().CompareTo(Guid.NewGuid())`，每次比较结果都不同），
+   * .NET 排序检测到后会抛 `ArgumentException` → 服务端返回 **HTTP 400**（实测约 8% 命中）。
+   * 首页推荐因此"偶尔整个消失"。
+   *
+   * 置为 >0 后：请求改用稳定排序取回 N 条候选，再由原生侧（`media_api.cpp`）
+   * 本地随机抽样出 `limit` 条 —— 随机效果不变，但**不再触碰服务端那个坏比较器**，
+   * 对任何 Jellyfin 版本都成立。
+   */
+  randomSamplePoolSize: number = 0;
 
   toJson(): string {
     const obj: Record<string, Object> = {
@@ -73,7 +86,8 @@ export class ItemsQueryOptions {
       'isHd': this.isHd,
       'is4k': this.is4k,
       'hasSubtitles': this.hasSubtitles,
-      'enableTotalRecordCount': this.enableTotalRecordCount
+      'enableTotalRecordCount': this.enableTotalRecordCount,
+      'randomSamplePoolSize': this.randomSamplePoolSize
     };
     return JSON.stringify(obj);
   }

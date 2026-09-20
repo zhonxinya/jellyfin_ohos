@@ -21,6 +21,14 @@ ApiResult getLatest(JellyfinApiClient &client, const std::string &userId, int li
                     const std::string &parentId = {});
 ApiResult getNextUp(JellyfinApiClient &client, const std::string &userId, int startIndex = 0,
                     int limit = 20);
+/**
+ * 取某部剧"接着看的那一集"（`/Shows/NextUp?SeriesId=...`）。
+ *
+ * 服务端语义：看过几集 → 接着看的那一集；一集没看过 → 第一集；全看完 → 空。
+ * 短视频页用它把"一部剧"折成一条并定位到该播的那一集。
+ */
+ApiResult getNextUpForSeries(JellyfinApiClient &client, const std::string &userId,
+                             const std::string &seriesId);
 ApiResult getGenres(JellyfinApiClient &client, const std::string &userId, const std::string &parentId,
                     int startIndex, int limit);
 ApiResult getStudios(JellyfinApiClient &client, const std::string &userId, const std::string &parentId,

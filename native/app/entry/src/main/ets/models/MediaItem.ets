@@ -23,7 +23,25 @@ export class MediaItem {
   isPlayed: boolean = false;
   collectionType: string = '';
   seriesName: string = '';
+  /**
+   * 所属剧集的 id（Jellyfin `SeriesId`，仅 `Episode` 或"代表剧集的横幅条目"有值）。
+   *
+   * 为什么需要：短视频页把**电视剧当作一个作品**展示（一屏一条），但真正能播的
+   * 是它下面某一集 —— 于是列表条目的 `id` 会被换成"按播放历史算出的那一集"，
+   * 而 `seriesId` 记住它原本代表哪部剧。进详情页要用 `seriesId`（用户点的是"这部作品"），
+   * 收藏/播放则用 `id`（作用于当前集）。两者的区别见 `ShortVideoPage.detailId()`。
+   */
+  seriesId: string = '';
   indexNumber: number = 0;
+  /** 季号（Jellyfin `ParentIndexNumber`，仅 `Episode` 有值） */
+  parentIndexNumber: number = 0;
+  /**
+   * 「这将是第几集」的标签（如 `第 1 集` / `第 2 季 第 5 集`）。
+   *
+   * 只有短视频页"把电视剧当作一个作品"生成的条目才有值：那种条目的标题是**剧名**，
+   * 需要另用一行说明"进去会播哪一集"。普通条目为空，界面不渲染这一行。
+   */
+  episodeLabel: string = '';
   genres: string[] = [];
   /**
    * 播放列表条目 id（`PlaylistItemId`）。
@@ -75,6 +93,13 @@ export class MediaItem {
   }
 
   displayTitle(): string {
+    // 短视频页把电视剧折叠成"作品"后，标题已经是**剧名**、集号由 `episodeLabel`
+    // 单独一行承担（见 ShortVideoPage.asSeriesEntry）。这里若再加 `E{n}` 前缀，
+    // 同一条内容会同时出现 `E1 邪恶力量`（标题）与 `第 1 季 第 1 集`（标签）——
+    // 同一信息说两遍，且 `E1` 这种写法对用户不友好（设备实测踩到）。
+    if (this.episodeLabel.length > 0) {
+      return this.name;
+    }
     if (this.type === 'Episode' && this.indexNumber > 0) {
       return `E${this.indexNumber} ${this.name}`;
     }
@@ -137,7 +162,10 @@ export class MediaItem {
     item.communityRating = JsonUtil.getNumber(data, 'CommunityRating', 0);
     item.officialRating = JsonUtil.getString(data, 'OfficialRating', '');
     item.seriesName = JsonUtil.getString(data, 'SeriesName', '');
+    item.seriesId = JsonUtil.getString(data, 'SeriesId',
+      JsonUtil.getString(data, 'seriesId', ''));
     item.indexNumber = JsonUtil.getNumber(data, 'IndexNumber', 0);
+    item.parentIndexNumber = JsonUtil.getNumber(data, 'ParentIndexNumber', 0);
     item.playlistItemId = JsonUtil.getString(data, 'PlaylistItemId', '');
     item.childCount = JsonUtil.getNumber(data, 'ChildCount', 0);
     item.isFolder = item.type === 'CollectionFolder' || item.type === 'UserView' ||

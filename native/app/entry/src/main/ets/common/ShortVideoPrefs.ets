@@ -19,6 +19,14 @@ export const kShortVideoLibrariesKey: string = 'shortVideoLibraries';
 /** 「视频」页一次批量取的条目数（够滑一阵子，又不至于一次拉太多） */
 export const kShortVideoBatchSize: number = 24;
 
+/**
+ * 「视频」页随机抽样的候选池大小（本地抽样，见 `ItemsQueryOptions.randomSamplePoolSize`）。
+ *
+ * 比批量大几倍：池子越大越不会反复刷到同一批。不再用服务端 `SortBy=Random` 的原因
+ * 是那个比较器不自洽、会随机返回 HTTP 400（一次失败整批就是空的）。
+ */
+export const kShortVideoSamplePoolSize: number = 120;
+
 /** 短视频清晰度（= 播放时向服务端请求的质量档位）的偏好键 */
 export const kShortVideoQualityKey: string = 'shortVideoQuality';
 

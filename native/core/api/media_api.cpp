@@ -2,14 +2,46 @@
 
 #include "url_util.h"
 
+#include <algorithm>
+#include <random>
 #include <sstream>
 
 namespace jellyfin {
 namespace api {
 
+namespace {
+
+/**
+ * 把服务端返回的 `Items` 数组就地随机抽样成 `limit` 条。
+ *
+ * 用法：见 `queryItems()` 里 `randomSamplePoolSize` 的分支。
+ * 抽不出来（池子比 limit 还小）时原样返回 —— 少几条也比"整块消失"好。
+ */
+void ShuffleAndTruncate(nlohmann::json &data, int limit)
+{
+    if (!data.is_object() || !data.contains("Items") || !data["Items"].is_array()) {
+        return;
+    }
+    auto &items = data["Items"];
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::shuffle(items.begin(), items.end(), gen);
+    if (limit > 0 && static_cast<int>(items.size()) > limit) {
+        items.erase(items.begin() + limit, items.end());
+    }
+}
+
+} // namespace
+
 ApiResult queryItems(JellyfinApiClient &client, const std::string &userId, const ItemsQuery &query)
 {
-    return client.getJson(BuildItemsQueryPath(userId, query));
+    auto result = client.getJson(BuildItemsQueryPath(userId, query));
+    // 本地随机抽样：服务端已按稳定排序返回了候选池（Limit 由 BuildItemsQueryPath
+    // 换成了 randomSamplePoolSize），这里再随机挑出调用方要的条数。
+    if (UsesLocalRandomSample(query) && result.ok()) {
+        ShuffleAndTruncate(result.data, query.limit);
+    }
+    return result;
 }
 
 ApiResult getItems(JellyfinApiClient &client, const std::string &userId, const std::string &parentId,
@@ -56,6 +88,27 @@ ApiResult getNextUp(JellyfinApiClient &client, const std::string &userId, int st
     path << "/Shows/NextUp?UserId=" << EncodeQueryComponent(userId) << "&StartIndex=" << startIndex
          << "&Limit=" << limit
          << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,IndexNumber"
+         << "&EnableImageTypes=Primary,Backdrop,Thumb";
+    return client.getJson(path.str());
+}
+
+ApiResult getNextUpForSeries(JellyfinApiClient &client, const std::string &userId,
+                             const std::string &seriesId)
+{
+    // `SeriesId` 让服务端只算这一部剧的"下一集"：看过几集就给接着看的那一集，
+    // 一集没看过则给第一集（TVSeriesManager 里 `alwaysEnableFirstEpisode` 的兜底），
+    // 全看完了返回空数组。短视频页据此"按播放历史确定集数"。
+    //
+    // Fields 要比 getNextUp 多要 SeriesId/SeriesName/RunTimeTicks/OfficialRating/Overview：
+    // 取回来的这一集要被**当成整部剧的代表**展示，缺字段会让卡片变空。
+    // `EnableUserData` 显式打开 —— 进度线要反映接着看的位置。
+    std::ostringstream path;
+    path << "/Shows/NextUp?UserId=" << EncodeQueryComponent(userId)
+         << "&SeriesId=" << EncodeQueryComponent(seriesId)
+         << "&StartIndex=0&Limit=1"
+         << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,SeriesId,"
+            "RunTimeTicks,IndexNumber,OfficialRating,Overview,CommunityRating,Genres,BackdropImageTags"
+         << "&EnableUserData=true"
          << "&EnableImageTypes=Primary,Backdrop,Thumb";
     return client.getJson(path.str());
 }

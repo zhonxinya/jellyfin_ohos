@@ -322,6 +322,10 @@ jellyfin::api::ItemsQuery ParseItemsQueryJson(const nlohmann::json &j)
     query.is4k = j.value("is4k", false);
     query.hasSubtitles = j.value("hasSubtitles", false);
     query.enableTotalRecordCount = j.value("enableTotalRecordCount", true);
+    // 本地随机抽样池（0 = 关闭，走服务端原生 Random 排序）。
+    // 为什么由客户端抽样：服务端 RandomComparer 的比较器不自洽，会随机抛 400
+    // （见 `ItemsQuery::randomSamplePoolSize` 的说明）。
+    query.randomSamplePoolSize = j.value("randomSamplePoolSize", 0);
     return query;
 }
 
@@ -871,6 +875,24 @@ napi_value GetSeasonEpisodes(napi_env env, napi_callback_info info)
     const std::string userId = session.userId();
     return RunAsync(env, [userId, seriesId, seasonId]() {
         auto result = jellyfin::api::getEpisodes(Api(), userId, seriesId, seasonId);
+        return FromApi(result).dump();
+    });
+}
+
+napi_value GetNextUpForSeries(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string seriesId;
+    ReadStringArg(env, info, 0, seriesId);
+    if (seriesId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "seriesId required"));
+    }
+    const std::string userId = session.userId();
+    return RunAsync(env, [userId, seriesId]() {
+        auto result = jellyfin::api::getNextUpForSeries(Api(), userId, seriesId);
         return FromApi(result).dump();
     });
 }
@@ -3306,6 +3328,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"search", nullptr, Search, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getItemDetail", nullptr, GetItemDetail, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getSeasonEpisodes", nullptr, GetSeasonEpisodes, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"getNextUpForSeries", nullptr, GetNextUpForSeries, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"getPlaybackInfo", nullptr, GetPlaybackInfo, nullptr, nullptr, nullptr, napi_default,
          nullptr},
