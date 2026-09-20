@@ -708,8 +708,13 @@ struct DetailPage {
       .height(110)
       .scrollBar(BarState.Off)
       .padding({ left: 16, right: 16 })
+      // 横向 List 的宽度默认随内容自适应：演职人员少时整排会缩成内容宽，
+      // 再被外层 Column 的默认居中排到屏幕中间。这里显式占满宽度，
+      // 让第一位始终贴 16vp 左边界（与海报/简介/标题以及货架列表一致）。
+      .width('100%')
     }
     .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   build() {
