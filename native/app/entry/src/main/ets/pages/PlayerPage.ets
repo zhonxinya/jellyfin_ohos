@@ -110,6 +110,28 @@ const kTouchPollSlowMs: number = 250;
 const kTouchPollBackoffLimit: number = 120;
 
 /**
+ * 底部控制区的判定高度（vp，自屏幕底边往上量）。
+ *
+ * 为什么要它：页面上的"透明手势层"是**全屏**的，它把水平拖动一律判成
+ * "左右滑动调进度"（`seekDragMs = totalX * 2`）并在抬手时 `seekTo`；
+ * 而底部的进度条 `Slider` 自己也要处理水平拖动。两者对同一次触摸**各算一次**，
+ * 属于结构性冲突（谁生效取决于事件分发顺序，很容易出现"位置被两套逻辑来回改"）。
+ *
+ * 因此手势层主动**让开底部控制区**：落在这里的按下不交给手势状态机，
+ * 由 `Slider` / 按钮自己处理。取值依据：底部控制区（进度条 + 工具行）
+ * 实测自 y=2190px 起（屏高 2844px、density 3.375）→ (2844-2190)/3.375 ≈ 194vp，
+ * 这里取 200vp 留一点余量（宁可多让一点，也不要出现"点在控件边缘仍被手势抢走"）。
+ *
+ * 与短视频页的 `kBottomChromeVp` 同一思路（那里是 108vp，因为它的底部只有信息与操作栏）。
+ *
+ * 注：**不要**用"拖 60px 就跳了好几钟"当作本缺陷的证据 —— 那是误判。
+ * 本片进度条轨道实测仅 619px 宽（有效区约 532px），对应 1:32:37，
+ * 即约 **10.45 秒/像素**，60px 本就该移动约 10 分钟。这是正常的比例，不是失控。
+ * 真正导致"时间轴拖不动"的根因见 `sliderDragging` 的说明。
+ */
+const kBottomControlZoneVp: number = 200;
+
+/**
  * 软解单次拉帧的最长容忍时间（毫秒）。超过即判定"原生侧卡死"并进入终态。
  *
  * 依据：正常一帧的耗时是几十毫秒（模拟器 4K 软解约 100ms 级）；
@@ -457,6 +479,18 @@ struct PlayerPage {
   private seekDragMs: number = 0;
   private seekLastX: number = 0;
   private lastSeekForward: boolean = true;
+  /**
+   * 用户是否正在拖动进度条（`SliderChangeMode.Begin` 到 `End`/`Click` 之间为 true）。
+   *
+   * 为什么必须有它（设备实测的缺陷）：进度条的 `value` 绑的是 `this.positionMs`，
+   * 而 `refreshState()` 每 1000ms 会把 `positionMs` 覆写为播放器真实进度。
+   * 拖动过程中这个回写会把滑块**弹回播放位置**，用户的手指与滑块脱开 ——
+   * 表现就是"拖不动时间轴 / 一松手又跳回去"。
+   *
+   * 修法：拖动期间**冻结进度回写**（见 `refreshState`），滑块只跟手指走；
+   * 抬手 `End` 时再 seek 并解除冻结，由播放器进度重新接管。
+   */
+  private sliderDragging: boolean = false;
   private avPlayer: media.AVPlayer | null = null;
   private surfaceId: string = '';
   /** XComponent 控制器：surface 就绪后用它拿到 surfaceId（软解 EGL 渲染与 AVPlayer 共用） */
@@ -2638,10 +2672,26 @@ struct PlayerPage {
     this.seekBaseMs = this.positionMs;
     this.seekDragMs = 0;
     this.seekLastX = x;
+    // ── 让开底部控制区（进度条/工具行）──────────────────────────────────
+    //
+    // 落在底部控制区的按下**不进入手势状态机**，交给 `Slider` 与按钮自己处理。
+    // 否则手势层的"水平拖动 = seek"会与 `Slider` 的拖动对同一次触摸各算一次
+    //（谁生效取决于分发顺序，位置会被两套逻辑来回改）。
+    // 用 `gestureAxis = 'control'` 标记本次触摸已归属控件：后续 Move/Up 据此直接忽略，
+    // 这样即使手指移出控制区也不会中途"抢"走（与按下时的归属保持一致）。
+    if (this.isInBottomControlZone(y)) {
+      this.gestureAxis = 'control';
+      this.touchDownX = x;
+      this.touchDownY = y;
+      return;
+    }
     this.brightnessBase = this.windowBrightness;
     this.brightnessLastY = y;
     this.volumeBase = this.volume;
     this.volumeLastY = y;
+    // 兜底：能走到这里说明按下点**不在**底部控制区，本次触摸不可能是在拖滑块，
+    // 因此把可能残留的拖动标志清掉（防止 Begin 之后没收到 End/Cancel 而永久冻结进度回写）。
+    this.sliderDragging = false;
     // 手势方向判定用"相对按下点的累计位移"，不用单次 Move 的位移。
     //
     // 为什么必须这样（设备实测的缺陷）：注入/慢速滑动时每个 Move 事件的位移常常只有 1–5px，
@@ -2656,6 +2706,10 @@ struct PlayerPage {
 
   /** 移动：先定方向（水平=seek，垂直=亮度/音量），再按累计位移换算幅度 */
   private onGestureMove(x: number, y: number): void {
+    // 本次触摸归属于底部控件（进度条/按钮）：不参与手势，交由控件自己处理
+    if (this.gestureAxis === 'control') {
+      return;
+    }
     const totalX: number = x - this.touchDownX;
     const totalY: number = y - this.touchDownY;
     if (this.gestureAxis.length === 0) {
@@ -2710,6 +2764,13 @@ struct PlayerPage {
 
   /** 抬手：滑动落地（seek）+ 点击判定（单击显隐 / 双击 ±10s） */
   private onGestureUp(x: number, y: number): void {
+    // 本次触摸归属于底部控件：不做任何手势判定（点击由 Button/Slider 自己处理）
+    if (this.gestureAxis === 'control') {
+      this.stopLongPressBoost();
+      this.seekDragMs = 0;
+      this.gestureAxis = '';
+      return;
+    }
     const moved: number = Math.max(Math.abs(x - this.touchDownX), Math.abs(y - this.touchDownY));
     const isTap: boolean = this.gestureAxis.length === 0 && moved < kTapSlopVp;
     if (this.gestureAxis === 'seek' && Math.abs(this.seekDragMs) > 100) {
@@ -3287,6 +3348,17 @@ struct PlayerPage {
   }
 
   private refreshState(): void {
+    // 用户正在拖进度条：**不允许**把播放器进度回写到 `positionMs`。
+    //
+    // 为什么（设备实测的缺陷）：`Slider.value` 绑定 `positionMs`，拖动中若被这里的
+    // `avPlayer.currentTime` 覆写，滑块会被弹回播放位置，手指与滑块脱开，
+    // 表现即"时间轴拖不动"。拖动期间滑块只跟手指走，抬手（End）后再交还播放器。
+    //
+    // 注意：字幕仍按**真实播放位置**刷新，不受拖动影响（拖动时字幕跟着预览位置跑没有意义，
+    // 而且会在松手 seek 前显示错误的一段台词）。
+    if (this.sliderDragging || this.gestureAxis === 'seek') {
+      return;
+    }
     if (this.softPlaying) {
       // 软解路径的进度来自解码帧的时间戳（见 pullSoftFrame），
       // 此前这里只读 avPlayer（软解时它已停掉），于是**软解播放时进度条一直不走**。
@@ -3436,6 +3508,29 @@ struct PlayerPage {
       return w;
     }
     return this.getScreenWidth();
+  }
+
+  /**
+   * 按下点是否落在**底部控制区**（进度条 + 工具行）内。
+   *
+   * 用途：让全屏手势层给控件让路（见 `kBottomControlZoneVp` 的说明 ——
+   * 否则手势层的"水平拖动调进度"会与 `Slider` 的拖动对同一次触摸各算一次）。
+   *
+   * 单位换算：触摸事件给的是**像素**，而控件尺寸按 vp 定义，因此要把 vp 区间换算成 px。
+   * 屏幕高度取 `areaHeight()`（vp，由根容器 onAreaChange 随旋转更新 —— 与 `gestureWidth()`
+   * 同一套理由：`display.height` 不随窗口旋转变化），再乘密度得 px。
+   * 横屏时"底部"仍是屏幕下边缘，同一判定成立。
+   */
+  private isInBottomControlZone(y: number): boolean {
+    const dens: number = this.density();
+    if (dens <= 0) {
+      return false;
+    }
+    const screenHeightPx: number = this.areaHeight() * dens;
+    if (screenHeightPx <= 0) {
+      return false;
+    }
+    return y >= screenHeightPx - kBottomControlZoneVp * dens;
   }
 
   /**
@@ -3600,8 +3695,25 @@ struct PlayerPage {
           // Slider 自身高度决定拖动热区（视觉上仍是细轨道）：40vp ≥ 最小触达标准的一半以上，
           // 竖屏单手拖进度条时不容易滑脱。
           .height(40)
-          .onChange((value: number) => {
-            // 统一走 seekTo：硬解与软解（软解此前拖动进度条完全没有反应）都能定位
+          .onChange((value: number, mode: SliderChangeMode) => {
+            // 拖动**过程中**只更新界面位置，抬手才真正 seek。
+            //
+            // 为什么不能每次变化都 seek（原实现如此）：`onChange` 在拖动时每帧都会触发，
+            // 于是每一帧都发一次 seek 请求 —— 硬解要不停 flush 管线、软解要重排 seek，
+            // 表现是"拖起来一顿一顿、松手后位置还乱跳"。主流播放器都是"拖动预览、松手定位"。
+            // 另外 `Begin` 阶段也会带上一个值，同样不能立刻 seek（否则刚按下就跳一次）。
+            if (mode === SliderChangeMode.Begin || mode === SliderChangeMode.Moving) {
+              // 置位后 `refreshState()` 会停止回写进度，否则每秒一次的回写会把滑块弹回播放位置，
+              // 手指与滑块脱开（设备实测的"时间轴拖不动"）。
+              this.sliderDragging = true;
+              this.positionMs = Math.floor(value);
+              this.revealControls();
+              return;
+            }
+            // End / Click：真正落地。先解除冻结，再 seek（软解 seek 是排队执行，
+            // 位置由 `seekTo` 写入，随后由解码帧时间戳接管）。
+            this.sliderDragging = false;
+            this.positionMs = Math.floor(value);
             this.seekTo(Math.floor(value));
             this.revealControls();
           })
