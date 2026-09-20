@@ -3261,6 +3261,57 @@ napi_value ClearImageCache(napi_env env, napi_callback_info /*info*/)
     return ToNapiJson(env, MakeResult(true, 200, "ok", nlohmann::json::object()));
 }
 
+/**
+ * 取**字幕文本**（供应用侧自行解析并渲染）。
+ *
+ * 为什么需要它（设备实测的根因，**这是"字幕无法使用"的真正原因**）：
+ * HarmonyOS 的 `AVPlayer.addSubtitleFromUrl()` 官方契约是
+ *   "the external subtitle must be set **after fdSrc** of the video resource is set"
+ * （见 SDK 的 `@ohos.multimedia.media.d.ts`，API 12 起就有该约束）。
+ * 而本工程的播放走的是 `avPlayer.url = <网络地址>`，**不是 `fdSrc`** ——
+ * 因此 `addSubtitleFromUrl` 是个**静默空操作**：Promise 正常 resolve（所以上层以为"已加载"），
+ * 但播放器**根本不去取那个 URL**（服务端日志可证：客户端从未发出字幕请求），
+ * 也不推 `subtitleUpdate` 事件 → 画面上永远没有字幕。
+ * 另外 `MediaSource`（`setMediaSource` 的入参）只提供 `setMimeType` /
+ * `enableOfflineCache` / `setMediaResourceLoaderDelegate`，**没有字幕字段**，
+ * 所以换成 `setMediaSource` 也解决不了外挂字幕。
+ *
+ * 因此改为：由应用自己把字幕文本取回来，自行解析时间轴并按播放位置渲染
+ * （播放页本来就有 `subtitleText` 的自绘路径，原生 SURFACE 上也画不了文本）。
+ *
+ * 安全约束：只接受**当前 Jellyfin 服务器**下的地址（同源校验），
+ * 避免这个接口被当成任意 URL 抓取器。
+ */
+napi_value FetchSubtitleText(napi_env env, napi_callback_info info)
+{
+    std::string url;
+    ReadStringArg(env, info, 0, url);
+    if (url.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "url required"));
+    }
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    const std::string base = session.baseUrl();
+    if (base.empty() || url.rfind(base, 0) != 0) {
+        return ToNapiJson(env, MakeResult(false, 0, "url must belong to the configured server"));
+    }
+    return RunAsync(env, [url]() {
+        jellyfin::HttpClient http;
+        const jellyfin::HttpResponse resp = http.get(url, {});
+        if (!resp.error.empty()) {
+            return MakeResult(false, 0, resp.error).dump();
+        }
+        if (resp.status != 200) {
+            return MakeResult(false, resp.status,
+                              "subtitle fetch failed with HTTP " + std::to_string(resp.status))
+                .dump();
+        }
+        return MakeResult(true, 200, "ok", nlohmann::json{{"text", resp.body}}).dump();
+    });
+}
+
 } // namespace
 
 napi_value jellyfin_napi_init(napi_env env, napi_value exports)
@@ -3430,6 +3481,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
          nullptr},
         {"getImageUrl", nullptr, GetImageUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"subtitleUrl", nullptr, SubtitleUrl, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"fetchSubtitleText", nullptr, FetchSubtitleText, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
         {"setImageCacheDir", nullptr, SetImageCacheDir, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"setCaBundlePath", nullptr, SetCaBundlePath, nullptr, nullptr, nullptr, napi_default,
