@@ -878,4 +878,18 @@ export class JellyfinNative {
       return JellyfinNative.fail('getSeasonEpisodes', error);
     }
   }
+
+  /**
+   * 取某部剧"接着看的那一集"（`/Shows/NextUp?SeriesId=...`）。
+   *
+   * 服务端语义：看过几集 → 接着看的那一集；一集没看过 → 第一集；全看完 → 空。
+   * 短视频页用它把"一部剧"折成一条并定位到该播的那一集。
+   */
+  static async getNextUpForSeries(seriesId: string): Promise<string> {
+    try {
+      return await jellyfinNative.getNextUpForSeries(seriesId);
+    } catch (error) {
+      return JellyfinNative.fail('getNextUpForSeries', error);
+    }
+  }
 }

@@ -879,6 +879,24 @@ napi_value GetSeasonEpisodes(napi_env env, napi_callback_info info)
     });
 }
 
+napi_value GetNextUpForSeries(napi_env env, napi_callback_info info)
+{
+    auto &session = jellyfin::SessionManager::instance();
+    if (!session.isAuthenticated()) {
+        return ToNapiJson(env, MakeResult(false, 401, "Not authenticated"));
+    }
+    std::string seriesId;
+    ReadStringArg(env, info, 0, seriesId);
+    if (seriesId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 0, "seriesId required"));
+    }
+    const std::string userId = session.userId();
+    return RunAsync(env, [userId, seriesId]() {
+        auto result = jellyfin::api::getNextUpForSeries(Api(), userId, seriesId);
+        return FromApi(result).dump();
+    });
+}
+
 napi_value GetPlaybackInfo(napi_env env, napi_callback_info info)
 {
     auto &session = jellyfin::SessionManager::instance();
@@ -3310,6 +3328,8 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"search", nullptr, Search, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getItemDetail", nullptr, GetItemDetail, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getSeasonEpisodes", nullptr, GetSeasonEpisodes, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"getNextUpForSeries", nullptr, GetNextUpForSeries, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"getPlaybackInfo", nullptr, GetPlaybackInfo, nullptr, nullptr, nullptr, napi_default,
          nullptr},

@@ -30,6 +30,12 @@ declare module 'libjellyfin_native.so' {
     search(query: string, startIndex: number, limit: number, parentId: string, includeItemTypes: string): string;
     getItemDetail(itemId: string): string;
     getSeasonEpisodes(seriesId: string, seasonId: string): string;
+    /**
+     * 取某部剧"接着看的那一集"（`/Shows/NextUp?SeriesId=...`）。
+     *
+     * 服务端语义：看过几集 → 接着看的那一集；一集没看过 → 第一集；全看完 → 空数组。
+     */
+    getNextUpForSeries(seriesId: string): string;
     getPlaybackInfo(itemId: string, optionsJson: string): string;
     toggleFavorite(itemId: string, favorite: boolean): string;
     togglePlayed(itemId: string, played: boolean): string;

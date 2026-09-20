@@ -540,7 +540,10 @@ export struct ShortVideoPage {
     this.batchError = '';
     const out: MediaItem[] = [];
     for (let i = 0; i < libraryIds.length; i++) {
-      const batch: MediaItem[] = await this.fetchLibraryBatch(libraryIds[i]);
+      // `fetchLibraryBatch` 内部已完成"同剧只留一条"与去重（见 collapseSeries）——
+      // 折叠与去重必须发生在**同一处**：分开做会出现"折叠后才发现该剧已在当前列表里"，
+      // 白跑一次 NextUp 请求。
+      const batch: MediaItem[] = await this.fetchLibraryBatch(libraryIds[i], dedupeAgainstCurrent);
       for (let j = 0; j < batch.length; j++) {
         if (this.hasItemId(out, batch[j].id)) {
           continue;
@@ -569,8 +572,13 @@ export struct ShortVideoPage {
     this.preparing = false;
   }
 
-  /** 单个媒体库取一批条目（失败时登记 `batchError` 并返回空数组） */
-  private async fetchLibraryBatch(libraryId: string): Promise<MediaItem[]> {
+  /**
+   * 单个媒体库取一批条目（失败时登记 `batchError` 并返回空数组）。
+   *
+   * 返回前会把"同一部剧的多集"收成一条（见 `collapseSeries`）。
+   */
+  private async fetchLibraryBatch(libraryId: string,
+                                  dedupeAgainstCurrent: boolean): Promise<MediaItem[]> {
     const query: ItemsQueryOptions = new ItemsQueryOptions();
     query.parentId = libraryId;
     query.startIndex = 0;
@@ -586,8 +594,9 @@ export struct ShortVideoPage {
     query.randomSamplePoolSize = kShortVideoSamplePoolSize;
     // 元信息按"卡片上真的要显示什么"取：简介、年份、时长、分级、类型、系列名。
     // 多要字段会让响应变大，少要则卡片上只能是空白（例如没有分级就只能不画那个徽标）。
+    // `SeriesId` 是"同剧只留一条"的关键：用它把同一部剧的多集收成一条（见 collapseSeries）。
     query.fields = 'Overview,PrimaryImageAspectRatio,RunTimeTicks,ProductionYear,'
-      + 'OfficialRating,Genres,SeriesName';
+      + 'OfficialRating,Genres,SeriesName,SeriesId';
     query.enableUserData = true;
     const raw: string = await JellyfinNative.queryItems(query.toJson());
     const result: NativeResult = JellyfinNative.parseResult(raw);
@@ -597,7 +606,233 @@ export struct ShortVideoPage {
       }
       return [];
     }
-    return MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    const items: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    return await this.collapseSeries(items, dedupeAgainstCurrent);
+  }
+
+  /**
+   * 把"同一部剧的多集"收成**一个作品**：每部剧只留一条，并把它代表的那一集定为
+   * **按播放历史算出的"下一集"**。
+   *
+   * 为什么：短视频页的目标是"刷作品"。一部 40 集的剧如果按集平铺，它会在列表里
+   * 占掉 40 个位置 —— 用户刷到的"内容"绝大部分是同一部剧的不同集，
+   * 与"刷短视频"的预期完全不符。
+   *
+   * 选集交给服务端的 NextUp（`/Shows/NextUp?SeriesId=...`）：
+   * - 看过几集 → 返回**接着看的那一集**；
+   * - 一集没看过 → `alwaysEnableFirstEpisode` 让它返回**第一集**（服务端源码
+   *   `Emby.Server.Implementations/TV/TVSeriesManager.cs` 第 151 行那条兜底）；
+   * - 全看完了 → 返回空，这条剧就**不进列表**（没有"下一集"可刷了）。
+   * 这样"按播放历史确定集数"完全由服务端既有语义保证，客户端不用自己推导季/集顺序。
+   *
+   * 换进来的那一集**继承作品的展示信息**（标题/简介/图片/类型徽标取剧的），
+   * 另用一行标出"进去会播第几集" —— 一屏一条的横幅上，用户要看的是"这是哪部剧"。
+   *
+   * 代价与取舍：每部剧要多一次 NextUp 请求，且在本函数里**串行**发出。追加是滑到接近
+   * 末尾时**提前**触发的（`prefetchIfNearEnd`），不在首屏路径上；首屏仍会有几次这类请求，
+   * 已在设备上确认延迟可接受 —— 这是"每部剧只显示一条"必然的代价。
+   */
+  private async collapseSeries(items: MediaItem[],
+                               dedupeAgainstCurrent: boolean): Promise<MediaItem[]> {
+    const out: MediaItem[] = [];
+    const handledSeries: string[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item: MediaItem = items[i];
+      const seriesId: string = this.seriesKeyOf(item);
+      if (seriesId.length === 0) {
+        this.pushIfNew(out, item, dedupeAgainstCurrent);
+        continue;
+      }
+      // 同一批里已经处理过这部（且已被换掉/丢弃）：跳过，避免重复请求
+      if (handledSeries.indexOf(seriesId) >= 0) {
+        continue;
+      }
+      handledSeries.push(seriesId);
+      // `out` 内去重**始终**要做（同一批里同一部剧只能出一条）；
+      // 但"列表里已有这部剧"只在**追加**时才算重复 —— 「换一批」不能排除当前正在显示的剧，
+      // 否则每次换一批都会把眼下这几部全部剔除（`this.items` 此刻仍是旧列表），
+      // 用户看到的是"换了一批就没什么剧了"。
+      const inCurrentList: boolean = dedupeAgainstCurrent && this.hasSeries(this.items, seriesId);
+      if (inCurrentList || this.hasSeries(out, seriesId)) {
+        continue;
+      }
+      const next: MediaItem | null = await this.fetchNextUpEpisode(item, seriesId);
+      if (next === null) {
+        // 这部剧没有"下一集"（全看完了 / 取不到）：整条丢掉。
+        // 丢掉而不是保留某一集 —— 否则用户会反复刷到已经看完的剧。
+        hilog.info(LOG_DOMAIN, LOG_TAG,
+          'series drop（无下一集）key=%{public}s name=%{public}s', seriesId, item.name);
+        continue;
+      }
+      hilog.info(LOG_DOMAIN, LOG_TAG,
+        'series collapse key=%{public}s「%{public}s」→ episode=%{public}s E%{public}d',
+        seriesId, next.name, next.id, next.indexNumber);
+      this.pushIfNew(out, next, dedupeAgainstCurrent);
+    }
+    return out;
+  }
+
+  /**
+   * 条目对应的"剧集 key"：同为剧集归属的条目要收成一条。
+   *
+   * - `Episode` → 它的 `SeriesId`；
+   * - `Video` 且带 `SeriesName` → 用剧名兜底（**实测该服务器上的剧集条目返回的
+   *   `SeriesId` 为空**，只有 `SeriesName` 有值，因此不能只认 `SeriesId`）。
+   */
+  private seriesKeyOf(item: MediaItem): string {
+    if (item.type === 'Episode') {
+      if (item.seriesId.length > 0) {
+        return item.seriesId;
+      }
+      return item.seriesName.length > 0 ? `name:${item.seriesName}` : '';
+    }
+    if (item.type === 'Video' && item.seriesName.length > 0) {
+      return `name:${item.seriesName}`;
+    }
+    return '';
+  }
+
+  private hasSeries(list: MediaItem[], seriesKey: string): boolean {
+    for (let i = 0; i < list.length; i++) {
+      if (this.seriesKeyOf(list[i]) === seriesKey) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 加入结果列表（同时做"批内去重"与可选的"与当前列表去重"） */
+  private pushIfNew(out: MediaItem[], item: MediaItem, dedupeAgainstCurrent: boolean): void {
+    if (this.hasItemId(out, item.id)) {
+      return;
+    }
+    if (dedupeAgainstCurrent && this.hasItemId(this.items, item.id)) {
+      return;
+    }
+    out.push(item);
+  }
+
+  /**
+   * 取"这部剧该接着看的那一集"，并把它包装成"代表这部剧"的列表条目。
+   *
+   * 服务端 NextUp 认 `SeriesId`；但该服务器的剧集条目 `SeriesId` 可能为空
+   * （见 `seriesKeyOf`），因此：
+   * - 有 `SeriesId` → 直接问 NextUp（最准，含"看完了"这一判定）；
+   * - 只有剧名 → 退化为"按名称取第一集"（拿不到播放历史，但至少能播，且仍是一条剧）。
+   * 两条路都失败时返回 `null`（调用方据此丢掉整条）。
+   */
+  private async fetchNextUpEpisode(item: MediaItem, seriesKey: string): Promise<MediaItem | null> {
+    let episode: MediaItem | null = null;
+    if (item.seriesId.length > 0) {
+      episode = await this.fetchNextUpById(item.seriesId);
+    }
+    if (episode === null && !seriesKey.startsWith('name:')) {
+      // 有 SeriesId 但 NextUp 返回空 = 这部剧已经看完（或没有可播的下一集）
+      return null;
+    }
+    if (episode === null) {
+      episode = await this.fetchFirstEpisodeByName(item.seriesName, item);
+    }
+    if (episode === null) {
+      return null;
+    }
+    return this.asSeriesEntry(item, episode, seriesKey);
+  }
+
+  /** `/Shows/NextUp?SeriesId=...&Limit=1`：服务端按播放历史给出"接着看的那一集" */
+  private async fetchNextUpById(seriesId: string): Promise<MediaItem | null> {
+    const raw: string = await JellyfinNative.getNextUpForSeries(seriesId);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      return null;
+    }
+    const list: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].id.length > 0) {
+        return list[i];
+      }
+    }
+    return null;
+  }
+
+  /** 兜底：按剧名找该剧的第一集（拿不到播放历史时用） */
+  private async fetchFirstEpisodeByName(seriesName: string,
+                                        fallback: MediaItem): Promise<MediaItem | null> {
+    if (seriesName.length === 0) {
+      return null;
+    }
+    const query: ItemsQueryOptions = new ItemsQueryOptions();
+    query.searchTerm = seriesName;
+    query.includeItemTypes = 'Episode';
+    query.limit = 1;
+    query.sortBy = 'SortName';
+    query.sortOrder = 'Ascending';
+    query.fields = 'Overview,RunTimeTicks,ProductionYear,OfficialRating,Genres,SeriesName,SeriesId';
+    const raw: string = await JellyfinNative.queryItems(query.toJson());
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (result.ok && result.data !== null) {
+      const list: MediaItem[] = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+      if (list.length > 0 && list[0].id.length > 0) {
+        return list[0];
+      }
+    }
+    // 连第一集也找不到：退化为拿原始条目本身去播（可能仍会失败，但比整条消失好）
+    return fallback;
+  }
+
+  /**
+   * 把"剧"的信息与"要播的那一集"的 id 合成一个列表条目。
+   *
+   * 展示信息取剧（用户看的是"这是哪部剧"），`id` 取集（播放/收藏作用在具体一集上）。
+   * `seriesId`/`seriesName` 留给详情页跳转与列表去重。
+   */
+  private asSeriesEntry(series: MediaItem, episode: MediaItem, seriesKey: string): MediaItem {
+    const entry: MediaItem = new MediaItem();
+    entry.id = episode.id;
+    entry.type = 'Episode';
+    // 标题用**剧名**（不含集号）：这个位置回答"这是什么作品"，不是"这是第几集"。
+    // 集号另走 `episodeLabel` 一行，与主流客户端的"剧名 + 第 N 集"一致
+    // （历史实现把 `E1` 拼进标题，会渲染成"E1 洛基"这种机器味、还可能和剧集名重复）。
+    entry.name = series.seriesName.length > 0 ? series.seriesName : series.name;
+    entry.seriesName = entry.name;
+    entry.seriesId = series.seriesId.length > 0 ? series.seriesId
+      : (seriesKey.startsWith('name:') ? '' : seriesKey);
+    entry.indexNumber = episode.indexNumber;
+    entry.parentIndexNumber = episode.parentIndexNumber;
+    entry.episodeLabel = this.episodeLabelOf(episode);
+    // 展示信息一律取剧：简介/图片/年份/分级/类型标签都是"作品级"的，
+    // 用某一集的会让同部剧在不同时间显示成不同样子（用户会以为列表在乱跳）
+    entry.overview = series.overview.length > 0 ? series.overview : episode.overview;
+    entry.imageTag = series.imageTag;
+    entry.backdropTag = series.backdropTag;
+    entry.year = series.year;
+    entry.communityRating = series.communityRating;
+    entry.officialRating = series.officialRating;
+    entry.genres = series.genres;
+    // 时长与进度属于"要播的那一集"：进度线要如实反映接着看的位置
+    entry.runTimeTicks = episode.runTimeTicks;
+    entry.playbackPositionTicks = episode.playbackPositionTicks;
+    entry.isFavorite = episode.isFavorite;
+    entry.isPlayed = episode.isPlayed;
+    entry.collectionType = series.collectionType;
+    entry.isFolder = false;
+    return entry;
+  }
+
+  /**
+   * 「进这条会播第几集」的文案。
+   *
+   * 有季号时给 `第 2 季 第 5 集`（跨季的剧光看集号会误以为"才第 5 集"），
+   * 否则只给 `第 N 集`；没有集号（元数据缺失）则返回空串、界面不画这一行。
+   */
+  private episodeLabelOf(episode: MediaItem): string {
+    if (episode.indexNumber <= 0) {
+      return '';
+    }
+    if (episode.parentIndexNumber > 0) {
+      return `第 ${episode.parentIndexNumber} 季 第 ${episode.indexNumber} 集`;
+    }
+    return `第 ${episode.indexNumber} 集`;
   }
 
   /**
@@ -1573,14 +1808,29 @@ export struct ShortVideoPage {
     }
   }
 
+  /**
+   * 「详情」按钮的目标 id。
+   *
+   * 折叠成作品的电视剧要进**剧集**的详情页（用户点的是"这部作品"，
+   * 详情页能从剧集维度给出季/集选择）；直接进某一集的详情页会把他锁死在那一集。
+   * 其余条目就是它自己。
+   */
+  private detailId(item: MediaItem): string {
+    if (item.episodeLabel.length > 0 && item.seriesId.length > 0) {
+      return item.seriesId;
+    }
+    return item.id;
+  }
+
   /** 进入条目详情页（保留详情页里的完整操作） */
   private openDetail(item: MediaItem): void {
-    if (item.id.length === 0) {
+    const id: string = this.detailId(item);
+    if (id.length === 0) {
       return;
     }
     router.pushUrl({
       url: 'pages/DetailPage',
-      params: { itemId: item.id, title: item.displayTitle() }
+      params: { itemId: id, title: item.name }
     });
   }
 
@@ -1595,7 +1845,10 @@ export struct ShortVideoPage {
       url: 'pages/PlayerPage',
       params: {
         itemId: item.id,
-        title: item.displayTitle(),
+        // 标题用剧名 + 集号两段拼，而不是 `displayTitle()`（那条路会给出 `E1 洛基`）：
+        // 播放页顶部空间有限，`第 1 集` 比 `E1` 更易读。
+        title: item.episodeLabel.length > 0
+          ? `${item.name} · ${item.episodeLabel}` : item.displayTitle(),
         startPositionMs: Math.floor(this.positionMs)
       }
     });
@@ -1962,7 +2215,16 @@ export struct ShortVideoPage {
   }
 
   /** 当前条目的类型徽标文案（电影 / 单集 / 视频 …） */
+  /**
+   * 类型徽标文案。
+   *
+   * `episodeLabel` 有值 = 这条是"被折叠成作品"的电视剧（见 `asSeriesEntry`）：
+   * 虽然底层要播的是一集，但对用户呈现的是**一部剧**，徽标就该是「剧集」而不是「单集」。
+   */
   private typeBadge(item: MediaItem): string {
+    if (item.episodeLabel.length > 0) {
+      return '剧集';
+    }
     return item.typeLabel();
   }
 
@@ -2407,8 +2669,11 @@ export struct ShortVideoPage {
       }
       .alignItems(VerticalAlign.Center)
 
-      if (item.seriesName.length > 0 && item.type === 'Episode') {
-        Text(item.seriesName)
+      // 「被折叠成作品的电视剧」这条：标题是剧名，这里补一行"进去会播哪一集"。
+      // 旧实现这里放的是 `SeriesName`，但那种条目的标题**本身就是剧名**，
+      // 会渲染成"洛基 / 洛基"两行一样的尴尬重复（设备实测）。
+      if (item.episodeLabel.length > 0) {
+        Text(item.episodeLabel)
           .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().onOverlayMuted)
           .maxLines(1)

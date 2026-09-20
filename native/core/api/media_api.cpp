@@ -92,6 +92,27 @@ ApiResult getNextUp(JellyfinApiClient &client, const std::string &userId, int st
     return client.getJson(path.str());
 }
 
+ApiResult getNextUpForSeries(JellyfinApiClient &client, const std::string &userId,
+                             const std::string &seriesId)
+{
+    // `SeriesId` 让服务端只算这一部剧的"下一集"：看过几集就给接着看的那一集，
+    // 一集没看过则给第一集（TVSeriesManager 里 `alwaysEnableFirstEpisode` 的兜底），
+    // 全看完了返回空数组。短视频页据此"按播放历史确定集数"。
+    //
+    // Fields 要比 getNextUp 多要 SeriesId/SeriesName/RunTimeTicks/OfficialRating/Overview：
+    // 取回来的这一集要被**当成整部剧的代表**展示，缺字段会让卡片变空。
+    // `EnableUserData` 显式打开 —— 进度线要反映接着看的位置。
+    std::ostringstream path;
+    path << "/Shows/NextUp?UserId=" << EncodeQueryComponent(userId)
+         << "&SeriesId=" << EncodeQueryComponent(seriesId)
+         << "&StartIndex=0&Limit=1"
+         << "&Fields=BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,SeriesId,"
+            "RunTimeTicks,IndexNumber,OfficialRating,Overview,CommunityRating,Genres,BackdropImageTags"
+         << "&EnableUserData=true"
+         << "&EnableImageTypes=Primary,Backdrop,Thumb";
+    return client.getJson(path.str());
+}
+
 ApiResult getGenres(JellyfinApiClient &client, const std::string &userId, const std::string &parentId,
                     int startIndex, int limit)
 {
