@@ -120,4 +120,11 @@ Invoke-CompileAndRun -Name "test_device_profile" -Sources @(
     (Join-Path $Core "api\device_profile.cpp")
 )
 
+# ImageCache：磁盘图片缓存（淘汰触发频率 / LRU / 在途去重 / 错误必须显式）。
+# 只依赖注入的下载函数（ImageDownloadFn），因此不需要 HttpClient 与 mbedTLS，可零依赖主机单测。
+Invoke-CompileAndRun -Name "test_image_cache" -Sources @(
+    (Join-Path $Core "tests\test_image_cache.cpp"),
+    (Join-Path $Core "image_cache.cpp")
+)
+
 Write-Host "All native core tests finished." -ForegroundColor Green

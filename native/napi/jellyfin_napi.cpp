@@ -15,6 +15,7 @@
 #include "http_client.h"
 #include "http_tls.h"
 #include "image_cache.h"
+#include "image_cache_http.h"
 #include "image_url.h"
 #include "playback_policy.h"
 #include "session.h"
@@ -3341,6 +3342,12 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
                          static_cast<unsigned long long>(raised.rlim_cur));
         }
     }
+
+    // 安装图片下载实现（ImageCache 只依赖注入的下载函数，见 image_cache.h 的说明）。
+    // 必须在任何取图调用之前执行：没装的话 loadImage 会明确报
+    // "image downloader not installed"，而不是静默返回空路径。
+    jellyfin::InstallHttpImageDownloader();
+
     napi_property_descriptor desc[] = {
         {"getVersion", nullptr, GetVersion, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"configureServer", nullptr, ConfigureServer, nullptr, nullptr, nullptr, napi_default,
