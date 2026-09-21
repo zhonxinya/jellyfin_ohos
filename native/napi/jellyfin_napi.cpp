@@ -43,8 +43,10 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <sys/resource.h>
@@ -274,6 +276,41 @@ napi_value ToNapiJson(napi_env env, const nlohmann::json &j)
     return ToNapiString(env, jellyfin::SafeDumpJson(j));
 }
 
+/**
+ * `double` → `int64_t`，先把非有限值与非整数挡掉。
+ *
+ * 为什么不能直接 `static_cast<int64_t>(d)`：这是**未定义行为**（UBSan 实测报
+ * `nan is outside the range of representable values of type 'long int'`）。
+ * 而在 NAPI 边界上这些值真的传得进来 —— JS 侧一句 `Number.NaN` / `1e300` / `Infinity`
+ * 就够了，而本工程的 ArkTS 调用点会把计算结果（`startIndex + page.length`）直接传下来。
+ *
+ * 实测后果不是崩溃而是**静默错值**：NaN / ±inf / 1e300 / 2^63 全部转成
+ * `-9223372036854775808`（INT64_MIN），这个数"看起来像个合法参数"——
+ * 后续 `static_cast<int>(startIndex)` 得到 0、或让它当负数参与拼接，都不会报错。
+ *
+ * 权衡：只接受"整数值的 double"。`3.7` 宁可拒收（返回 false → 调用方回落默认值），
+ * 也不做静默截断 —— 本工程的这些参数全是下标 / 下标类计数，不该出现小数。
+ *
+ * @return true 表示可用（`out` 已赋值）；false 表示调用方应回落默认值
+ */
+bool ReadFiniteInt64(double d, int64_t &out)
+{
+    if (!std::isfinite(d)) {
+        // NaN / +inf / -inf
+        return false;
+    }
+    if (d != std::trunc(d)) {
+        // 非整数（含 1e300 这类超出 double 整数精度的大数）
+        return false;
+    }
+    if (d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
+        // 超出 int64 可表示范围（上界用 >= 是刻意的：2^63 本身已越界）
+        return false;
+    }
+    out = static_cast<int64_t>(d);
+    return true;
+}
+
 bool ReadStringArg(napi_env env, napi_callback_info info, size_t index, std::string &out)
 {
     size_t argc = 8;
@@ -307,7 +344,12 @@ bool ReadIntArg(napi_env env, napi_callback_info info, size_t index, int64_t &ou
     if (type == napi_number) {
         double d = 0;
         napi_get_value_double(env, args[index], &d);
-        out = static_cast<int64_t>(d);
+        // 非有限 / 非整数 / 越界一律视为"没给"，交给调用方回落默认值。
+        // 不要直接 static_cast：那是 UB，且结果是 INT64_MIN 这种"看着合法"的错值。
+        if (!ReadFiniteInt64(d, out)) {
+            out = 0;
+            return false;
+        }
         return true;
     }
     if (type == napi_string) {
