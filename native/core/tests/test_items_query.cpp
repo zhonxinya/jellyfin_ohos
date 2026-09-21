@@ -4,8 +4,16 @@
  * 为什么值得单测：媒体库的筛选/排序/分页最后都落到这一串 query string 上，
  * 拼错一个参数名不会报错、只会"静默地不生效"（服务端忽略未知参数），
  * 因此在主机上断言参数是否真的进了 URL，是这类缺陷最便宜的拦截方式。
+ *
+ * 第二个被覆盖的对象是 `ParseItemsQueryJson()` / `ParsePlaybackOptionsJson()`
+ * （宿主 JSON → API 结构体）。它们以前在 NAPI 层用 `j.value(key, default)` 逐字段读：
+ * `value()` **只在键不存在时**返回默认值，键存在但类型不符（尤其 ArkTS 经
+ * `JSON.stringify` 原样带下来的 `null`）会抛 `type_error.302`，而它们跑在 UI 线程的
+ * 同步路径上 —— 异常逸出即进程终止。下移到 core 后就能在这里断言
+ * "任何畸形输入都不抛、且回落到默认值"。
  */
 #include "api/items_query.h"
+#include "api/options_parse.h"
 
 #include <cstdio>
 #include <string>
@@ -82,17 +90,6 @@ void ExpectParam(const std::string &path, const std::string &name, const std::st
     if (got != want) {
         std::printf("  [FAIL] %s\n        参数 %s: 实际=[%s] 期望=[%s]\n", what.c_str(), name.c_str(),
                     got.c_str(), want.c_str());
-        ++g_failures;
-    } else {
-        std::printf("  [ ok ] %s\n", what.c_str());
-    }
-}
-
-void ExpectNoParam(const std::string &path, const std::string &name, const std::string &what)
-{
-    if (path.find(name + "=") != std::string::npos) {
-        std::printf("  [FAIL] %s（不该出现参数 %s）\n        实际: %s\n", what.c_str(), name.c_str(),
-                    path.c_str());
         ++g_failures;
     } else {
         std::printf("  [ ok ] %s\n", what.c_str());
@@ -303,6 +300,129 @@ void TestFieldsOverride()
                "userId 中的空格与斜杠被转义（空格用 %20，见 url_util.cpp 的说明）");
 }
 
+/**
+ * ParseItemsQueryJson：畸形输入绝不抛异常，且字段级回落到默认值。
+ *
+ * 每一条都对应一个"真会发生"的来源：`null`/类型不符来自 ArkTS 的 JSON.stringify，
+ * 字符串数字来自 JS 大整数，超界来自前端误算。
+ */
+void TestParseItemsQueryToleratesBadInput()
+{
+    std::printf("ParseItemsQueryJson 容错\n");
+
+    // 1) 非对象 / null：直接给默认查询，不抛。
+    const jellyfin::api::ItemsQuery fromNull =
+        jellyfin::api::ParseItemsQueryJson(nlohmann::json(nullptr));
+    ExpectTrue(fromNull.limit == 50 && fromNull.recursive,
+               "顶层是 null 时返回默认查询");
+    const jellyfin::api::ItemsQuery fromArray =
+        jellyfin::api::ParseItemsQueryJson(nlohmann::json::parse("[1,2]"));
+    ExpectTrue(fromArray.limit == 50, "顶层是数组时返回默认查询");
+
+    // 2) 关键回归：value() 会对这些输入抛 type_error.302，Parse 必须不抛。
+    const auto allNull = nlohmann::json::parse(
+        R"({"limit":null,"startIndex":null,"recursive":null,"parentId":null,"isHd":null})");
+    const jellyfin::api::ItemsQuery fromNullFields =
+        jellyfin::api::ParseItemsQueryJson(allNull);
+    ExpectTrue(fromNullFields.limit == 50, "limit 为 null 回落到默认 50（不抛异常）");
+    ExpectTrue(fromNullFields.startIndex == 0, "startIndex 为 null 回落到默认 0");
+    ExpectTrue(fromNullFields.recursive, "recursive 为 null 回落到默认 true");
+    ExpectTrue(fromNullFields.parentId.empty(), "parentId 为 null 回落到空串");
+    ExpectTrue(!fromNullFields.isHd, "isHd 为 null 回落到默认 false（不能变成 true）");
+
+    // 3) 类型不符：数字不给字符串、字符串不给数字以外的字段。
+    const auto wrongTypes = nlohmann::json::parse(
+        R"({"parentId":123,"limit":"60","isHd":"yes","recursive":1})");
+    const jellyfin::api::ItemsQuery fromWrongTypes =
+        jellyfin::api::ParseItemsQueryJson(wrongTypes);
+    ExpectTrue(fromWrongTypes.parentId.empty(), "字符串字段给数字 → 回落默认（不隐式转换）");
+    ExpectTrue(fromWrongTypes.limit == 60, "数字字段给纯数字字符串 → 可解析（JS 大整数场景）");
+    ExpectTrue(!fromWrongTypes.isHd, "布尔字段给字符串 → 回落默认");
+    ExpectTrue(fromWrongTypes.recursive, "布尔字段给数字 → 回落默认（保持严格语义）");
+
+    // 4) 越界：unsigned 上限不能回绕成负数 limit（那会被原样拼进请求参数）。
+    const auto overflow = nlohmann::json::parse(R"({"limit":18446744073709551615})");
+    const jellyfin::api::ItemsQuery fromOverflow =
+        jellyfin::api::ParseItemsQueryJson(overflow);
+    ExpectTrue(fromOverflow.limit == 50, "limit 超出 long long → 回落默认，不回绕成负数");
+
+    // 5) 正常路径仍然生效（容错不等于"永远返回默认值"）。
+    const auto ok = nlohmann::json::parse(
+        R"({"parentId":"lib-9","startIndex":80,"limit":20,"recursive":false,)"
+        R"("searchTerm":"dune","isHd":true})");
+    const jellyfin::api::ItemsQuery good = jellyfin::api::ParseItemsQueryJson(ok);
+    ExpectTrue(good.parentId == "lib-9", "正常字段照常解析（parentId）");
+    ExpectTrue(good.startIndex == 80 && good.limit == 20, "正常字段照常解析（分页）");
+    ExpectTrue(!good.recursive, "正常字段照常解析（recursive=false 能生效）");
+    ExpectTrue(good.searchTerm == "dune", "正常字段照常解析（searchTerm）");
+    ExpectTrue(good.isHd, "正常字段照常解析（isHd=true 能生效）");
+
+    // 6) 解析结果必须能直接喂给 BuildItemsQueryPath（两段拼接处的类型一致）。
+    const std::string path = jellyfin::api::BuildItemsQueryPath("u1", good);
+    ExpectContains(path, "Limit=20", "解析出的 limit 真的进了 query string");
+    ExpectContains(path, "IsHD=true", "解析出的 isHd 真的进了 query string");
+}
+
+/**
+ * ParsePlaybackOptionsJson：畸形输入绝不抛异常，且回落到默认播放选项。
+ *
+ * 这几个字段直接决定服务端是否转码、用哪条音轨，静默错值比"整页崩掉"更难查，
+ * 所以既断言"不抛"，也断言"默认值语义正确"。
+ */
+void TestParsePlaybackOptionsToleratesBadInput()
+{
+    std::printf("ParsePlaybackOptionsJson 容错\n");
+
+    const jellyfin::api::PlaybackInfoOptions fromNull =
+        jellyfin::api::ParsePlaybackOptionsJson(nlohmann::json(nullptr));
+    ExpectTrue(fromNull.audioStreamIndex == -1, "顶层 null → 默认音频流下标 -1");
+    ExpectTrue(fromNull.enableDirectPlay && fromNull.enableDirectStream &&
+                   fromNull.enableTranscoding && fromNull.includeDeviceProfile,
+               "顶层 null → 三种播放方式与 DeviceProfile 均为默认开启");
+
+    // 关键回归：这些输入会让 value() 抛 type_error.302。
+    const auto allNull = nlohmann::json::parse(
+        R"({"audioStreamIndex":null,"subtitleStreamIndex":null,"maxStreamingBitrate":null,)"
+        R"("enableDirectPlay":null,"enableDirectStream":null,"enableTranscoding":null,)"
+        R"("includeDeviceProfile":null})");
+    const jellyfin::api::PlaybackInfoOptions fromNullFields =
+        jellyfin::api::ParsePlaybackOptionsJson(allNull);
+    ExpectTrue(fromNullFields.audioStreamIndex == -1, "audioStreamIndex 为 null → 回落 -1（不抛）");
+    ExpectTrue(fromNullFields.subtitleStreamIndex == -1, "subtitleStreamIndex 为 null → 回落 -1");
+    ExpectTrue(fromNullFields.maxStreamingBitrate == 0, "maxStreamingBitrate 为 null → 回落 0");
+    ExpectTrue(fromNullFields.enableDirectPlay && fromNullFields.enableTranscoding,
+               "布尔字段为 null → 回落 true（不能变成 false 而禁用直连）");
+    ExpectTrue(fromNullFields.includeDeviceProfile,
+               "includeDeviceProfile 为 null → 回落 true");
+
+    // 类型不符
+    const auto wrongTypes = nlohmann::json::parse(
+        R"({"audioStreamIndex":"2","enableDirectPlay":"false","maxStreamingBitrate":8000000})");
+    const jellyfin::api::PlaybackInfoOptions fromWrongTypes =
+        jellyfin::api::ParsePlaybackOptionsJson(wrongTypes);
+    ExpectTrue(fromWrongTypes.audioStreamIndex == 2, "数字字符串可解析（JS 传参场景）");
+    ExpectTrue(fromWrongTypes.enableDirectPlay, "布尔字段给字符串 → 回落默认 true");
+    ExpectTrue(fromWrongTypes.maxStreamingBitrate == 8000000, "正常数字照常解析");
+
+    // 越界：回绕会把"很大的正数"变成 -1，即"未指定流" —— 静默改变播放语义。
+    const auto overflow =
+        nlohmann::json::parse(R"({"audioStreamIndex":18446744073709551615})");
+    const jellyfin::api::PlaybackInfoOptions fromOverflow =
+        jellyfin::api::ParsePlaybackOptionsJson(overflow);
+    ExpectTrue(fromOverflow.audioStreamIndex == -1,
+               "audioStreamIndex 超界 → 回落 -1（而不是回绕成碰巧合法的负值）");
+
+    // 显式置 false 必须能生效（容错不能把用户的选择吃掉）。
+    const auto off = nlohmann::json::parse(
+        R"({"enableDirectPlay":false,"includeDeviceProfile":false,"subtitleStreamIndex":0})");
+    const jellyfin::api::PlaybackInfoOptions explicitOff =
+        jellyfin::api::ParsePlaybackOptionsJson(off);
+    ExpectTrue(!explicitOff.enableDirectPlay, "显式 false 能生效（enableDirectPlay）");
+    ExpectTrue(!explicitOff.includeDeviceProfile, "显式 false 能生效（includeDeviceProfile）");
+    ExpectTrue(explicitOff.subtitleStreamIndex == 0,
+               "下标 0 是合法值（不能与「未指定 -1」混淆）");
+}
+
 } // namespace
 
 int main()
@@ -317,6 +437,8 @@ int main()
     TestSortAndPaging();
     TestRandomSortAvoidedWhenLocalSampling();
     TestFieldsOverride();
+    TestParseItemsQueryToleratesBadInput();
+    TestParsePlaybackOptionsToleratesBadInput();
     if (g_failures != 0) {
         std::printf("== 失败 %d 项 ==\n", g_failures);
         return 1;

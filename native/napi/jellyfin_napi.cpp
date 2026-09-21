@@ -4,6 +4,7 @@
 #include "api/catalog_api.h"
 #include "api/library_admin_api.h"
 #include "api/media_api.h"
+#include "api/options_parse.h"
 #include "api/playback_api.h"
 #include "api/playlist_api.h"
 #include "api/system_api.h"
@@ -14,6 +15,7 @@
 #include "engine.h"
 #include "http_client.h"
 #include "http_tls.h"
+#include "json_dump.h"
 #include "image_cache.h"
 #include "image_cache_http.h"
 #include "image_url.h"
@@ -41,6 +43,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -174,6 +177,22 @@ std::string JsonStringField(const nlohmann::json &obj, const char *key)
     return obj[key].get<std::string>();
 }
 
+/**
+ * 取布尔字段（键不存在 / 类型不符 / `null` 一律返回 false）。
+ *
+ * 为什么不用 `obj.value(key, false)`：`value()` 只在**键不存在**时用默认值，
+ * 键存在但类型不符会抛 `type_error.302` —— 而它的调用点常在 `RunAsync` 的 worker
+ * 线程上，异常逸出 libuv 的 C 入口就是 `std::terminate()`、应用直接消失。
+ * 与既有的 `JsonStringField` 同一意图，只是原来缺了布尔这一档。
+ */
+bool JsonBoolField(const nlohmann::json &obj, const char *key)
+{
+    if (!obj.is_object() || !obj.contains(key) || !obj[key].is_boolean()) {
+        return false;
+    }
+    return obj[key].get<bool>();
+}
+
 std::string JsonStringAny(const nlohmann::json &obj, std::initializer_list<const char *> keys)
 {
     for (const char *key : keys) {
@@ -202,6 +221,16 @@ struct AsyncWork {
 /**
  * Run blocking work on a libuv worker thread and resolve a Promise with the
  * resulting JSON string, keeping the ArkTS main thread responsive.
+ *
+ * **这里的 catch(...) 是最后一道防线，不要删。** libuv 的 worker 线程入口是 C 函数
+ * （`napi_create_async_work` 的 execute 回调），libuv 由 C 编写、不会捕获 C++ 异常，
+ * 所以任何从 `fn()` 逸出的异常都会一路走到 `std::terminate()` —— 应用**直接消失**，
+ * 没有栈、没有日志，只能靠 faultlog 猜。（本机已用最小探针复现：pthread 入口抛异常
+ * 即 terminate。）
+ *
+ * 第一道防线是各处理函数自己用容错读取（见 `json_arg.h` 与 `JsonStringField`），
+ * 这里只负责"万一漏了一处也不至于杀死进程"—— 把异常转成一个错误信封交给 ArkTS，
+ * 异常消息里可能带上字段名，因此**只进返回值、不进日志**。
  */
 napi_value RunAsync(napi_env env, std::function<std::string()> fn)
 {
@@ -215,7 +244,15 @@ napi_value RunAsync(napi_env env, std::function<std::string()> fn)
         env, nullptr, resourceName,
         [](napi_env, void *data) {
             auto *c = static_cast<AsyncWork *>(data);
-            c->result = c->fn();
+            try {
+                c->result = c->fn();
+            } catch (const std::exception &e) {
+                c->result = jellyfin::SafeDumpJson(MakeResult(
+                    false, 0, std::string("native worker failed: ") + e.what()));
+            } catch (...) {
+                c->result = jellyfin::SafeDumpJson(
+                    MakeResult(false, 0, "native worker failed: unknown error"));
+            }
         },
         [](napi_env env, napi_status, void *data) {
             auto *c = static_cast<AsyncWork *>(data);
@@ -232,7 +269,9 @@ napi_value RunAsync(napi_env env, std::function<std::string()> fn)
 
 napi_value ToNapiJson(napi_env env, const nlohmann::json &j)
 {
-    return ToNapiString(env, j.dump());
+    // 走容错 dump：这里的文本可能含服务端原始字节（非法 UTF-8），
+    // 而本函数是**同步**出口，抛异常 = 应用直接消失。见 json_dump.h 的说明。
+    return ToNapiString(env, jellyfin::SafeDumpJson(j));
 }
 
 bool ReadStringArg(napi_env env, napi_callback_info info, size_t index, std::string &out)
@@ -290,63 +329,6 @@ bool ReadIntArg(napi_env env, napi_callback_info info, size_t index, int64_t &ou
     }
     out = 0;
     return false;
-}
-
-jellyfin::api::ItemsQuery ParseItemsQueryJson(const nlohmann::json &j)
-{
-    jellyfin::api::ItemsQuery query;
-    if (!j.is_object()) {
-        return query;
-    }
-    query.parentId = j.value("parentId", "");
-    query.startIndex = j.value("startIndex", 0);
-    query.limit = j.value("limit", 50);
-    query.searchTerm = j.value("searchTerm", "");
-    query.includeItemTypes = j.value("includeItemTypes", "");
-    query.sortBy = j.value("sortBy", "");
-    query.sortOrder = j.value("sortOrder", "");
-    query.favoriteOnly = j.value("favoriteOnly", false);
-    query.recursive = j.value("recursive", true);
-    query.genreIds = j.value("genreIds", "");
-    query.studioIds = j.value("studioIds", "");
-    query.personIds = j.value("personIds", "");
-    query.fields = j.value("fields", "");
-    query.mediaTypes = j.value("mediaTypes", "");
-    query.excludeItemTypes = j.value("excludeItemTypes", "");
-    query.enableUserData = j.value("enableUserData", true);
-    query.filters = j.value("filters", "");
-    query.years = j.value("years", "");
-    query.officialRatings = j.value("officialRatings", "");
-    query.minOfficialRating = j.value("minOfficialRating", "");
-    query.tags = j.value("tags", "");
-    query.videoTypes = j.value("videoTypes", "");
-    query.isHd = j.value("isHd", false);
-    query.is4k = j.value("is4k", false);
-    query.hasSubtitles = j.value("hasSubtitles", false);
-    query.enableTotalRecordCount = j.value("enableTotalRecordCount", true);
-    // 本地随机抽样池（0 = 关闭，走服务端原生 Random 排序）。
-    // 为什么由客户端抽样：服务端 RandomComparer 的比较器不自洽，会随机抛 400
-    // （见 `ItemsQuery::randomSamplePoolSize` 的说明）。
-    query.randomSamplePoolSize = j.value("randomSamplePoolSize", 0);
-    return query;
-}
-
-jellyfin::api::PlaybackInfoOptions ParsePlaybackOptionsJson(const nlohmann::json &j)
-{
-    jellyfin::api::PlaybackInfoOptions options;
-    if (!j.is_object()) {
-        return options;
-    }
-    options.audioStreamIndex = j.value("audioStreamIndex", -1);
-    options.subtitleStreamIndex = j.value("subtitleStreamIndex", -1);
-    options.maxStreamingBitrate = j.value("maxStreamingBitrate", 0);
-    options.enableDirectPlay = j.value("enableDirectPlay", true);
-    options.enableDirectStream = j.value("enableDirectStream", true);
-    options.enableTranscoding = j.value("enableTranscoding", true);
-    // 是否带 DeviceProfile（默认带，见 api::PlaybackInfoOptions 的说明）。
-    // 宿主可在"用户明确要求强制直连"等场景置 false。
-    options.includeDeviceProfile = j.value("includeDeviceProfile", true);
-    return options;
 }
 
 /**
@@ -506,7 +488,9 @@ napi_value Login(napi_env env, napi_callback_info info)
         userName = JsonStringAny(userObj, {"Name", "name"});
         bool isAdmin = false;
         if (userObj.contains("Policy") && userObj["Policy"].is_object()) {
-            isAdmin = userObj["Policy"].value("IsAdministrator", false);
+            // 用 JsonBoolField 而不是 value()：value() 在"键存在但类型不符"时会抛，
+            // 而这里跑在 RunAsync 的 worker 线程上（异常逸出 = std::terminate）。
+            isAdmin = JsonBoolField(userObj["Policy"], "IsAdministrator");
         }
         if (token.empty() || userId.empty()) {
             std::string msg = result.error.message;
@@ -685,7 +669,7 @@ napi_value QueryItems(napi_env env, napi_callback_info info)
     }
     nlohmann::json options;
     ReadJsonArg(env, info, 0, options);
-    const auto query = ParseItemsQueryJson(options);
+    const auto query = jellyfin::api::ParseItemsQueryJson(options);
     const std::string userId = session.userId();
     return RunAsync(env, [query, userId]() {
         auto result = jellyfin::api::queryItems(Api(), userId, query);
@@ -846,7 +830,7 @@ napi_value GetItemDetail(napi_env env, napi_callback_info info)
         if (!result.ok() || !result.data.is_object()) {
             return FromApi(result).dump();
         }
-        const std::string type = result.data.value("Type", "");
+        const std::string type = JsonStringField(result.data, "Type");
         if (type == "Series") {
             auto seasons = jellyfin::api::getSeasons(Api(), userId, itemId);
             if (seasons.ok()) {
@@ -911,7 +895,7 @@ napi_value GetPlaybackInfo(napi_env env, napi_callback_info info)
     }
     nlohmann::json optionsJson;
     ReadJsonArg(env, info, 1, optionsJson);
-    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const auto options = jellyfin::api::ParsePlaybackOptionsJson(optionsJson);
     const std::string userId = session.userId();
     return RunAsync(env, [userId, itemId, options]() {
         bool fallback = false;
@@ -1628,7 +1612,7 @@ napi_value SoftPlayOpen(napi_env env, napi_callback_info info)
     }
     nlohmann::json optionsJson;
     ReadJsonArg(env, info, 5, optionsJson);
-    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const auto options = jellyfin::api::ParsePlaybackOptionsJson(optionsJson);
     const std::string userId = session.userId();
 
     return RunAsync(env, [userId, itemId, surfaceIdText, surfaceWidth, surfaceHeight, renderMode, options]() {
@@ -2284,7 +2268,7 @@ napi_value PlayerSoftDecodeProbe(napi_env env, napi_callback_info info)
     }
     nlohmann::json optionsJson;
     ReadJsonArg(env, info, 2, optionsJson);
-    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const auto options = jellyfin::api::ParsePlaybackOptionsJson(optionsJson);
     const std::string userId = session.userId();
 
     return RunAsync(env, [userId, itemId, cacheDir, options]() {
@@ -2389,7 +2373,7 @@ napi_value PlayerOpen(napi_env env, napi_callback_info info)
 
     nlohmann::json optionsJson;
     ReadJsonArg(env, info, 1, optionsJson);
-    const auto options = ParsePlaybackOptionsJson(optionsJson);
+    const auto options = jellyfin::api::ParsePlaybackOptionsJson(optionsJson);
 
     const std::string userId = session.userId();
     return RunAsync(env, [userId, itemId, options]() {
@@ -2640,10 +2624,11 @@ napi_value AdminGetLogText(napi_env env, napi_callback_info info)
     ReadIntArg(env, info, 1, keepTail);
     const size_t tailBytes = keepTail > 0 ? static_cast<size_t>(keepTail) : 0;
     return RunAsync(env, [name, tailBytes]() {
-        // 日志端点返回整份文件且服务端没有 range/tail 支持，所以只把结尾一段交给界面
-        return FromApi(
-                   Api().getTextTail(jellyfin::api::buildLogFileRequest(name).path, tailBytes))
-            .dump();
+        // 日志端点返回整份文件且服务端没有 range/tail 支持，所以只把结尾一段交给界面。
+        // 用容错 dump：日志是**原始文本**（可能含非 UTF-8 字节），裸 dump() 会抛
+        // type_error.316，把"看日志"变成"操作失败" —— 而看日志正是排查问题的最后手段。
+        return jellyfin::SafeDumpJson(
+            FromApi(Api().getTextTail(jellyfin::api::buildLogFileRequest(name).path, tailBytes)));
     });
 }
 
@@ -3316,7 +3301,10 @@ napi_value FetchSubtitleText(napi_env env, napi_callback_info info)
                               "subtitle fetch failed with HTTP " + std::to_string(resp.status))
                 .dump();
         }
-        return MakeResult(true, 200, "ok", nlohmann::json{{"text", resp.body}}).dump();
+        // 用容错 dump：字幕文件可能是 GBK 等非 UTF-8 编码（非法 UTF-8 的典型来源），
+        // 裸 dump() 会抛 type_error.316，把"取到了字幕"变成"操作失败"。
+        return jellyfin::SafeDumpJson(
+            MakeResult(true, 200, "ok", nlohmann::json{{"text", resp.body}}));
     });
 }
 
