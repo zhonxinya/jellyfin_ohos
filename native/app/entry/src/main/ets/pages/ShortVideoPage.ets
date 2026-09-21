@@ -15,6 +15,7 @@ import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
 import { MediaItem } from '../models/MediaItem';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
+import { Parallel } from '../common/Parallel';
 import { ShortVideoPrefs, kShortVideoBatchSize, kShortVideoSamplePoolSize } from '../common/ShortVideoPrefs';
 import { formatSeconds, stripMarkup } from '../common/format';
 import { JellyfinImage } from '../components/JellyfinImage';
@@ -107,6 +108,28 @@ const kChromeAutoHideMs: number = 6000;
  * 提前几条取，用户感知上就是"刷不完"。
  */
 const kAppendAhead: number = 4;
+
+/**
+ * 同时最多发多少个媒体库取数请求。
+ *
+ * 用户最多勾选十几个库（实测该服务器有 15 个）；一次全部并发会让服务端与网络同时拥堵，
+ * 而每个库的请求本身很轻（一次 `/Items`）。4 个一批既把"逐库串行"的 N 倍往返压到
+ * 一两轮，也不会形成连接风暴。
+ */
+const kLibraryConcurrency: number = 4;
+
+/**
+ * 同时最多发多少个"问某部剧该看哪一集"的请求（`/Shows/NextUp`）。
+ *
+ * 为什么需要并发：一批 24 条里可能含十几部剧，每部一次 NextUp —— 串行发就是
+ * "十几倍的往返时间"，而它们彼此毫无依赖。设备实测（模拟器 + 真实服务器）：
+ * 首屏取数段里**逐剧请求占了绝大多数时间**，并行后同一批内容只用一两轮往返。
+ *
+ * 为什么**有上限**而不是全开：一次几十个并发会让服务端与移动网络同时拥堵
+ * （且 `HttpClient` 每请求新建一条 TCP 连接，连接风暴反而更慢）。6 是"收益已到位、
+ * 风险可控"的折中：一批十几部剧只需 3 轮左右。
+ */
+const kSeriesConcurrency: number = 6;
 
 /**
  * 手势遮罩的"非画面区"尺寸（vp）—— 落在这些区域里的点按不当作"点画面暂停/双击快进"。
@@ -306,6 +329,14 @@ export struct ShortVideoPage {
    * 该给「重试」的时候给了「去设置」。
    */
   private batchError: string = '';
+  /**
+   * 本次取数的开始时刻（`Date.now()`）。
+   *
+   * 为什么要有：短视频**首屏**要给用户"打开就出画面"，因此每一步（取库名 / 逐库取条目 /
+   * 逐剧问 NextUp / 取播放地址）的耗时都必须可量化 —— 否则"第一次加载慢"只能靠感觉，
+   * 无法判断该优化哪一段（见 `loadFeed` 里的耗时日志）。
+   */
+  private feedStartedAt: number = 0;
   /** 双击判定状态（与播放页同一套：单击延后执行，双击会取消待执行的单击） */
   private lastTapUpAt: number = 0;
   private lastTapX: number = 0;
@@ -530,10 +561,16 @@ export struct ShortVideoPage {
     this.status = this.items.length > 0 ? UiState.REFRESHING : UiState.LOADING;
     this.refreshing = true;
     this.errorMsg = '';
-    this.libraryNames = await this.resolveLibraryNames(libraryIds);
+    this.feedStartedAt = Date.now();
+    // 库名只用于工具行上那行「来自：A / B」的**显示**，不参与取内容。
+    // 因此**不阻塞**首屏：与取内容并行发起，谁先好谁先上屏。
+    // （旧实现是 `await` 它再取内容，自白给首屏多加一次往返。）
+    this.refreshLibraryNames(libraryIds);
 
     // 换一批：不去重"上一批已经出现过的条目"（否则刷过的越多、可换的越少）
     const collected: MediaItem[] = await this.collectBatch(libraryIds, false);
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'loadFeed batch=%{public}dms items=%{public}d',
+      Date.now() - this.feedStartedAt, collected.length);
     this.refreshing = false;
     if (collected.length === 0) {
       // 全空有两种可能：所选库里确实没有视频，或请求失败。失败要如实报错（可重试），
@@ -562,6 +599,11 @@ export struct ShortVideoPage {
   /**
    * 逐库取一批条目并合并。
    *
+   * **各库有界并发发起**（而不是逐个 await）：取数是首屏路径上最长的一段，而各库之间
+   * 完全没有依赖 —— 串行发 N 个库就是让用户付 N 倍的往返时间（每个库两次
+   * "TCP 连接 + 请求"，见 `HttpClient` 的连接策略）。
+   * 并发上限见 `kLibraryConcurrency`：既压掉"逐库串行"的 N 倍等待，又不形成连接风暴。
+   *
    * @param dedupeAgainstCurrent 是否剔除"列表里已有的条目"：
    *        追加下一批时必须去重（否则随机取数会把看过的那几条再塞回来，
    *        "刷不完"就变成了"反复刷同几条"）；而「换一批」**不能**去重 ——
@@ -574,11 +616,21 @@ export struct ShortVideoPage {
                              dedupeAgainstCurrent: boolean): Promise<MediaItem[]> {
     this.batchError = '';
     const out: MediaItem[] = [];
-    for (let i = 0; i < libraryIds.length; i++) {
-      // `fetchLibraryBatch` 内部已完成"同剧只留一条"与去重（见 collapseSeries）——
-      // 折叠与去重必须发生在**同一处**：分开做会出现"折叠后才发现该剧已在当前列表里"，
-      // 白跑一次 NextUp 请求。
-      const batch: MediaItem[] = await this.fetchLibraryBatch(libraryIds[i], dedupeAgainstCurrent);
+    // 各库**有界并发**取，再按原顺序合并 ——
+    // 顺序稳定才不会让"先发先到"的网络抖动影响合并结果（去重是顺序敏感的）。
+    const batches: (MediaItem[] | null)[] = await Parallel.mapLimited<string, MediaItem[]>(
+      libraryIds, kLibraryConcurrency,
+      (libraryId: string): Promise<MediaItem[]> =>
+        this.fetchLibraryBatch(libraryId, dedupeAgainstCurrent));
+    // `fetchLibraryBatch` 内部已完成"同剧只留一条"与去重（见 collapseSeries）——
+    // 折叠与去重必须发生在**同一处**：分开做会出现"折叠后才发现该剧已在当前列表里"，
+    // 白跑一次 NextUp 请求。
+    for (let i = 0; i < batches.length; i++) {
+      const batch: MediaItem[] | null = batches[i];
+      if (batch === null) {
+        // 这个库取不到（已在 `fetchLibraryBatch` 里登记 `batchError`）：跳过它，不让整批失败
+        continue;
+      }
       for (let j = 0; j < batch.length; j++) {
         if (this.hasItemId(out, batch[j].id)) {
           continue;
@@ -663,46 +715,101 @@ export struct ShortVideoPage {
    * 换进来的那一集**继承作品的展示信息**（标题/简介/图片/类型徽标取剧的），
    * 另用一行标出"进去会播第几集" —— 一屏一条的横幅上，用户要看的是"这是哪部剧"。
    *
-   * 代价与取舍：每部剧要多一次 NextUp 请求，且在本函数里**串行**发出。追加是滑到接近
-   * 末尾时**提前**触发的（`prefetchIfNearEnd`），不在首屏路径上；首屏仍会有几次这类请求，
-   * 已在设备上确认延迟可接受 —— 这是"每部剧只显示一条"必然的代价。
+   * 代价与取舍：每部剧要多一次 NextUp 请求。这些请求**有界并发**发出
+   * （`kSeriesConcurrency`），而不是串行 —— 它们彼此毫无依赖，串行发就是
+   * 白付 N 倍的往返时间（首屏实测这是取数段里最大的一块）。
+   *
+   * 实现分两段：
+   * 1) **定槽位**：按原顺序扫一遍，决定哪些条目直接保留、哪些需要问 NextUp（同步，不发请求）；
+   * 2) **并发解析 + 组装**：把第 1 段里需要请求的剧集并发问一遍，再**按槽位顺序**
+   *    组装输出 —— 这样输出顺序仍然等于"条目在服务端响应里的顺序"，
+   *    不会因为哪部剧先答完就把列表顺序搅乱（随机感由后面的 `shuffle` 负责）。
    */
   private async collapseSeries(items: MediaItem[],
                                dedupeAgainstCurrent: boolean): Promise<MediaItem[]> {
     const out: MediaItem[] = [];
     const handledSeries: string[] = [];
+    const seriesCount: number = this.countSeries(items);
+    const collapseStart: number = Date.now();
+    // ── 第 1 段：定槽位（不发任何请求）───────────────────────────────
+    // null = "这部剧丢弃"（重复 / 已看过 / 稍后解析失败），否则是待解析的剧集
+    const slots: (MediaItem | null)[] = [];
     for (let i = 0; i < items.length; i++) {
       const item: MediaItem = items[i];
-      const seriesId: string = this.seriesKeyOf(item);
-      if (seriesId.length === 0) {
-        this.pushIfNew(out, item, dedupeAgainstCurrent);
+      const seriesKey: string = this.seriesKeyOf(item);
+      if (seriesKey.length === 0) {
+        slots.push(item);
         continue;
       }
-      // 同一批里已经处理过这部（且已被换掉/丢弃）：跳过，避免重复请求
-      if (handledSeries.indexOf(seriesId) >= 0) {
+      // 同一批里已经处理过这部：跳过，避免重复请求
+      if (handledSeries.indexOf(seriesKey) >= 0) {
+        slots.push(null);
         continue;
       }
-      handledSeries.push(seriesId);
+      handledSeries.push(seriesKey);
       // `out` 内去重**始终**要做（同一批里同一部剧只能出一条）；
       // 但"列表里已有这部剧"只在**追加**时才算重复 —— 「换一批」不能排除当前正在显示的剧，
       // 否则每次换一批都会把眼下这几部全部剔除（`this.items` 此刻仍是旧列表），
       // 用户看到的是"换了一批就没什么剧了"。
-      const inCurrentList: boolean = dedupeAgainstCurrent && this.hasSeries(this.items, seriesId);
-      if (inCurrentList || this.hasSeries(out, seriesId)) {
+      if (dedupeAgainstCurrent && this.hasSeries(this.items, seriesKey)) {
+        slots.push(null);
         continue;
       }
-      const next: MediaItem | null = await this.fetchNextUpEpisode(item, seriesId);
+      slots.push(item);
+    }
+    // ── 第 2 段：需要解析的槽位并发问 NextUp（有界并发）───────────────
+    const pendingIndexes: number[] = [];
+    const pendingItems: MediaItem[] = [];
+    const pendingKeys: string[] = [];
+    for (let i = 0; i < slots.length; i++) {
+      const slot: MediaItem | null = slots[i];
+      if (slot === null) {
+        continue;
+      }
+      const seriesKey: string = this.seriesKeyOf(slot);
+      if (seriesKey.length === 0) {
+        continue;
+      }
+      pendingIndexes.push(i);
+      pendingItems.push(slot);
+      pendingKeys.push(seriesKey);
+    }
+    const resolved: (MediaItem | null)[] = await Parallel.mapLimited<MediaItem, MediaItem>(
+      pendingItems, kSeriesConcurrency,
+      (item: MediaItem, index: number): Promise<MediaItem | null> =>
+        this.fetchNextUpEpisode(item, pendingKeys[index]));
+    const resolvedBySlot: Map<number, MediaItem | null> = new Map<number, MediaItem | null>();
+    for (let i = 0; i < pendingIndexes.length; i++) {
+      resolvedBySlot.set(pendingIndexes[i], resolved[i]);
+    }
+    // ── 第 3 段：按槽位顺序组装（去重语义与串行版一致）────────────────
+    for (let i = 0; i < slots.length; i++) {
+      const slot: MediaItem | null = slots[i];
+      if (slot === null) {
+        continue;
+      }
+      const seriesKey: string = this.seriesKeyOf(slot);
+      if (seriesKey.length === 0) {
+        this.pushIfNew(out, slot, dedupeAgainstCurrent);
+        continue;
+      }
+      const next: MediaItem | null = resolvedBySlot.get(i) ?? null;
       if (next === null) {
         // 这部剧没有"下一集"（全看完了 / 取不到）：整条丢掉。
         // 丢掉而不是保留某一集 —— 否则用户会反复刷到已经看完的剧。
         hilog.info(LOG_DOMAIN, LOG_TAG,
-          'series drop（无下一集）key=%{public}s name=%{public}s', seriesId, item.name);
+          'series drop（无下一集）key=%{public}s name=%{public}s', seriesKey, slot.name);
         continue;
       }
       hilog.info(LOG_DOMAIN, LOG_TAG,
         'series collapse key=%{public}s「%{public}s」→ episode=%{public}s E%{public}d',
-        seriesId, next.name, next.id, next.indexNumber);
+        seriesKey, next.name, next.id, next.indexNumber);
       this.pushIfNew(out, next, dedupeAgainstCurrent);
+    }
+    if (seriesCount > 0) {
+      hilog.info(LOG_DOMAIN, LOG_TAG,
+        'collapseSeries series=%{public}d nextUp=%{public}dms out=%{public}d',
+        seriesCount, Date.now() - collapseStart, out.length);
     }
     return out;
   }
@@ -734,6 +841,18 @@ export struct ShortVideoPage {
       }
     }
     return false;
+  }
+
+  /** 这一批里有多少**不同的剧集归属**（= 要发几次 NextUp 请求），仅用于耗时日志 */
+  private countSeries(list: MediaItem[]): number {
+    const seen: string[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const key: string = this.seriesKeyOf(list[i]);
+      if (key.length > 0 && seen.indexOf(key) < 0) {
+        seen.push(key);
+      }
+    }
+    return seen.length;
   }
 
   /** 加入结果列表（同时做"批内去重"与可选的"与当前列表去重"） */
@@ -955,6 +1074,29 @@ export struct ShortVideoPage {
     this.playedIds = played;
   }
 
+  /**
+   * 后台刷新"已选媒体库的名称"（只影响工具行那行 `来自：A / B` 的显示）。
+   *
+   * 为什么与取内容**并行**而不是先取它：首屏要的是"尽快出画面"，库名只是文字标签 ——
+   * 让它挡在取内容前面，等于白给首屏多加一次往返（实测 `/Views` 与取内容是同一量级的请求）。
+   */
+  private refreshLibraryNames(libraryIds: string[]): void {
+    this.resolveLibraryNames(libraryIds).then((names: string[]) => {
+      const selection: string[] = this.loadedLibraryIds;
+      // 期间用户改了媒体库选择（或换了一批）：这批名字已经不对应当前配置，丢弃
+      if (selection.length !== libraryIds.length) {
+        return;
+      }
+      for (let i = 0; i < selection.length; i++) {
+        if (selection[i] !== libraryIds[i]) {
+          return;
+        }
+      }
+      this.libraryNames = names;
+      hilog.info(LOG_DOMAIN, LOG_TAG, 'libraryNames=%{public}d（后台补上）', names.length);
+    });
+  }
+
   /** 已选媒体库的名称（取服务器视图列表；取不到就退化为空，不影响出内容） */
   private async resolveLibraryNames(libraryIds: string[]): Promise<string[]> {
     const names: string[] = [];
@@ -1024,9 +1166,13 @@ export struct ShortVideoPage {
     // 播放参数按"设置里的清晰度"走：具体分辨率档位会让服务端转码，
     // 「自动」则由服务端按本机能力决定直连还是转码（见 ShortVideoPrefs.playbackOptionsJson）。
     const options: string = ShortVideoPrefs.playbackOptionsJson();
+    const openStart: number = Date.now();
     hilog.info(LOG_DOMAIN, LOG_TAG, 'playCurrent item=%{public}s quality=%{public}s',
       item.id, ShortVideoPrefs.qualityShortLabel());
     const raw: string = await JellyfinNative.playerOpen(item.id, options);
+    hilog.info(LOG_DOMAIN, LOG_TAG, 'playCurrent playerOpen=%{public}dms (from feed start %{public}dms)',
+      Date.now() - openStart,
+      this.feedStartedAt > 0 ? Date.now() - this.feedStartedAt : -1);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
       this.onItemFailed(result.message.length > 0 ? `获取播放地址失败：${result.message}` : '获取播放地址失败');
