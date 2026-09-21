@@ -32,8 +32,11 @@ int main()
     ExpectContains("path", url, "/Items/item-1/Images/Primary");
     ExpectContains("maxWidth", url, "maxWidth=300");
     ExpectContains("tag", url, "tag=tagA");
-    ExpectContains("api_key", url, "api_key=token123");
     ExpectTrue("https base", url.rfind("https://example.com", 0) == 0);
+    // 安全约定：取图 URL **不得**携带访问令牌（URL 会进服务端访问日志）。
+    // 凭据改由 X-Emby-Authorization 请求头传递，见 native/core/auth_headers.h。
+    ExpectTrue("no api_key in url", url.find("api_key") == std::string::npos);
+    ExpectTrue("no token in url", url.find("token123") == std::string::npos);
 
     nlohmann::json item = {
         {"ImageTags", {{"Primary", "p1"}}},

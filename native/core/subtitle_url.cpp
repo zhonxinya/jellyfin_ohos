@@ -40,7 +40,7 @@ std::string SubtitleFormatForCodec(const std::string &codec)
 
 std::string BuildSubtitleUrl(const std::string &baseUrl, const std::string &itemId,
                              const std::string &mediaSourceId, int streamIndex,
-                             const std::string &format, const std::string &accessToken)
+                             const std::string &format, const std::string & /*accessToken*/)
 {
     if (baseUrl.empty() || itemId.empty() || streamIndex < 0) {
         return {};
@@ -50,11 +50,10 @@ std::string BuildSubtitleUrl(const std::string &baseUrl, const std::string &item
     std::ostringstream path;
     path << "/Videos/" << itemId << "/" << source << "/Subtitles/" << streamIndex << "/Stream."
          << fmt;
-    std::string url = JoinUrl(baseUrl, path.str());
-    if (!accessToken.empty()) {
-        url += "?api_key=" + accessToken;
-    }
-    return url;
+    // 安全约定：不把访问令牌拼进 URL（URL 会进服务端访问日志）。
+    // 字幕文本由本工程 HTTP 客户端拉取，凭据走 X-Emby-Authorization 头，
+    // 见 native/napi FetchSubtitleText 与 core/auth_headers.h。
+    return JoinUrl(baseUrl, path.str());
 }
 
 } // namespace jellyfin

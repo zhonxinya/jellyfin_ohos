@@ -537,6 +537,9 @@ export struct SettingsPage {
   private async clearLocalData(): Promise<void> {
     this.showClearDataConfirm = false;
     await SessionStore.clearAll();
+    // 图片缓存里是上次账号的媒体缩略图（可反推观看内容），同样属于本机用户数据，
+    // 必须一并清除；否则“清除全部本地数据”后磁盘上仍留着可读的封面。
+    JellyfinNative.clearImageCache();
     // 同时清掉内存中的会话与服务器地址，避免刚清除后界面仍显示上一次的配置
     AppViewModel.getInstance().resetAuth();
     AppViewModel.getInstance().setServer('');

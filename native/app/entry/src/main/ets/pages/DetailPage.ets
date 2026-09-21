@@ -986,13 +986,14 @@ struct DetailPage {
           Column() {
             // 顶部背景横幅（BackdropBanner）
             Stack({ alignContent: Alignment.TopStart }) {
-              Image(this.item.imageUrl(900, 'Backdrop'))
+              // 与页面其余封面一致，经 JellyfinImage 取图：避免 Image(远程URL) 走 ArkUI
+              // 自带网络栈（大图库下 fd 逼近上限会 abort），也避免把请求 URL 交给外部组件。
+              JellyfinImage({
+                url: this.item.imageUrl(900, 'Backdrop'),
+                fillMode: true
+              })
                 .width('100%')
                 .height(180)
-                .objectFit(ImageFit.Cover)
-                .onError(() => {
-                  // 背景图加载失败不影响页面
-                })
               Column()
                 .width('100%')
                 .height('100%')
