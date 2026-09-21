@@ -287,26 +287,25 @@ napi_value ToNapiJson(napi_env env, const nlohmann::json &j)
  * 实测后果不是崩溃而是**静默错值**：NaN / ±inf / 1e300 / 2^63 全部转成
  * `-9223372036854775808`（INT64_MIN），这个数"看起来像个合法参数"——
  * 后续 `static_cast<int>(startIndex)` 得到 0、或让它当负数参与拼接，都不会报错。
+ * 注意 `1e300` 也在这条里：它是有限值，所以只判 `isfinite` 不够，必须同时判范围。
  *
- * 权衡：只接受"整数值的 double"。`3.7` 宁可拒收（返回 false → 调用方回落默认值），
- * 也不做静默截断 —— 本工程的这些参数全是下标 / 下标类计数，不该出现小数。
+ * 范围**内的**小数仍按截断处理（`3.7 → 3`）：这是原实现就有的行为，本次只修 UB，
+ * 不顺带改语义。
  *
  * @return true 表示可用（`out` 已赋值）；false 表示调用方应回落默认值
  */
 bool ReadFiniteInt64(double d, int64_t &out)
 {
     if (!std::isfinite(d)) {
-        // NaN / +inf / -inf
-        return false;
-    }
-    if (d != std::trunc(d)) {
-        // 非整数（含 1e300 这类超出 double 整数精度的大数）
+        // NaN / +inf / -inf：转整数是 UB，必须挡在 static_cast 之前
         return false;
     }
     if (d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
-        // 超出 int64 可表示范围（上界用 >= 是刻意的：2^63 本身已越界）
+        // 超出 int64 可表示范围（上界用 >= 是刻意的：2^63 本身已越界，
+        // 而 2^63 恰好是 double 能精确表示的最近边界）
         return false;
     }
+    // 范围内的值：截断小数部分，与原实现一致（本次只修 UB，不改语义）
     out = static_cast<int64_t>(d);
     return true;
 }
