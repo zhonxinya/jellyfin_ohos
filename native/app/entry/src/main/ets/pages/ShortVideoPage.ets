@@ -89,9 +89,16 @@ const kPrepareTimeoutMs: number = 15000;
  * 播放中多久没交互就把上下控件藏起来（毫秒）。
  *
  * 短视频是"一直在放"的场景：顶栏与底部信息长期挂在画面上既挡画面也容易误触，
- * 主流做法是"播放一会儿自动让位、一碰就回来"。4 秒是"刚点完还能看清、又不至于赖着不走"的折中。
+ * 主流做法是"播放一会儿自动让位、一碰就回来"。
+ *
+ * 原来是 4 秒，**设备实测不够用**：把控件唤出来、再把手指移到右上角按下去，
+ * 很容易就超过 4 秒 —— 这时控件已经隐藏，那一下只会把它重新唤出（见 `onCardTouch`），
+ * 于是用户要点两次才生效，感受就是"全屏/设置点不动"。
+ * 实测把时序拉开对比：唤出后 1 秒内点「设置」能跳转，等 6 秒再点则失败。
+ * 6 秒比主流播放器的 3~5 秒略长一点，换来的是"看到按钮就来得及按"。
+ * （控件隐藏后点画面仍只唤出、不改播放状态，见 `handleTapUp`，所以不会因此误暂停。）
  */
-const kChromeAutoHideMs: number = 4000;
+const kChromeAutoHideMs: number = 6000;
 
 /**
  * 距离列表末尾还剩几条时就去取下一批。
@@ -111,6 +118,31 @@ const kAppendAhead: number = 4;
  */
 const kTopChromeVp: number = 64;
 const kBottomChromeVp: number = 108;
+/**
+ * 工具行按钮的最小触达尺寸（vp）—— 手势注入（含真机手指）在 32vp 上很容易点空。
+ *
+ * 为什么要有它（设备实测的缺陷）：全屏 / 设置两个图标按钮原先都写死 `width(32).height(32)`，
+ * 按 3.375 的密度只有 108px，而成人手指的可靠触达尺寸是 48vp（约 162px）。
+ * 实测同一个坐标上，同行的「方向」胶囊（约 87×32vp，有文字撑着）能点中，
+ * 而这两个纯图标圆钮经常点不中 —— 用户感受就是「全屏和设置点不动」。
+ *
+ * 因此把**视觉尺寸**与**热区尺寸**分开：
+ * - 视觉仍是 32vp（工具行不被撑高，与「方向」胶囊同高、一行对齐）；
+ * - 热区用 `responseRegion` 扩到 48vp，并向外多留一点，让边缘按下的容错更宽。
+ */
+const kToolTouchVp: number = 48;
+/**
+ * 热区相对按钮中心向外扩张的尺寸（vp）。
+ *
+ * 48vp 是「最小可靠触达」的下限；工具行按钮之间有 10vp 的 `space`，
+ * 若直接把热区做到 48vp，相邻两个 32vp 按钮的热区会**重叠 6vp**
+ * （48 − 32 = 16，两边各溢出 8vp，而间距只有 10vp），落在重叠带的点击由谁接管
+ * 就取决于顺序，反而更容易出现「点了 A 却触发 B」。
+ *
+ * 所以这里只向**上下**各扩到 48vp（工具行高度方向没有相邻控件，不会打架），
+ * 左右各只多留 2vp —— 既显著提高命中率，又不与邻居争抢。
+ */
+const kToolTouchSidePadVp: number = 2;
 const kRailWidthVp: number = 84;
 const kRailHeightVp: number = 380;
 /**
@@ -2391,6 +2423,9 @@ export struct ShortVideoPage {
       // 为什么做成图标按钮而不是像「方向」那样带文字：竖屏 373vp 宽的工具行里已经有
       // 「方向」胶囊 + 「设置」圆钮，再塞一个文字胶囊会把左侧的页码/清晰度徽标挤到换行；
       // 展开/收起是全平台通用的形状，图标本身就够表意（与「设置」同尺寸，一行对齐）。
+      //
+      // 热区：视觉 32vp，但 `responseRegion` 把它撑到 48vp（上下满、左右各 +2vp）——
+      // 见 `kToolTouchVp` 的说明，32vp 的纯图标钮实测很容易点空。
       Button({ type: ButtonType.Circle, stateEffect: false }) {
         SymbolGlyph(this.fullscreenIcon())
           .fontSize(ThemeConstants.ICON_MEDIUM)
@@ -2400,6 +2435,12 @@ export struct ShortVideoPage {
       .height(32)
       .padding(0)
       .backgroundColor(this.colors().overlayControl)
+      .responseRegion({
+        x: -kToolTouchSidePadVp,
+        y: -(kToolTouchVp - 32) / 2,
+        width: 32 + kToolTouchSidePadVp * 2,
+        height: kToolTouchVp
+      })
       .onClick(() => { this.toggleFullscreen(); })
 
       // 设置：进入「短视频模式」媒体库选择
@@ -2412,6 +2453,12 @@ export struct ShortVideoPage {
       .height(32)
       .padding(0)
       .backgroundColor(this.colors().overlayControl)
+      .responseRegion({
+        x: -kToolTouchSidePadVp,
+        y: -(kToolTouchVp - 32) / 2,
+        width: 32 + kToolTouchSidePadVp * 2,
+        height: kToolTouchVp
+      })
       .onClick(() => { this.openSettings(); })
     }
     .width('100%')
