@@ -138,9 +138,62 @@ const kSeriesConcurrency: number = 6;
  * 与手势层是**兄弟节点**，一次点按会同时到达两者（因此浮层容器用
  * `HitTestMode.Transparent` 而不是默认值，否则按钮点不动）。也就是说"点按钮会不会顺带
  * 暂停"必须由手势层按坐标自己判断 —— 位置判定与事件顺序无关，比"按钮按下时打标记"可靠。
+ *
+ * 下面三个常量由**同一组**值算出（而不是各自写死一个数字）：
+ * 曾经这里是裸的 `64`，工具行的顶部留白则是另一处硬编码的 `10` ——
+ * 两处对不上时，工具行下方的点按会被当成"点画面"而误触发暂停。
  */
-const kTopChromeVp: number = 64;
-const kBottomChromeVp: number = 108;
+/**
+ * 顶部工具行距屏幕上沿的距离（vp）——**不含** `topInsetVp`（状态栏避让）。
+ *
+ * 为什么是 18 而不是原来的 10：本页保留系统状态栏（见 `WindowFullscreen.enterWithStatusBar`），
+ * 状态栏那条本身已经压着一行系统图标，工具行紧贴它的下沿会让"系统那一行 + 应用这一行"
+ * 糊成一片。让出 8vp 的呼吸位后两行在视觉上分开，也更接近现代短视频应用的留白比例。
+ */
+const kTopChromePadVp: number = 18;
+/**
+ * 工具行自身的视觉高度（vp）。
+ *
+ * 取值理由不是"看着差不多"，而是**要让按钮热区完整落在行内**：圆钮用
+ * `responseRegion` 把热区上下扩到 `kToolTouchVp`（48），行高若小于 48，
+ * 热区就会溢出到下沿之外，于是"点在按钮正下方"也判成控件区。
+ * 实测工具行内容本身约 32vp（按钮 32、两行文字 16+2+12），48 是这两者的上界。
+ */
+const kTopChromeRowVp: number = 48;
+/**
+ * 手势层判定"顶部控件区"的高度（vp）= 起始留白 + 行高。
+ *
+ * 原实现这里是硬编码的 64，正好等于旧的 `10 + 54`；现在改成由同一组常量算出，
+ * 免得"改了 padding 忘了改手势区"（那会让工具行下方的点按被当成"点画面"而误触发暂停）。
+ * 现值 66 ≈ 原来的 64：**不引入额外的行为变化**。
+ */
+const kTopChromeVp: number = kTopChromePadVp + kTopChromeRowVp;
+/**
+ * 顶部渐变遮罩在"工具行下沿之下"还要继续压的高度（vp）。
+ *
+ * 为什么需要它 —— 渐变的高度必须跟着工具行一起长：
+ * 渐变是**线性**的，工具行在渐变里的**相对位置**决定它吃到的遮罩强度。
+ * 若只把工具行下移、渐变仍停在原来的 120vp，工具行的相对位置就从 8%~35% 挪到
+ * 15%~41%（更靠尾部）—— 这是把工具行往更淡的地方推。补上一段尾巴后，
+ * 工具行的相对位置反而**略更靠近重侧**（21.7% → 27.9%），文字可读性不降反升。
+ * 同时它让渐变**越过**工具行下沿再收尾，不会在行下方立刻硬切出一道可见的边。
+ *
+ * 取值 56：渐变到 `topInsetVp + 122` 收尾（原实现是 `topInsetVp + 120`），
+ * 视觉上不会多出/少掉一条暗带。
+ */
+const kTopChromeScrimTailVp: number = 56;
+/**
+ * 工具行文字/图标在画面上的投影（vp）。
+ *
+ * 为什么需要（按 WCAG 相对亮度算过，不是凭感觉）：顶部渐变的 alpha 上限是
+ * `scrim` = 53% 黑，即使白字恰好落在渐变**最重**处，对比度也只有 4.48:1；
+ * 而工具行实际落在渐变 15%~41% 这一段，遮罩只有 8%~22%，背景最亮可达 235/255，
+ * 纯白画面的白字对比度跌到 **1.45:1 ~ 1.92:1** —— 远低于 4.5:1。
+ * `.textShadow` 是视频类应用在画面上直接写文字的通行做法：只在亮画面区域起作用，
+ * 暗画面上看不出来。
+ */
+const kTopChromeTextShadowRadius: number = 4;
+const kTopChromeTextShadowOffset: number = 1;
 /**
  * 工具行按钮的最小触达尺寸（vp）—— 手势注入（含真机手指）在 32vp 上很容易点空。
  *
@@ -166,6 +219,8 @@ const kToolTouchVp: number = 48;
  * 左右各只多留 2vp —— 既显著提高命中率，又不与邻居争抢。
  */
 const kToolTouchSidePadVp: number = 2;
+/** 底部控件带高度（vp）：竖屏是"底部信息 + 右侧操作栏"，横屏是右下角那一行 */
+const kBottomChromeVp: number = 108;
 const kRailWidthVp: number = 84;
 const kRailHeightVp: number = 380;
 /**
@@ -2515,12 +2570,22 @@ export struct ShortVideoPage {
             .fontSize(ThemeConstants.TITLE_MEDIUM)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.colors().onOverlay)
+            // 投影：顶部的 53% 黑渐变压不住纯白画面，白字在亮画面上对比度不足
+            // （见 kTopChromeTextShadowRadius 的说明）
+            .textShadow({
+              radius: kTopChromeTextShadowRadius,
+              color: this.colors().scrimHeavy,
+              offsetX: 0,
+              offsetY: kTopChromeTextShadowOffset
+            })
           Text(`${index + 1}/${this.items.length}`)
             .fontSize(ThemeConstants.LABEL_SMALL)
             .fontColor(this.colors().onOverlayMuted)
             .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-            .backgroundColor(this.colors().overlayControl)
-            .borderRadius(ThemeConstants.BADGE_RADIUS)
+            // 底色与描边对齐播放页的浮层控件（`overlayControlStrong` + 1vp 淡描边）：
+            // 原来只用 20% 白的 `overlayControl`，压在亮画面上徽标会"化掉"看不见边界。
+            .backgroundColor(this.colors().overlayControlStrong)
+            .border({ width: 1, color: this.colors().overlayControl, radius: ThemeConstants.BADGE_RADIUS })
           // 清晰度 / 播放方式：用户选了「720p」到底生效没有，画面上只有这里能看出来
           // （转码流是 HLS，走硬件解码；直连则可能是本机硬解或软解）
           Text(this.qualityBadge())
@@ -2529,8 +2594,13 @@ export struct ShortVideoPage {
               ? this.colors().onBrand : this.colors().onOverlayMuted)
             .padding({ left: 8, right: 8, top: 2, bottom: 2 })
             .backgroundColor(this.isTranscodeStream()
-              ? this.colors().brandPrimary : this.colors().overlayControl)
-            .borderRadius(ThemeConstants.BADGE_RADIUS)
+              ? this.colors().brandPrimary : this.colors().overlayControlStrong)
+            .border({
+              width: 1,
+              color: this.isTranscodeStream()
+                ? this.colors().brandPrimary : this.colors().overlayControl,
+              radius: ThemeConstants.BADGE_RADIUS
+            })
         }
         .alignItems(VerticalAlign.Center)
 
@@ -2541,6 +2611,12 @@ export struct ShortVideoPage {
           .fontColor(this.colors().onOverlayMuted)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow({
+            radius: kTopChromeTextShadowRadius,
+            color: this.colors().scrimHeavy,
+            offsetX: 0,
+            offsetY: kTopChromeTextShadowOffset
+          })
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
@@ -2560,8 +2636,9 @@ export struct ShortVideoPage {
       }
       .height(32)
       .padding({ left: 10, right: 12 })
-      .backgroundColor(this.colors().overlayControl)
-      .borderRadius(ThemeConstants.CHIP_RADIUS)
+      // 与两个图标圆钮用同一套浮层底 + 淡描边，三个控件在同一行看起来才是一组
+      .backgroundColor(this.colors().overlayControlStrong)
+      .border({ width: 1, color: this.colors().overlayControl, radius: ThemeConstants.CHIP_RADIUS })
       .onClick(() => { this.cycleOrientation(); })
 
       // 主动全屏：横屏 + 外壳页签栏收起，画面铺满整屏；再点一次退出。
@@ -2580,7 +2657,10 @@ export struct ShortVideoPage {
       .width(32)
       .height(32)
       .padding(0)
-      .backgroundColor(this.colors().overlayControl)
+      // 与「方向」胶囊、两个徽标同一套浮层底 + 淡描边：
+      // 原先是纯 20% 白、无边界，压在亮画面上圆钮的形状会糊掉。
+      .backgroundColor(this.colors().overlayControlStrong)
+      .border({ width: 1, color: this.colors().overlayControl, radius: 16 })
       .responseRegion({
         x: -kToolTouchSidePadVp,
         y: -(kToolTouchVp - 32) / 2,
@@ -2598,7 +2678,8 @@ export struct ShortVideoPage {
       .width(32)
       .height(32)
       .padding(0)
-      .backgroundColor(this.colors().overlayControl)
+      .backgroundColor(this.colors().overlayControlStrong)
+      .border({ width: 1, color: this.colors().overlayControl, radius: 16 })
       .responseRegion({
         x: -kToolTouchSidePadVp,
         y: -(kToolTouchVp - 32) / 2,
@@ -2709,11 +2790,15 @@ export struct ShortVideoPage {
         })
       }
 
-      // 顶部渐变：工具行压在亮画面上也读得清
+      // 顶部渐变：工具行压在亮画面上也读得清。
+      // 高度跟着工具行一起调整（见 kTopChromeScrimTailVp）：
+      //   topInsetVp（状态栏那一条）
+      // + kTopChromeVp（工具行的起始留白 + 行高）
+      // + kTopChromeScrimTailVp（越过工具行下沿的渐隐收尾）
       Column() {
         Column()
           .width('100%')
-          .height(120 + this.topInsetVp)
+          .height(this.topInsetVp + kTopChromeVp + kTopChromeScrimTailVp)
           .linearGradient({
             angle: 0,
             colors: [['#00000000', 0.0], [this.colors().scrim, 1.0]]
@@ -2768,7 +2853,9 @@ export struct ShortVideoPage {
         .padding({
           left: ThemeConstants.PAGE_PADDING,
           right: ThemeConstants.PAGE_PADDING,
-          top: 10 + this.topInsetVp
+          // 工具行整体下移，与系统状态栏之间留出呼吸位（见 kTopChromePadVp）。
+          // 手势层的 kTopChromeVp 由同一组常量算出，两者不会再各写一个数字而对不上。
+          top: kTopChromePadVp + this.topInsetVp
         })
         .hitTestBehavior(HitTestMode.Transparent)
         .transition(TransitionEffect.OPACITY.animation({ duration: 220, curve: Curve.EaseInOut }))
