@@ -124,6 +124,28 @@ inline long long Int(const nlohmann::json &obj, const char *key, long long fallb
 }
 
 /**
+ * 取**对象**字段（键不存在 / 类型不符 / `null` / 数组 一律返回空对象）。
+ *
+ * 与 `String`/`Int`/`Bool` 不同，这里的**主要价值不是防抛异常**：本机实测
+ * `j.value(key, nlohmann::json::object())` 在 default 也是 `json` 时**不做类型检查**
+ * （`{"k":[]}` / `{"k":null}` / `{"k":"s"}` 都原样返回、不抛）。它的价值是把
+ * "拿不到对象就当空对象"这件事收在一处，调用方不必再补一句 `if (!x.is_object())`，
+ * 也就不会有人误写成 default 为**具体类型**的形式 —— 那种才真的会抛
+ * （`value("k", false)` 对 `null`/数组/数字均抛 `type_error.302`，已实测）。
+ */
+inline nlohmann::json Object(const nlohmann::json &obj, const char *key)
+{
+    if (!obj.is_object()) {
+        return nlohmann::json::object();
+    }
+    const auto it = obj.find(key);
+    if (it == obj.end() || !it->is_object()) {
+        return nlohmann::json::object();
+    }
+    return *it;
+}
+
+/**
  * 取 `int` 字段：内部走 `Int()`，但会**先判界再窄化**。
  *
  * 为什么不直接 `static_cast<int>(Int(...))`：越界是回绕截断，而本工程的这些 int 字段

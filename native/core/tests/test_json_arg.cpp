@@ -191,6 +191,47 @@ void TestBoolSemantics()
     Expect(Bool(Parse(R"([1])"), "k", false) == false, "顶层不是对象时返回 fallback");
 }
 
+/** `Object()`：拿不到对象就给空对象，绝不抛异常 */
+void TestObjectSemantics()
+{
+    using jellyfin::json_arg::Object;
+
+    Expect(Object(Parse(R"({"k":{"a":1}})"), "k").is_object() &&
+               Object(Parse(R"({"k":{"a":1}})"), "k")["a"] == 1,
+           "对象字段照常返回");
+    Expect(Object(Parse(R"({"k":{}})"), "k").is_object() &&
+               Object(Parse(R"({"k":{}})"), "k").empty(),
+           "空对象是合法值（返回空对象而不是 fallback 之外的形状）");
+    Expect(Object(Parse(R"({})"), "k").is_object(), "字段缺失返回空对象");
+    Expect(Object(Parse(R"({"k":null})"), "k").is_object(),
+           "null 返回空对象（这正是 value() 会抛的输入）");
+    Expect(Object(Parse(R"({"k":[]})"), "k").is_object(), "数组返回空对象");
+    Expect(Object(Parse(R"({"k":"s"})"), "k").is_object(), "字符串返回空对象");
+    Expect(Object(Parse(R"({"k":7})"), "k").is_object(), "数字返回空对象");
+
+    // 记录 nlohmann 的真实行为（实测）：default 也是 json 时 value() **不做**类型检查，
+    // 因此这几种输入不会抛。Object() 的价值是把"拿不到对象就用空对象"收在一处，
+    // 而不是修一个会抛的 bug —— 断言如实写下这一点，避免后人误以为是防崩措施。
+    bool valueThrew = false;
+    try {
+        (void)Parse(R"({"k":[]})").value("k", nlohmann::json::object());
+        (void)Parse(R"({"k":null})").value("k", nlohmann::json::object());
+    } catch (const std::exception &) {
+        valueThrew = true;
+    }
+    Expect(!valueThrew,
+           "对照：value(k, json::object()) 对数组/null 不抛（Object() 主要收益是语义收敛）");
+
+    // 而 default 为**具体类型**时 value() 确实会抛 —— 这才是必须用 Bool()/Int() 的原因。
+    bool concreteThrew = false;
+    try {
+        (void)Parse(R"({"k":null})").value("k", false);
+    } catch (const std::exception &) {
+        concreteThrew = true;
+    }
+    Expect(concreteThrew, "对照：value(k, false) 对 null 会抛（Bool() 因此存在）");
+}
+
 /**
  * `Int32()`：越界必须回落默认值，**不能回绕**。
  *
@@ -345,6 +386,7 @@ int main()
     TestNeverThrowsOnMismatchedTypes();
     TestStringSemantics();
     TestIntSemantics();
+    TestObjectSemantics();
     TestInt32DoesNotWrapAround();
     TestSafeDumpToleratesInvalidUtf8();
     TestBoolSemantics();

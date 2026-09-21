@@ -1,5 +1,6 @@
 #include "account_api.h"
 
+#include "json_arg.h"
 #include "url_util.h"
 
 namespace jellyfin {
@@ -70,10 +71,10 @@ ApiResult patchUserConfiguration(JellyfinApiClient &client, const std::string &u
         return invalid;
     }
 
-    nlohmann::json config = current.data.value("Configuration", nlohmann::json::object());
-    if (!config.is_object()) {
-        config = nlohmann::json::object();
-    }
+    // Configuration 可能是数组/字符串/null（服务端版本差异或异常响应），
+    // 用 Object() 统一收敛成"拿不到对象就用空配置继续"——
+    // 原来这里是 value(...) 再补一句 is_object() 判断，两处语义容易写岔。
+    nlohmann::json config = jellyfin::json_arg::Object(current.data, "Configuration");
     for (auto it = patch.begin(); it != patch.end(); ++it) {
         config[it.key()] = it.value();
     }
