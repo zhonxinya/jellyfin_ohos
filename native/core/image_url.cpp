@@ -8,7 +8,7 @@ namespace jellyfin {
 
 std::string BuildImageUrl(const std::string &baseUrl, const std::string &itemId,
                           const std::string &imageType, int maxWidth, const std::string &tag,
-                          const std::string &accessToken)
+                          const std::string & /*accessToken*/)
 {
     if (baseUrl.empty() || itemId.empty()) {
         return {};
@@ -31,9 +31,10 @@ std::string BuildImageUrl(const std::string &baseUrl, const std::string &itemId,
     if (!tag.empty()) {
         append("tag", tag);
     }
-    if (!accessToken.empty()) {
-        append("api_key", accessToken);
-    }
+    // 安全约定：**不把访问令牌拼进 URL**（旧实现追加 api_key=<token>）。
+    // 原因：URL 会被 Jellyfin 写进服务端访问日志（设备实测曾出现 147 处 api_key=…），
+    // 也会经 Referer/代理/浏览器历史等渠道外泄。取图统一由本工程 HTTP 客户端完成，
+    // 凭据通过 `X-Emby-Authorization` 请求头传递（见 native/napi LoadImage）。
     return JoinUrl(baseUrl, path.str()) + query.str();
 }
 

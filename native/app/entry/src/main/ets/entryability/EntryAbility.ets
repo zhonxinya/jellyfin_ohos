@@ -39,6 +39,11 @@ export default class EntryAbility extends UIAbility {
     SessionStore.init(this.context).then(() => {
       const cacheDir: string = this.context.cacheDir + '/jellyfin_images';
       JellyfinNative.setImageCacheDir(cacheDir);
+      // 供「清除全部本地数据」清理系统图片管线在沙箱内的预加载缓存。
+      // 注意必须用 **application** 级 cacheDir：`context.cacheDir` 是模块级
+      // （.../haps/entry/cache），而 preload_caches 在 bundle 级
+      // （.../base/cache）。设备探针实测：app.cacheDir 下 preload_caches = 283 个文件。
+      SessionStore.setAppCacheDir(this.context.getApplicationContext().cacheDir);
     });
   }
 

@@ -5,6 +5,7 @@ import { JsonUtil } from '../common/JsonUtil';
 import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { MediaItem } from '../models/MediaItem';
+import { JellyfinImage } from './JellyfinImage';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import display from '@ohos.display';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
@@ -129,13 +130,15 @@ export struct HeroBanner {
   @Builder
   BannerSlide(item: MediaItem) {
     Stack({ alignContent: Alignment.BottomStart }) {
-      Image(item.imageUrl(1200, 'Backdrop'))
+      // 经 JellyfinImage 取图（本工程 HTTP + 磁盘缓存），不要用 Image(远程URL)：
+      // 前者会触发 ArkUI 自带的图片并发下载（大图库下 fd 逼近上限而 abort），
+      // 且会把请求 URL（含鉴权信息）交给不受本工程控制的网络栈。
+      JellyfinImage({
+        url: item.imageUrl(1200, 'Backdrop'),
+        fillMode: true
+      })
         .width('100%')
         .height(this.bannerHeight())
-        .objectFit(ImageFit.Cover)
-        .onError(() => {
-          // 背景图加载失败不影响其余内容
-        })
 
       // 顶部透明 → 底部压暗 → 收进页面底色，避免与下方内容出现硬边
       Column()

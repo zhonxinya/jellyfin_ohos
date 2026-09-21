@@ -97,9 +97,21 @@ std::string ImageCache::cacheDirectory() const
     return cacheDir_;
 }
 
-std::string ImageCache::cacheKey(const std::string &url) const
+std::string ImageCache::cacheKey(const std::string &url, const HttpHeaders &headers) const
 {
-    return HashUrl(url);
+    // 把鉴权相关头部并入缓存键，避免「同一 URL + 不同令牌」互相串图
+    // （换账号/换令牌后仍会命中旧账号的图片缓存）。
+    std::string material = url;
+    for (const auto &kv : headers) {
+        if (kv.second.empty()) {
+            continue;
+        }
+        material += '\n';
+        material += kv.first;
+        material += ':';
+        material += kv.second;
+    }
+    return HashUrl(material);
 }
 
 std::string ImageCache::filePathForKey(const std::string &key) const
@@ -155,7 +167,8 @@ void ImageCache::evictIfNeeded()
     }
 }
 
-std::string ImageCache::getOrDownload(const std::string &url, std::string &error)
+std::string ImageCache::getOrDownload(const std::string &url, const HttpHeaders &headers,
+                                      std::string &error)
 {
     error.clear();
     if (url.empty()) {
@@ -167,9 +180,12 @@ std::string ImageCache::getOrDownload(const std::string &url, std::string &error
         return {};
     }
 
-    const std::string key = cacheKey(url);
+    const std::string key = cacheKey(url, headers);
     const std::string path = filePathForKey(key);
 
+    // 命中缓存直接返回；未命中则由**抢到下载权**的那个线程负责下载，
+    // 其余线程只等待文件出现。`claimed` 是本线程是否抢到下载权的唯一判据。
+    bool claimed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ensureDir();
@@ -177,64 +193,44 @@ std::string ImageCache::getOrDownload(const std::string &url, std::string &error
         if (existing.good()) {
             return path;
         }
-        if (pending_.count(key) != 0) {
-            // Another thread is downloading; wait briefly by polling file.
-        } else {
+        if (pending_.count(key) == 0) {
             pending_[key] = true;
+            claimed = true;
         }
     }
 
-    // Simple wait loop if another download is in progress.
-    for (int i = 0; i < 50; ++i) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
+    // 没抢到下载权：等待另一个线程完成下载。
+    //
+    // 旧实现是一个 20ms×50 轮的多分支轮询，分支条件互相矛盾（既想独占又想并发），
+    // 实际结果是「多个线程同时下载同一张图」。现在语义单一：
+    //   - 抢到下载权的线程负责下载；
+    //   - 其余线程只等文件出现，超时即放弃（返回空 → 上层显示占位图）。
+    // 超时上限约 3 秒（30 × 100ms），足够覆盖大图下载，又不会长时间占住调用线程。
+    if (!claimed) {
+        for (int i = 0; i < 30; ++i) {
+#if !defined(_WIN32)
+            usleep(100000);
+#endif
             std::ifstream existing(path, std::ios::binary);
             if (existing.good()) {
                 return path;
             }
-            if (pending_.count(key) == 0) {
-                pending_[key] = true;
-                break;
-            }
-            if (i == 0 && pending_[key]) {
-                // We own or share the pending flag; first waiter that set it downloads.
-            }
         }
-#if !defined(_WIN32)
-        usleep(20000);
-#endif
-        std::ifstream existing(path, std::ios::binary);
-        if (existing.good()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_.erase(key);
-            return path;
-        }
-        // Only one download proceeds — check ownership via file absence + pending.
-        bool shouldDownload = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (pending_[key]) {
-                // Try to claim: use a .lock approach by checking if we're still pending
-                // and no file yet. For simplicity, allow concurrent downloads of same URL
-                // but write atomically to .tmp then rename.
-                shouldDownload = true;
-                break;
-            }
-        }
-        if (shouldDownload) {
-            break;
-        }
+        error = "image download timed out waiting for concurrent request";
+        return {};
     }
 
     HttpClient http;
     http.setReadTimeoutSec(60);
-    HttpHeaders headers;
-    headers["Accept"] = "*/*";
-    HttpResponse resp = http.get(url, headers);
+    HttpHeaders requestHeaders = headers;
+    if (requestHeaders.find("Accept") == requestHeaders.end()) {
+        requestHeaders["Accept"] = "*/*";
+    }
+    // 凭据只走请求头（见 image_url.cpp 的安全约定）：URL 会进服务端访问日志。
+    HttpResponse resp = http.get(url, requestHeaders);
     if (!resp.error.empty() || resp.status < 200 || resp.status >= 300 || resp.body.empty()) {
         error = resp.error.empty() ? ("HTTP " + std::to_string(resp.status)) : resp.error;
-        std::lock_guard<std::mutex> lock(mutex_);
-        pending_.erase(key);
+        finishDownload(key);
         return {};
     }
 
@@ -243,8 +239,7 @@ std::string ImageCache::getOrDownload(const std::string &url, std::string &error
         std::ofstream out(tmp, std::ios::binary);
         if (!out) {
             error = "failed to write cache temp file";
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_.erase(key);
+            finishDownload(key);
             return {};
         }
         out.write(resp.body.data(), static_cast<std::streamsize>(resp.body.size()));
@@ -256,12 +251,15 @@ std::string ImageCache::getOrDownload(const std::string &url, std::string &error
     std::rename(tmp.c_str(), path.c_str());
 #endif
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pending_.erase(key);
-        evictIfNeeded();
-    }
+    finishDownload(key);
     return path;
+}
+
+void ImageCache::finishDownload(const std::string &key)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_.erase(key);
+    evictIfNeeded();
 }
 
 void ImageCache::clear()
@@ -270,10 +268,25 @@ void ImageCache::clear()
     if (cacheDir_.empty()) {
         return;
     }
-    auto files = ListCacheFiles(cacheDir_);
-    for (const auto &f : files) {
+    // 不能只用 ListCacheFiles：它会跳过 `.tmp`（进行中的临时文件），
+    // 而清除缓存时必须把中断残留的临时文件也一并删掉，否则占用会持续累积。
+#if !defined(_WIN32)
+    DIR *d = opendir(cacheDir_.c_str());
+    if (d != nullptr) {
+        while (dirent *ent = readdir(d)) {
+            const std::string name = ent->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+            std::remove((cacheDir_ + "/" + name).c_str());
+        }
+        closedir(d);
+    }
+#else
+    for (const auto &f : ListCacheFiles(cacheDir_)) {
         std::remove(f.path.c_str());
     }
+#endif
     pending_.clear();
 }
 

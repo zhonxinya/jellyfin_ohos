@@ -10,6 +10,7 @@
 #include "api/user_items_api.h"
 #include "api_client.h"
 #include "app_version.h"
+#include "auth_headers.h"
 #include "engine.h"
 #include "http_client.h"
 #include "http_tls.h"
@@ -3247,7 +3248,11 @@ napi_value LoadImage(napi_env env, napi_callback_info info)
     }
     return RunAsync(env, [url]() {
         std::string error;
-        const std::string path = jellyfin::ImageCache::instance().getOrDownload(url, error);
+        auto &s = jellyfin::SessionManager::instance();
+        // 凭据走请求头（不要拼进 URL：URL 会进服务端访问日志）
+        const jellyfin::HttpHeaders headers =
+            jellyfin::BuildAuthHeaders(s.accessToken());
+        const std::string path = jellyfin::ImageCache::instance().getOrDownload(url, headers, error);
         if (path.empty()) {
             return MakeResult(false, 0, error.empty() ? "image download failed" : error).dump();
         }
@@ -3299,7 +3304,9 @@ napi_value FetchSubtitleText(napi_env env, napi_callback_info info)
     }
     return RunAsync(env, [url]() {
         jellyfin::HttpClient http;
-        const jellyfin::HttpResponse resp = http.get(url, {});
+        auto &s = jellyfin::SessionManager::instance();
+        // 凭据走请求头（不要拼进 URL：URL 会进服务端访问日志）
+        const jellyfin::HttpResponse resp = http.get(url, jellyfin::BuildAuthHeaders(s.accessToken()));
         if (!resp.error.empty()) {
             return MakeResult(false, 0, resp.error).dump();
         }

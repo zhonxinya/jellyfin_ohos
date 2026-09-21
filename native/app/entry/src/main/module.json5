@@ -35,6 +35,11 @@
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
+      },
+      {
+        // 会话令牌等敏感数据的主密钥保存在系统关键资产库（Asset Store Kit）中，
+        // 该权限用于让资产在设备重启后仍然保留（否则重启即丢登录态）
+        "name": "ohos.permission.STORE_PERSISTENT_DATA"
       }
     ]
   }
