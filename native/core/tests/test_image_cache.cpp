@@ -275,16 +275,19 @@ void TestConcurrentRequestsDownloadOnce()
 }
 
 /**
- * 核心回归：淘汰的触发频率。
+ * 核心回归：淘汰的触发频率（按下载次数兜底）。
  *
  * 断言"8 次下载恰好触发 2 次目录扫描（每 4 次一次）"。
  * 旧实现是每下载一张图就扫一次 → 这里会得到 8，用例失败。
+ *
+ * 字节阈值刻意调到很大，以单独隔离"次数"这条兜底判据。
  */
-void TestEvictScanIsThrottled()
+void TestEvictScanIsThrottledByCount()
 {
     FakeDownloader fake;
     jellyfin::ImageCache::Limits limits;
     limits.checkEveryDownloads = 4;
+    limits.checkEveryBytes = 1024ull * 1024ull * 1024ull; // 本用例不靠字节触发
     limits.maxFiles = 1000; // 不真的触发删除，只看扫描次数
     limits.maxBytes = 1024ull * 1024ull * 1024ull;
     const std::string dir = PrepareCase(fake, limits);
@@ -304,6 +307,55 @@ void TestEvictScanIsThrottled()
     RemoveDir(dir);
 }
 
+/**
+ * 核心回归：淘汰必须**按累计字节**触发，否则超限量取决于图片大小。
+ *
+ * 为什么这条重要：只用下载次数时，每张 2 MB 的海报下 31 张就是 60 MB 的额外占用
+ * （上限 200 MiB 的情况下等于超了 30%）；缩略图则几乎无感 —— 同一套阈值在两种场景下
+ * 表现差两个数量级。本用例用"每次 1 MB、字节阈值 4 MB"制造 4 次下载触发一次扫描。
+ */
+void TestEvictScanIsThrottledByBytes()
+{
+    FakeDownloader fake;
+    fake.body.assign(1024 * 1024, 'x'); // 每次下载 1 MiB
+    jellyfin::ImageCache::Limits limits;
+    limits.checkEveryDownloads = 1000;                                // 次数判据不参与
+    limits.checkEveryBytes = 4u * 1024u * 1024u;                      // 每 4 MiB 触发一次
+    limits.maxFiles = 1000;
+    limits.maxBytes = 1024ull * 1024ull * 1024ull;
+    const std::string dir = PrepareCase(fake, limits);
+    auto &cache = jellyfin::ImageCache::instance();
+
+    const std::size_t before = cache.evictScanCount();
+    for (int i = 0; i < 8; ++i) {
+        std::string error;
+        cache.getOrDownload("http://s/big/" + std::to_string(i), AuthHeaders(), error);
+    }
+    const std::size_t scans = cache.evictScanCount() - before;
+    Expect(scans == 2, "每累计 checkEveryBytes 字节才扫一次缓存目录",
+           "8 MiB 实际扫描 " + std::to_string(scans) + " 次（期望 2）");
+    Expect(fake.CallCount() == 8, "8 张大图各下载一次",
+           "calls=" + std::to_string(fake.CallCount()));
+
+    // 同样 8 次下载，但每次只有 1 KB：字节判据不应触发扫描（次数判据被设为 1000）。
+    FakeDownloader small;
+    small.body.assign(1024, 'y');
+    jellyfin::ImageCache::Limits smallLimits = limits;
+    smallLimits.checkEveryBytes = 4u * 1024u * 1024u;
+    const std::string smallDir = PrepareCase(small, smallLimits);
+    const std::size_t smallBefore = cache.evictScanCount();
+    for (int i = 0; i < 8; ++i) {
+        std::string error;
+        cache.getOrDownload("http://s/small/" + std::to_string(i), AuthHeaders(), error);
+    }
+    const std::size_t smallScans = cache.evictScanCount() - smallBefore;
+    Expect(smallScans == 0, "小图累计字节未到阈值时不扫描（超限量与图片大小无关）",
+           "8 KB 实际扫描 " + std::to_string(smallScans) + " 次（期望 0）");
+
+    RemoveDir(dir);
+    RemoveDir(smallDir);
+}
+
 #if !defined(_WIN32)
 /**
  * 淘汰必须把文件数压回上限内。
@@ -317,6 +369,7 @@ void TestEvictionKeepsUnderLimits()
     jellyfin::ImageCache::Limits limits;
     limits.maxFiles = 5;
     limits.checkEveryDownloads = 1; // 每次下载都检查，便于精确构造
+    limits.checkEveryBytes = 1024ull * 1024ull * 1024ull; // 本用例靠次数判据
     limits.maxBytes = 1024ull * 1024ull * 1024ull;
     const std::string dir = PrepareCase(fake, limits);
     auto &cache = jellyfin::ImageCache::instance();
@@ -347,6 +400,7 @@ void TestEvictionDropsOldestFirst()
     jellyfin::ImageCache::Limits limits;
     limits.maxFiles = 2;
     limits.checkEveryDownloads = 1;
+    limits.checkEveryBytes = 1024ull * 1024ull * 1024ull; // 本用例靠次数判据
     limits.maxBytes = 1024ull * 1024ull * 1024ull;
     const std::string dir = PrepareCase(fake, limits);
     auto &cache = jellyfin::ImageCache::instance();
@@ -407,7 +461,8 @@ int main()
     TestDownloadThenHitCache();
     TestFailuresAreExplicit();
     TestConcurrentRequestsDownloadOnce();
-    TestEvictScanIsThrottled();
+    TestEvictScanIsThrottledByCount();
+    TestEvictScanIsThrottledByBytes();
 #if !defined(_WIN32)
     TestEvictionKeepsUnderLimits();
     TestEvictionDropsOldestFirst();

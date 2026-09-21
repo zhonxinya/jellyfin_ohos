@@ -57,14 +57,23 @@ public:
         /** 磁盘缓存文件数上限 */
         std::size_t maxFiles = 500;
         /**
-         * 每完成多少次下载才扫描一次缓存目录做淘汰。
+         * 每完成多少次下载才扫描一次缓存目录做淘汰（**兜底**，主判据是 `checkEveryBytes`）。
          *
          * 为什么不是"每次下载后都淘汰"：淘汰是目录级 I/O（`opendir` + 逐文件 `stat`），
          * 每次下载都做一遍，成本会随缓存条目数叠加到每一张图上。
-         * 代价是缓存可能短暂超过上限 `checkEveryDownloads - 1` 个条目，
-         * 对 200 MiB / 500 文件的量级可以忽略。
          */
         std::size_t checkEveryDownloads = 32;
+        /**
+         * 累计新增多少个字节后才扫描一次缓存目录（主判据）。
+         *
+         * 为什么不能只用 `checkEveryDownloads`：那会让"超限量"取决于**图片大小**。
+         * 每张 2 MB 的海报下 31 张就是 60 MB 的额外占用，而每张 20 KB 的缩略图几乎无感 ——
+         * 同一套阈值在两种场景下表现差两个数量级。按字节计则超限量有界：
+         * 无论图片多大，清理前最多多占 `checkEveryBytes` 字节。
+         *
+         * 默认取上限的 1/8：既不会让缓存长期贴近上限，也不会把淘汰做得太频繁。
+         */
+        std::size_t checkEveryBytes = 25u * 1024u * 1024u;
     };
 
     void setCacheDirectory(const std::string &dir);
@@ -115,8 +124,12 @@ private:
      */
     void evictIfNeeded();
 
-    /** 释放下载权、唤醒等待者；到达 `checkEveryDownloads` 时在锁外触发淘汰 */
-    void finishDownload(const std::string &key);
+    /**
+     * 释放下载权、唤醒等待者；累计字节/次数到达阈值时在**锁外**触发淘汰。
+     *
+     * @param writtenBytes 本次落盘的字节数（用于按字节判断是否需要淘汰）
+     */
+    void finishDownload(const std::string &key, std::size_t writtenBytes);
 
     mutable std::mutex mutex_;
     /** 串行化"淘汰 / 清空"这类目录级 I/O，与 `mutex_` 分开，避免阻塞取图请求 */
@@ -127,8 +140,10 @@ private:
     std::unordered_map<std::string, bool> pending_;
     ImageDownloadFn downloader_;
     Limits limits_;
-    /** 距上次目录扫描已完成的下载次数 */
+    /** 距上次目录扫描已完成的下载次数（兜底判据） */
     std::size_t downloadsSinceEvict_ = 0;
+    /** 距上次目录扫描已新增的字节数（主判据，见 Limits::checkEveryBytes） */
+    std::size_t bytesSinceEvict_ = 0;
     /** 累计的目录扫描次数（诊断量，见 `evictScanCount()`） */
     std::size_t evictScans_ = 0;
 };

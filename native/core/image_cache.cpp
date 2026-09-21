@@ -112,6 +112,7 @@ void ImageCache::setCacheDirectory(const std::string &dir)
         // 否则上一个目录的下载次数会决定新目录第一次淘汰的时机。
         pending_.clear();
         downloadsSinceEvict_ = 0;
+        bytesSinceEvict_ = 0;
     }
     pendingCv_.notify_all();
 }
@@ -315,12 +316,12 @@ std::string ImageCache::getOrDownload(const std::string &url, const HttpHeaders 
     std::string downloadError;
     if (!downloader(url, headers, body, downloadError)) {
         error = downloadError.empty() ? "image download failed" : downloadError;
-        finishDownload(key);
+        finishDownload(key, 0);
         return {};
     }
     if (body.empty()) {
         error = "empty image body";
-        finishDownload(key);
+        finishDownload(key, 0);
         return {};
     }
 
@@ -329,7 +330,7 @@ std::string ImageCache::getOrDownload(const std::string &url, const HttpHeaders 
         std::ofstream out(tmp, std::ios::binary);
         if (!out) {
             error = "failed to write cache temp file";
-            finishDownload(key);
+            finishDownload(key, 0);
             return {};
         }
         out.write(body.data(), static_cast<std::streamsize>(body.size()));
@@ -341,19 +342,25 @@ std::string ImageCache::getOrDownload(const std::string &url, const HttpHeaders 
     std::rename(tmp.c_str(), path.c_str());
 #endif
 
-    finishDownload(key);
+    // 落盘成功：把字节数报给淘汰逻辑（失败路径传 0，它们只影响"次数"兜底判据）
+    finishDownload(key, body.size());
     return path;
 }
 
-void ImageCache::finishDownload(const std::string &key)
+void ImageCache::finishDownload(const std::string &key, std::size_t writtenBytes)
 {
     bool shouldEvict = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_.erase(key);
         ++downloadsSinceEvict_;
-        if (downloadsSinceEvict_ >= limits_.checkEveryDownloads) {
+        bytesSinceEvict_ += writtenBytes;
+        // 主判据：累计新增字节达到阈值（超限量与图片大小无关）；
+        // 兜底判据：下载次数达到阈值（避免小文件长期不触发扫描）。
+        if (bytesSinceEvict_ >= limits_.checkEveryBytes ||
+            downloadsSinceEvict_ >= limits_.checkEveryDownloads) {
             downloadsSinceEvict_ = 0;
+            bytesSinceEvict_ = 0;
             shouldEvict = true;
         }
     }
@@ -373,6 +380,7 @@ void ImageCache::clear()
         dir = cacheDir_;
         pending_.clear();
         downloadsSinceEvict_ = 0;
+        bytesSinceEvict_ = 0;
     }
     pendingCv_.notify_all();
     if (dir.empty()) {
