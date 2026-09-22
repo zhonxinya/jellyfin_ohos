@@ -176,13 +176,31 @@ export struct MediaCollectionView {
           .columnsTemplate(this.columnsTemplate())
           .columnsGap(ThemeConstants.GRID_COLUMN_GAP)
           .rowsGap(ThemeConstants.GRID_ROW_GAP)
+          // 注意：这里**不要**用 `.alignItems(GridItemAlignment.STRETCH)` 来修"卡片看起来
+          // 不齐"的问题。实测它无效 —— 同行 GridItem 由 gridItemHeight() 预留成等高，
+          // 本来就没有可拉伸的对象；真正被垂直居中、上下各留 25px 的是 **GridItem 内部的
+          // 卡片内容**。修法在 MediaCard.GridMode 里（卡片撑满格子高度 + 顶部对齐）。
           .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: ThemeConstants.PAGE_PADDING })
           .cachedCount(12)
+          // 让 Grid 撑满 Scroll 视口。
+          //
+          // 为什么需要（设备实测的 bug）：`Scroll` 会把**比视口矮的内容**垂直居中，
+          // 而 `ScrollAttribute` 并没有 `alignContent` 这类属性可以改（实测报
+          // `Property 'alignContent' does not exist on type 'ScrollAttribute'`）。
+          // 结果是搜索结果只有 3 项时，卡片被推到屏幕下半部、上方留出近千像素空白。
+          //
+          // 把内容高度补成 100% 后，内容不再比视口矮，垂直居中自然无从发生，卡片从顶部开始排。
+          // （这与 `docs/detail-people-align.md` 是同一类"容器默认对齐方式与直觉不符"的陷阱，
+          //   只是那个在横轴、这个是纵轴。）
+          .height('100%')
           .width('100%')
         }
         .layoutWeight(1)
         .width('100%')
         .scrollBar(BarState.Auto)
+        // 不要试图在这里补 `alignContent`：ScrollAttribute 没有该属性（实测编译报
+        // `Property 'alignContent' does not exist on type 'ScrollAttribute'`）。
+        // "内容贴顶"是靠给内部 Grid 设 height('100%') 做到的，见上面 grid 分支的注释。
         .onScrollEdge((side: Edge) => {
           if (side === Edge.Bottom) {
             this.onReachEnd();

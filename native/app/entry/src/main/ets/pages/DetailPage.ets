@@ -101,6 +101,43 @@ struct DetailPage {
     return AppViewModel.getInstance().colors();
   }
 
+  /**
+   * 音乐条目转交专用页面（专辑 / 艺术家 / 单曲）。
+   *
+   * 用 `replaceUrl`：本页已经请求过一次详情、且渲染不出音乐需要的控件，
+   * 留在栈上只会让"返回"回到一个空页面。
+   */
+  private redirectMusic(): void {
+    if (this.item.type === 'MusicArtist') {
+      router.replaceUrl({
+        url: 'pages/ArtistDetailPage',
+        params: { artistId: this.item.id, artistName: this.item.displayTitle() }
+      });
+      return;
+    }
+    if (this.item.type === 'MusicAlbum') {
+      router.replaceUrl({
+        url: 'pages/AlbumDetailPage',
+        params: {
+          albumId: this.item.id,
+          albumName: this.item.displayTitle(),
+          artistName: this.item.albumArtist
+        }
+      });
+      return;
+    }
+    // Audio：直接播放这一首
+    router.replaceUrl({
+      url: 'pages/MusicPlayerPage',
+      params: {
+        trackIds: [this.item.id],
+        trackNames: [this.item.displayTitle()],
+        startIndex: 0,
+        artistName: this.item.albumArtist
+      }
+    });
+  }
+
   private async loadDetail(): Promise<void> {
     if (this.itemId.length === 0) {
       this.status = UiState.ERROR;
@@ -117,6 +154,18 @@ struct DetailPage {
     }
     this.item = MediaItem.fromJson(result.data);
     this.people = JsonUtil.getArray(result.data, 'People');
+
+    // 音乐条目转交专用页面。
+    //
+    // 为什么在这里兜一道：通用详情页没有任何音乐分支（它按 Movie/Series 那套渲染
+    // 海报、演职人员、剧集列表），搜索结果、收藏、播放列表等入口都会跳到本页，
+    // 用户从那些地方点进专辑/艺术家时若停在这里就等于"点进去什么都没有"。
+    // 用 `replaceUrl` 而不是 `pushUrl`：避免留下一个"返回后仍是空详情页"的死循环。
+    if (this.item.type === 'MusicAlbum' || this.item.type === 'MusicArtist' ||
+      this.item.type === 'Audio') {
+      this.redirectMusic();
+      return;
+    }
     this.seasons = MediaItem.fromArray(JsonUtil.extractItems(JsonUtil.getObject(result.data, 'Seasons')));
     if (this.seasons.length === 0) {
       this.seasons = MediaItem.fromArray(JsonUtil.getArray(result.data, 'Seasons'));
@@ -500,13 +549,31 @@ struct DetailPage {
     return name.length > 0 ? name : '\u672a\u77e5';
   }
 
+  /**
+   * 演职人员头像 URL。
+   *
+   * **必须解析 `getImageUrl` 的返回值**：该桥接返回的是 JSON 信封
+   * `{"ok":true,"status":200,"message":"ok","data":{"url":"…"}}`，不是裸 URL。
+   * 早期实现写成 `return JellyfinNative.getImageUrl(...).trim()` —— 把整串 JSON
+   * 当 URL 传给 `JellyfinImage`，取图必然失败，于是演员位只显示占位人形图标。
+   * （海报/背景图走 `MediaItem.imageUrl()`，那里一直是 parseResult 后取 `data.url`，
+   * 所以只有详情页的演员头像坏。）
+   *
+   * 服务端侧已排除：`People[].PrimaryImageTag` 有值，且
+   * `GET /Items/{personId}/Images/Primary` 返回 200 image/jpeg。
+   */
   private personImageUrl(person: Object): string {
     const id: string = this.personId(person);
     if (id.length === 0) {
       return '';
     }
     const tag: string = JsonUtil.getString(person as ESObject, 'PrimaryImageTag', '');
-    return JellyfinNative.getImageUrl(id, 'Primary', 200, tag).trim();
+    const raw: string = JellyfinNative.getImageUrl(id, 'Primary', 200, tag);
+    const result: NativeResult = JellyfinNative.parseResult(raw);
+    if (!result.ok || result.data === null) {
+      return '';
+    }
+    return JsonUtil.getString(result.data as ESObject, 'url', '');
   }
 
   private openPerson(person: Object): void {

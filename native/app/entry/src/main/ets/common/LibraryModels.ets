@@ -402,7 +402,9 @@ export class LibraryEntry {
  * 而不是发一个必然 404 的请求（JellyfinImage 对失败会显示占位图标，但白跑一次网络不好）。
  *
  * 返回的 `getImageUrl` 是 JSON（`{ ok, data: { url } }`），必须解出来 ——
- * 直接把 JSON 串当 URL 传下去会让取图失败（`DetailPage.personImageUrl` 就是这个问题，另案处理）。
+ * 直接把 JSON 串当 URL 传下去会让取图失败。
+ * （`DetailPage.personImageUrl` 曾犯同一错误，导致详情页演员头像一直只显示占位图标；
+ * 已按本函数的方式修复，不要再退回 `getImageUrl(...).trim()` 那种写法。）
  */
 function buildCoverUrl(primaryImageItemId: string): string {
   if (primaryImageItemId.length === 0) {

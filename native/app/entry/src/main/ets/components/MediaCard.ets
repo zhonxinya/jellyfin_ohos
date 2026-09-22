@@ -151,6 +151,18 @@ export struct MediaCard {
       }
     }
     .width(this.cardWidth)
+    // 填满 GridItem 的高度，并使各部件从**顶部**开始排。
+    //
+    // 为什么必须这样（设备实测的 bug）：GridItem 的高度由
+    // `MediaCollectionView.gridItemHeight()` 预留（= 海报高 + 60vp 文案区，实测 709px），
+    // 而卡片本身是按内容收缩的 —— 标题只有一行时只有 659px。GridItem 对**高度不足的
+    // 内容默认垂直居中**，于是那张卡上下各留 25px、飘在格子中间，同一行看起来参差不齐。
+    // （`GridItemAttribute` 并没有提供任何垂直对齐方法，只有 rowStart/columnStart 这类
+    //   跨格属性；`Grid.alignItems(GridItemAlignment.STRETCH)` 也解决不了 —— 同行格子
+    //   本来就等高，没有可拉伸的对象。所以唯一可靠的办法是让卡片自己占满格子高度。）
+    // 设成 `100%` 后：卡片高度 = 格子高度，海报贴顶，多出的空间留在底部。
+    .height('100%')
+    .justifyContent(FlexAlign.Start)
     .alignItems(HorizontalAlign.Start)
     .onClick(() => {
       this.onTap();
