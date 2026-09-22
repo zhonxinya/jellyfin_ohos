@@ -2168,8 +2168,12 @@ struct PlayerPage {
       return;
     }
     this.trackNote = '正在加载字幕…';
+    // 不要写 `await JellyfinNative.fetchSubtitleText(...)`：该桥接方法声明为返回 string
+    // （内部 jellyfinNative.fetchSubtitleText 走的是同步 RunAsync 包装），并不是 Promise，
+    // `await` 一个非 Thenable 值是**无操作**（codelinter 的 @typescript-eslint/await-thenable
+    // 正是指这一点）。真正的阻塞发生在模块侧，此处 await 只会误导读者以为它是异步的。
     const fetched: NativeResult =
-      JellyfinNative.parseResult(await JellyfinNative.fetchSubtitleText(url));
+      JellyfinNative.parseResult(JellyfinNative.fetchSubtitleText(url));
     if (!fetched.ok || fetched.data === null) {
       this.trackNote = fetched.message.length > 0
         ? `字幕加载失败：${fetched.message}` : '字幕加载失败';

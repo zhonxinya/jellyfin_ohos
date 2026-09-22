@@ -41,7 +41,7 @@ struct MemIO {
 
 int MemRead(void *opaque, uint8_t *buf, int bufSize)
 {
-    MemIO *io = static_cast<MemIO *>(opaque);
+    auto *io = static_cast<MemIO *>(opaque);
     if (io->pos >= io->size) {
         return AVERROR_EOF;
     }
@@ -53,7 +53,7 @@ int MemRead(void *opaque, uint8_t *buf, int bufSize)
 
 int64_t MemSeek(void *opaque, int64_t offset, int whence)
 {
-    MemIO *io = static_cast<MemIO *>(opaque);
+    auto *io = static_cast<MemIO *>(opaque);
     if (whence == AVSEEK_SIZE) {
         return static_cast<int64_t>(io->size);
     }
@@ -216,7 +216,7 @@ bool FfmpegDecoder::probeFromMemory(const std::vector<uint8_t> &data, const std:
     io.size = data.size();
 
     constexpr int kAvioBufSize = 64 * 1024;
-    unsigned char *avioBuf = static_cast<unsigned char *>(av_malloc(kAvioBufSize));
+    auto *avioBuf = static_cast<unsigned char *>(av_malloc(kAvioBufSize));
     if (avioBuf == nullptr) {
         result.error = "分配 AVIO 缓冲失败";
         return false;

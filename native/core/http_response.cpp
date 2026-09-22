@@ -208,7 +208,7 @@ bool IsHttpResponseComplete(const std::string &raw)
     }
 
     int status = 0;
-    size_t contentLength = static_cast<size_t>(-1);
+    auto contentLength = static_cast<size_t>(-1);
     bool chunked = false;
     if (!ParseHeaders(raw.substr(0, headerEnd), status, contentLength, chunked)) {
         return false;
@@ -236,7 +236,7 @@ bool ParseHttpResponse(const std::string &raw, HttpResponse &resp, std::string &
     const std::string headers = raw.substr(0, headerEnd);
     resp.body = raw.substr(headerEnd + separatorLen);
 
-    size_t contentLength = static_cast<size_t>(-1);
+    auto contentLength = static_cast<size_t>(-1);
     bool chunked = false;
     if (!ParseHeaders(headers, resp.status, contentLength, chunked)) {
         error = "Invalid HTTP status";

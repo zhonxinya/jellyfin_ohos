@@ -59,7 +59,7 @@ struct AvioBridge {
 
 int BridgeRead(void *opaque, uint8_t *buf, int bufSize)
 {
-    AvioBridge *bridge = static_cast<AvioBridge *>(opaque);
+    auto *bridge = static_cast<AvioBridge *>(opaque);
     const int n = bridge->reader->read(buf, bufSize, bridge->error);
     if (n < 0) {
         return AVERROR(EIO);
@@ -69,7 +69,7 @@ int BridgeRead(void *opaque, uint8_t *buf, int bufSize)
 
 int64_t BridgeSeek(void *opaque, int64_t offset, int whence)
 {
-    AvioBridge *bridge = static_cast<AvioBridge *>(opaque);
+    auto *bridge = static_cast<AvioBridge *>(opaque);
     if (whence == AVSEEK_SIZE) {
         return bridge->reader->size();
     }
@@ -270,7 +270,7 @@ bool SoftDecodeSession::openUrl(const std::string &url, std::string &error)
     impl_->bridge.reader = impl_->reader.get();
 
     constexpr int kAvioBuf = 64 * 1024;
-    unsigned char *avioBuf = static_cast<unsigned char *>(av_malloc(kAvioBuf));
+    auto *avioBuf = static_cast<unsigned char *>(av_malloc(kAvioBuf));
     impl_->avio = avio_alloc_context(avioBuf, kAvioBuf, 0, &impl_->bridge, BridgeRead, nullptr, BridgeSeek);
     if (impl_->avio == nullptr) {
         av_free(avioBuf);
@@ -630,7 +630,7 @@ bool SoftDecodeSession::seek(double seconds, std::string &error)
         return false;
     }
     // 将秒数转换为 AV_TIME_BASE 单位（微秒）
-    const int64_t targetTs = static_cast<int64_t>(seconds * AV_TIME_BASE);
+    const auto targetTs = static_cast<int64_t>(seconds * AV_TIME_BASE);
     // AVSEEK_FLAG_BACKWARD：向后 seek 到最近的关键帧（标准做法）
     const int rc = av_seek_frame(impl_->fmt, -1, targetTs, AVSEEK_FLAG_BACKWARD);
     if (rc < 0) {
