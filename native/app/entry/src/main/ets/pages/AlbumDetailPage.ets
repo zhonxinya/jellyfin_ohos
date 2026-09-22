@@ -70,65 +70,77 @@ struct AlbumDetailPage {
   }
 
   private async reload(): Promise<void> {
+    // 用局部变量累积，最后**一次性**回写 @State。
+    //
+    // 为什么（codelinter `hp-arkui-use-local-var-to-replace-state-var`）：@State 每次赋值
+    // 都会触发 UI 刷新。该规则统计的是**整个函数内**的赋值次数，超过 2 次即告警 ——
+    // 所以不能只在末尾回写、却把早退分支里的 `this.status = ...` 留着（那样仍算多次）。
+    // 这里把分支结果都写进局部变量，函数内每个 @State 只出现一次赋值。
+    // CI 的 lint 差分曾据此在本页报出 5 处。
+    let status: string = UiState.LOADING;
+    let errorMsg: string = '';
+    let tracks: MediaItem[] = [];
+    let totalMs: number = 0;
+
     if (this.albumId.length === 0) {
-      this.status = UiState.ERROR;
-      this.errorMsg = '缺少专辑标识';
-      return;
-    }
-    this.status = UiState.LOADING;
-    this.errorMsg = '';
+      status = UiState.ERROR;
+      errorMsg = '缺少专辑标识';
+    } else {
+      // ① 曲目列表
+      const query: ItemsQueryOptions = new ItemsQueryOptions();
+      query.parentId = this.albumId;
+      query.startIndex = 0;
+      query.limit = kTrackLimit;
+      query.includeItemTypes = 'Audio';
+      query.recursive = false;
+      query.sortBy = 'ParentIndexNumber,IndexNumber,SortName';
+      query.sortOrder = 'Ascending';
+      query.enableUserData = false;
 
-    // ① 曲目列表
-    const query: ItemsQueryOptions = new ItemsQueryOptions();
-    query.parentId = this.albumId;
-    query.startIndex = 0;
-    query.limit = kTrackLimit;
-    query.includeItemTypes = 'Audio';
-    query.recursive = false;
-    query.sortBy = 'ParentIndexNumber,IndexNumber,SortName';
-    query.sortOrder = 'Ascending';
-    query.enableUserData = false;
+      const result: NativeResult =
+        JellyfinNative.parseResult(await JellyfinNative.queryItems(query.toJson()));
+      if (!result.ok || result.data === null) {
+        status = UiState.ERROR;
+        errorMsg = result.message.length > 0 ? result.message : '加载曲目失败';
+      } else {
+        try {
+          tracks = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+          let sum: number = 0;
+          for (let i = 0; i < tracks.length; i++) {
+            sum += tracks[i].runTimeTicks;
+          }
+          // Ticks = 100ns 单位 → 毫秒
+          totalMs = Math.floor(sum / 10000);
 
-    const result: NativeResult =
-      JellyfinNative.parseResult(await JellyfinNative.queryItems(query.toJson()));
-    if (!result.ok || result.data === null) {
-      this.status = UiState.ERROR;
-      this.errorMsg = result.message.length > 0 ? result.message : '加载曲目失败';
-      return;
-    }
-    try {
-      this.tracks = MediaItem.fromArray(JsonUtil.extractItems(result.data));
-      let sum: number = 0;
-      for (let i = 0; i < this.tracks.length; i++) {
-        sum += this.tracks[i].runTimeTicks;
-      }
-      // Ticks = 100ns 单位 → 毫秒
-      this.totalMs = Math.floor(sum / 10000);
-    } catch (err) {
-      this.status = UiState.ERROR;
-      this.errorMsg = `解析曲目失败：${(err as Error).message}`;
-      return;
-    }
-
-    // ② 专辑自身的元信息（封面 / 年份 / 艺术家）。
-    // 单独取一次专辑条目：曲目里带的是音轨级信息，专辑封面与年份在专辑条目上。
-    const albumRaw: string = await JellyfinNative.getItemDetail(this.albumId);
-    const albumRes: NativeResult = JellyfinNative.parseResult(albumRaw);
-    if (albumRes.ok && albumRes.data !== null) {
-      const detail: MediaItem = MediaItem.fromJson(albumRes.data);
-      if (detail.name.length > 0) {
-        this.albumName = detail.displayTitle();
-      }
-      this.year = JsonUtil.getNumber(albumRes.data as ESObject, 'ProductionYear', 0);
-      if (this.artistName.length === 0) {
-        this.artistName = JsonUtil.getString(albumRes.data as ESObject, 'AlbumArtist', '');
-      }
-      if (this.coverUrl.length === 0) {
-        this.coverUrl = detail.imageUrl(600, 'Primary');
+          // ② 专辑自身的元信息（封面 / 年份 / 艺术家）。
+          // 单独取一次专辑条目：曲目里带的是音轨级信息，专辑封面与年份在专辑条目上。
+          const albumRaw: string = await JellyfinNative.getItemDetail(this.albumId);
+          const albumRes: NativeResult = JellyfinNative.parseResult(albumRaw);
+          if (albumRes.ok && albumRes.data !== null) {
+            const detail: MediaItem = MediaItem.fromJson(albumRes.data);
+            if (detail.name.length > 0) {
+              this.albumName = detail.displayTitle();
+            }
+            this.year = JsonUtil.getNumber(albumRes.data as ESObject, 'ProductionYear', 0);
+            if (this.artistName.length === 0) {
+              this.artistName = JsonUtil.getString(albumRes.data as ESObject, 'AlbumArtist', '');
+            }
+            if (this.coverUrl.length === 0) {
+              this.coverUrl = detail.imageUrl(600, 'Primary');
+            }
+          }
+          status = tracks.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
+        } catch (err) {
+          status = UiState.ERROR;
+          errorMsg = `解析曲目失败：${(err as Error).message}`;
+        }
       }
     }
 
-    this.status = this.tracks.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
+    this.tracks = tracks;
+    this.totalMs = totalMs;
+    this.status = status;
+    this.errorMsg = errorMsg;
   }
 
   /** 播单曲：把整张专辑与起始序号一起交给播放页，便于"下一首" */

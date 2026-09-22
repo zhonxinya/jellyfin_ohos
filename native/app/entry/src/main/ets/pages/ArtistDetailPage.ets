@@ -57,39 +57,52 @@ struct ArtistDetailPage {
   }
 
   private async reload(): Promise<void> {
-    if (this.artistId.length === 0) {
-      this.status = UiState.ERROR;
-      this.errorMsg = '缺少艺术家标识';
-      return;
-    }
-    this.status = UiState.LOADING;
-    this.errorMsg = '';
-    const query: ItemsQueryOptions = new ItemsQueryOptions();
-    query.parentId = this.artistId;
-    query.startIndex = 0;
-    query.limit = kAlbumLimit;
-    query.includeItemTypes = 'MusicAlbum';
-    // 只看这位艺术家名下的专辑，不递归进专辑内部的曲目
-    query.recursive = false;
-    query.sortBy = 'ProductionYear,PremiereDate,SortName';
-    query.sortOrder = 'Ascending';
-    query.enableUserData = false;
+    // 用局部变量累积，最后**一次性**回写 @State。
+    //
+    // 为什么（codelinter `hp-arkui-use-local-var-to-replace-state-var`）：@State 每次赋值
+    // 都会触发 UI 刷新。该规则统计的是**整个函数内**的赋值次数，超过 2 次即告警 ——
+    // 所以不能只在末尾回写、却把早退分支里的 `this.status = ...` 留着（那样仍算 4 次）。
+    // 这里把分支结果都写进局部变量，函数内每个 @State 只出现一次赋值。
+    // CI 的 lint 差分曾据此在本页报出 9 处。
+    let status: string = UiState.LOADING;
+    let errorMsg: string = '';
+    let albums: MediaItem[] = [];
 
-    const result: NativeResult =
-      JellyfinNative.parseResult(await JellyfinNative.queryItems(query.toJson()));
-    if (!result.ok || result.data === null) {
-      // 失败也要落到终态，否则界面永远停在"加载中"
-      this.status = UiState.ERROR;
-      this.errorMsg = result.message.length > 0 ? result.message : '加载专辑失败';
-      return;
+    if (this.artistId.length === 0) {
+      status = UiState.ERROR;
+      errorMsg = '缺少艺术家标识';
+    } else {
+      const query: ItemsQueryOptions = new ItemsQueryOptions();
+      query.parentId = this.artistId;
+      query.startIndex = 0;
+      query.limit = kAlbumLimit;
+      query.includeItemTypes = 'MusicAlbum';
+      // 只看这位艺术家名下的专辑，不递归进专辑内部的曲目
+      query.recursive = false;
+      query.sortBy = 'ProductionYear,PremiereDate,SortName';
+      query.sortOrder = 'Ascending';
+      query.enableUserData = false;
+
+      const result: NativeResult =
+        JellyfinNative.parseResult(await JellyfinNative.queryItems(query.toJson()));
+      if (!result.ok || result.data === null) {
+        // 失败也要落到终态，否则界面永远停在"加载中"
+        status = UiState.ERROR;
+        errorMsg = result.message.length > 0 ? result.message : '加载专辑失败';
+      } else {
+        try {
+          albums = MediaItem.fromArray(JsonUtil.extractItems(result.data));
+          status = albums.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
+        } catch (err) {
+          status = UiState.ERROR;
+          errorMsg = `解析专辑列表失败：${(err as Error).message}`;
+        }
+      }
     }
-    try {
-      this.albums = MediaItem.fromArray(JsonUtil.extractItems(result.data));
-      this.status = this.albums.length === 0 ? UiState.EMPTY : UiState.SUCCESS;
-    } catch (err) {
-      this.status = UiState.ERROR;
-      this.errorMsg = `解析专辑列表失败：${(err as Error).message}`;
-    }
+
+    this.albums = albums;
+    this.status = status;
+    this.errorMsg = errorMsg;
   }
 
   private openAlbum(album: MediaItem): void {
