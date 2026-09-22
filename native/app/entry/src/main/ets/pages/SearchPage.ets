@@ -20,7 +20,17 @@ const kHistoryMax: number = 12;
 
 /** 类型筛选：标签 → `IncludeItemTypes`（空串=不限） */
 const kTypeFilters: string[] = ['全部', '电影', '剧集', '单集', '音乐', '合集'];
-const kTypeValues: string[] = ['', 'Movie', 'Series', 'Episode', 'Audio,MusicAlbum', 'BoxSet'];
+/**
+ * 「音乐」一档必须同时包含 `MusicArtist`。
+ *
+ * 原来只写 `Audio,MusicAlbum`，于是**搜不到任何音乐人**：服务端在
+ * `IncludeItemTypes=MusicArtist` 下能返回艺人（实测搜「刀郎」返回 1 位 `MusicArtist`），
+ * 但应用把这个类型过滤掉了 —— 用户搜歌手名时结果为空，进而在整条音乐链路里
+ * 只能靠音乐库逐级点进去，`ArtistDetailPage` 几乎无法从搜索到达。
+ * （`MusicAlbum` 保留：专辑名搜索同样常用。）
+ */
+const kTypeValues: string[] = ['', 'Movie', 'Series', 'Episode',
+  'Audio,MusicAlbum,MusicArtist', 'BoxSet'];
 
 /**
  * 搜索页。
