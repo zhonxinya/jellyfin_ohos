@@ -271,9 +271,16 @@ jobs:
           export DEVECO_SDK_HOME="$TOOLS_DIR/sdk"
           export HOS_SDK_HOME="$TOOLS_DIR/sdk"
 
+          # 规则计数会随 codelinter 自身版本变化，因此基线必须记录版本。
+          # 实测：同一个**未被本分支改动**的文件（admin/UsersPage.ets）在 6.0.240 下命中
+          # 13 处、在 CI 的工具链下命中 12 处（且行号偏移），全局 181 vs 193。
+          # 不记录版本就会出现"什么都没改却比基线差 12 条"这种不可信的失败。
+          CL_VER="$("$CODELINTER" -v 2>&1 | tail -1 | tr -d '\r')"
+          echo "codelinter 版本: $CL_VER"
+
           "$CODELINTER" entry/src/main/ets -f json -o codelinter-report.json
 
-          python3 - <<'PY'
+          CL_VER="$CL_VER" python3 - <<'PY'
           import json, collections, os, sys
 
           report, baseline_path = "codelinter-report.json", "codelinter-baseline.json"
@@ -301,6 +308,43 @@ jobs:
                   locs[rule].append(f"{rel}:{m.get('line', '?')}")
           total = sum(by_rule.values())
           base_rules = {k: v for k, v in (base.get("byRule") or {}).items()}
+
+          # 0) 版本可比性：规则命中数会随 codelinter 自身版本变化，只有在同一版本下
+          # 比对才有意义。实测同一个**未被改动的**文件（admin/UsersPage.ets）在 6.0.240
+          # 下命中 13 处、在 CI 的工具链下命中 12 处，全局 181 vs 193；不记版本就会出现
+          # 「未改任何代码却比基线差」的假失败。
+          # 先把"当前实际值"完整打印出来（含按文件的明细），这样重建基线所需的全部信息
+          # 在一次失败的运行里就能拿到，不必再补一轮 CI。
+          ver = os.environ.get("CL_VER", "?")
+          base_ver = base.get("codelinterVersion")
+          if base_ver != ver:
+              why = ("基线未记录 codelinterVersion"
+                     if base_ver is None else
+                     f"基线 {base_ver} 与当前 {ver} 不一致")
+              print(f"\n::error::codelinter 版本可比性检查失败：{why}")
+              print("规则命中数随 codelinter 版本变化，跨版本比对会误报"
+                    "（曾实测同一未改动文件在两版本下命中数不同）。")
+              print("当前实际计数（可直接用于重建基线）：\n")
+              print(f"  codelinterVersion = {ver}")
+              print(f"  total             = {total}")
+              print(f"  files             = {files}")
+              for rule in sorted(by_rule):
+                  print(f"  byRule[{rule}] = {by_rule[rule]}")
+              # 按文件汇总（而非逐条列行号）：这里的目的只是让人一眼看出
+              # "命中集中在哪些文件、是否碰过本分支改动的文件"，不必刷 200 行。
+              per_file = collections.Counter()
+              for rule in by_rule:
+                  for loc in locs[rule]:
+                      per_file[loc.rsplit(":", 1)[0]] += 1
+              print("\n按文件汇总：")
+              for f, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
+                  print(f"  {n:4d}  {f}")
+              print("\n用与 CI 相同的工具链重新生成基线：")
+              print("  cd native/app")
+              print("  codelinter entry/src/main/ets -f json -o codelinter-report.json")
+              print("  把上面的 total / files / byRule / codelinterVersion 同步进 "
+                    "codelinter-baseline.json")
+              sys.exit(1)
 
           lines = [f"### ArkTS lint：{total} 条 / {files} 个文件",
                    f"（基线 {base.get('total', 0)} 条 / {base.get('files', 0)} 个文件）", ""]
