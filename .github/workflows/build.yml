@@ -111,6 +111,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # 差分比对需要 base 提交：lint 任务会在**同一次运行、同一套工具链**下
+          # 对 base 与当前提交各跑一遍 codelinter。默认的浅克隆拿不到 base。
+          fetch-depth: 0
 
       # ── 1) 自有源码的编译警告 ───────────────────────────────────────────────
       # 为什么单独做一遍而不用 build 任务的输出：CMake 那边已给自有源码加了
@@ -148,19 +152,7 @@ jobs:
           fi
           exit "$fail"
 
-      # ── 2) ArkTS 侧 lint（鸿蒙官方 codelinter）─────────────────────────────
-      # 此前 ETS 完全没有任何静态检查。接入后按**基线**门禁（而非按级别）：
-      #
-      # 为什么不直接用 codelinter 的 -e/--exit-on：实测**不起作用** ——
-      #   -e error / warn / suggestion / error,warn,warn,suggestion 四种取值下退出码皆为 0，
-      #   当前 181 条全是 warn 级，所以没有任何一个 -e 取值能让它失败。
-      # 因此这里自己比对 native/app/codelinter-baseline.json：
-      #   规则数量增加 -> 失败；总数下降 -> 通过并提示同步下调基线；一致 -> 通过。
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-
+      # ── 2) 工具链（codelinter 与 clang-tidy 都来自它）──────────────────────
       # 复用 build-hap 的同一份缓存键（tools-version 与那边默认值一致），
       # 所以两个任务不会各下一份 ~2GB 的工具链
       - name: Cache Command Line Tools
@@ -252,12 +244,29 @@ jobs:
           set -euo pipefail
           cp native/app/build-profile.ci.json5 native/app/build-profile.json5
 
-      - name: ArkTS lint（codelinter + 基线比对）
+      # ── 3) ArkTS 侧 lint（鸿蒙官方 codelinter）─────────────────────────────
+      # 此前 ETS 完全没有任何静态检查。
+      #
+      # 为什么不直接用 codelinter 的 -e/--exit-on：实测**不起作用** ——
+      #   -e error / warn / suggestion / error,warn,warn,suggestion 四种取值下退出码皆为 0，
+      #   当前全部命中都是 warn 级，所以没有任何一个 -e 取值能让它失败。
+      #
+      # 为什么是"与 base 提交做差分"而不是比对一份写死的计数基线：
+      # 命中的**计数**随工具链构建而变，不只是版本号 —— 实测同一个未被改动的文件
+      # （admin/UsersPage.ets）在本机 CLT 6.1.1.300 下命中 13 处、在 CI 的 CLT 6.1.0.816
+      # 下命中 12 处（行号整体偏移），全局 181 vs 193；而两者的 codelinter 自报版本
+      # 都是 6.0.240。已用对照实验排除 SDK API 版本（API 24 与 API 26 各跑一遍，都是 181）。
+      # 写死一个"总数 193"必然随工具链构建漂移，表现为「未改任何代码却比基线差」的
+      # 假失败 —— 这种失败比不检查更糟，会训练人忽略门禁。
+      #
+      # 差分把环境完全约掉：**同一次运行、同一套工具链**下对 base 与当前提交各跑一遍，
+      # 只比较两次结果的差。只要没引入新的命中就通过，无论工具链怎么变、与本地差多少。
+      # codelinter-baseline.json 不再作为门禁依据（保留为一次快照，便于人工看趋势）。
+      - name: ArkTS lint（codelinter 差分：当前提交 vs base）
         shell: bash
-        working-directory: native/app
         run: |
           set -euo pipefail
-          TOOLS_DIR="$(cd ../.. && pwd)/command-line-tools"
+          TOOLS_DIR="$(pwd)/command-line-tools"
           # 不把 "$TOOLS_DIR/bin" 加进 PATH：那个目录里有 OHOS 版的 diff 等工具，
           # 会把系统同名命令顶掉。这里按绝对路径调用。
           CODELINTER="$TOOLS_DIR/bin/codelinter"
@@ -271,150 +280,128 @@ jobs:
           export DEVECO_SDK_HOME="$TOOLS_DIR/sdk"
           export HOS_SDK_HOME="$TOOLS_DIR/sdk"
 
-          # 规则计数会随 codelinter 自身版本变化，因此基线必须记录版本。
-          # 实测：同一个**未被本分支改动**的文件（admin/UsersPage.ets）在 6.0.240 下命中
-          # 13 处、在 CI 的工具链下命中 12 处（且行号偏移），全局 181 vs 193。
-          # 不记录版本就会出现"什么都没改却比基线差 12 条"这种不可信的失败。
-          CL_VER="$("$CODELINTER" -v 2>&1 | tail -1 | tr -d '\r')"
-          echo "codelinter 版本: $CL_VER"
+          echo "codelinter 版本: $("$CODELINTER" -v 2>&1 | tail -1 | tr -d '\r')"
 
-          "$CODELINTER" entry/src/main/ets -f json -o codelinter-report.json
+          # base 提交：PR 用 base.sha，推送用 event.before（全 0 = 新建分支，跳过差分）
+          BASE_SHA="${{ github.event.pull_request.base.sha || github.event.before }}"
+          case "$BASE_SHA" in ""|*[!0-9a-fA-F]*) BASE_SHA="" ;; esac
+          if [ -n "$BASE_SHA" ] && ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "base $BASE_SHA 不在本地（fetch-depth 不足？），跳过差分"
+            BASE_SHA=""
+          fi
+          if [ -n "$BASE_SHA" ] && [ "$(git rev-parse "$BASE_SHA")" = "$(git rev-parse HEAD)" ]; then
+            echo "base 与 HEAD 相同，跳过差分"
+            BASE_SHA=""
+          fi
 
-          CL_VER="$CL_VER" python3 - <<'PY'
+          HOST_ROOT="$(pwd)"
+          CHECK_REL="native/app/entry/src/main/ets"
+          WORK=""
+          if [ -n "$BASE_SHA" ]; then
+            WORK="$(mktemp -d)"
+            mkdir -p "$WORK/native"
+            # 复制整个 native/app 工程（codelinter 判定"工程根"需要**三个**条件同时满足：
+            # build-profile.json5 存在、hvigorfile.ts 存在、且 build-profile.json5 里含
+            # modules —— 只给 build-profile.json5 会报 "The entered inspection path is
+            # incorrect"）。随后只把被检查的源码子树换成 base 版本。
+            cp -a native/app "$WORK/native/"
+            # 去掉体积大且与 lint 无关的产物目录
+            rm -rf "$WORK/native/app/oh_modules" "$WORK/native/app/.hvigor" \
+                   "$WORK/native/app/entry/build" "$WORK/native/app/entry/.cxx" \
+                   "$WORK/native/app/entry/oh_modules"
+            rm -rf "$WORK/$CHECK_REL"
+            mkdir -p "$(dirname "$WORK/$CHECK_REL")"
+            if git archive "$BASE_SHA" "$CHECK_REL" | tar -x -C "$WORK"; then
+              echo "已取出 base($(git rev-parse --short "$BASE_SHA")) 的 $CHECK_REL"
+            else
+              echo "无法从 base 取出 $CHECK_REL，跳过差分"
+              BASE_SHA=""
+            fi
+          fi
+
+          run_lint() {  # $1=工作目录 $2=输出文件
+            ( cd "$1" && "$CODELINTER" entry/src/main/ets -f json -o "$2" >/dev/null 2>&1 )
+          }
+
+          run_lint "$HOST_ROOT/native/app" "$HOST_ROOT/head-report.json"
+          if [ -n "$BASE_SHA" ]; then
+            run_lint "$WORK/native/app" "$HOST_ROOT/base-report.json"
+          fi
+
+          HEAD_REPORT="$HOST_ROOT/head-report.json" \
+          BASE_REPORT="$HOST_ROOT/base-report.json" \
+          BASE_SHA="$BASE_SHA" python3 - <<'PY'
           import json, collections, os, sys
 
-          report, baseline_path = "codelinter-report.json", "codelinter-baseline.json"
-          data = json.load(open(report, encoding="utf-8"))
-          base = json.load(open(baseline_path, encoding="utf-8"))
-
-          by_rule, by_sev, files = collections.Counter(), collections.Counter(), 0
-          # rule -> [(相对路径:行, ...)]：只为了在"变差"时直接给出可跳转的位置。
-          # 没有它，失败信息只有"某规则由 N 升至 M"，拿到 CI 上根本无法定位是哪个文件
-          # （曾因此多花一轮 CI 才查明）。
-          locs = collections.defaultdict(list)
-          for entry in data:
-              fp = entry.get("filePath") or "?"
+          def load(path):
+              """→ {(子树内相对路径, 规则): 命中数}。"""
               try:
-                  rel = os.path.relpath(fp)
-              except ValueError:
-                  rel = fp
-              msgs = entry.get("messages") or []
-              if msgs:
-                  files += 1
-              for m in msgs:
-                  rule = m.get("rule", "?")
-                  by_rule[rule] += 1
-                  by_sev[m.get("severity", "?")] += 1
-                  locs[rule].append(f"{rel}:{m.get('line', '?')}")
-          total = sum(by_rule.values())
-          base_rules = {k: v for k, v in (base.get("byRule") or {}).items()}
+                  data = json.load(open(path, encoding="utf-8"))
+              except (FileNotFoundError, json.JSONDecodeError):
+                  return None
+              out = collections.Counter()
+              for entry in data:
+                  fp = (entry.get("filePath") or "").replace("\\", "/")
+                  # 两次运行的绝对路径前缀不同（base 在临时目录），统一截成
+                  # `entry/src/main/ets/...`，否则同一文件会被当成两个不同文件。
+                  marker = "entry/src/main/ets/"
+                  idx = fp.find(marker)
+                  rel = fp[idx:] if idx >= 0 else fp
+                  for m in entry.get("messages") or []:
+                      out[(rel, m.get("rule", "?"))] += 1
+              return out
 
-          # 0) 版本可比性：规则命中数会随 codelinter 自身版本变化，只有在同一版本下
-          # 比对才有意义。实测同一个**未被改动的**文件（admin/UsersPage.ets）在 6.0.240
-          # 下命中 13 处、在 CI 的工具链下命中 12 处，全局 181 vs 193；不记版本就会出现
-          # 「未改任何代码却比基线差」的假失败。
-          # 先把"当前实际值"完整打印出来（含按文件的明细），这样重建基线所需的全部信息
-          # 在一次失败的运行里就能拿到，不必再补一轮 CI。
-          ver = os.environ.get("CL_VER", "?")
-          base_ver = base.get("codelinterVersion")
-          if base_ver != ver:
-              why = ("基线未记录 codelinterVersion"
-                     if base_ver is None else
-                     f"基线 {base_ver} 与当前 {ver} 不一致")
-              print(f"\n::error::codelinter 版本可比性检查失败：{why}")
-              print("规则命中数随 codelinter 版本变化，跨版本比对会误报"
-                    "（曾实测同一未改动文件在两版本下命中数不同）。")
-              print("当前实际计数（可直接用于重建基线）：\n")
-              print(f"  codelinterVersion = {ver}")
-              print(f"  total             = {total}")
-              print(f"  files             = {files}")
-              for rule in sorted(by_rule):
-                  print(f"  byRule[{rule}] = {by_rule[rule]}")
-              # 按文件汇总（而非逐条列行号）：这里的目的只是让人一眼看出
-              # "命中集中在哪些文件、是否碰过本分支改动的文件"，不必刷 200 行。
-              per_file = collections.Counter()
-              for rule in by_rule:
-                  for loc in locs[rule]:
-                      per_file[loc.rsplit(":", 1)[0]] += 1
-              print("\n按文件汇总：")
-              for f, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
-                  print(f"  {n:4d}  {f}")
-              print("\n用与 CI 相同的工具链重新生成基线：")
-              print("  cd native/app")
-              print("  codelinter entry/src/main/ets -f json -o codelinter-report.json")
-              print("  把上面的 total / files / byRule / codelinterVersion 同步进 "
-                    "codelinter-baseline.json")
+          head = load(os.environ["HEAD_REPORT"])
+          if head is None:
+              print("::error::未生成当前提交的 codelinter 报告")
               sys.exit(1)
+          base_sha = os.environ.get("BASE_SHA", "")
+          base = load(os.environ.get("BASE_REPORT", "")) if base_sha else None
 
-          lines = [f"### ArkTS lint：{total} 条 / {files} 个文件",
-                   f"（基线 {base.get('total', 0)} 条 / {base.get('files', 0)} 个文件）", ""]
+          head_total = sum(head.values())
+          head_files = len({k[0] for k in head})
+          print(f"### ArkTS lint（当前提交）：{head_total} 条 / {head_files} 个文件")
 
-          # 1) 是否有规则条目新增，或某条规则数量上涨
-          regressions = []
-          for rule, count in sorted(by_rule.items()):
-              if rule not in base_rules:
-                  regressions.append(f"`{rule}` 新增 {count} 条")
-              elif count > base_rules[rule]:
-                  regressions.append(f"`{rule}` 由 {base_rules[rule]} 升至 {count}")
+          if base is None:
+              print("\n未做差分（无可用 base），仅报告当前命中：")
+              for (rel, rule), n in sorted(head.items()):
+                  print(f"  {n:4d}  {rule}  {rel}")
+              sys.exit(0)
 
-          # 2) 是否有规则被修完（提示同步下调基线）
-          improvements = [f"`{r}` 由 {c} 降至 {by_rule.get(r, 0)}"
-                          for r, c in sorted(base_rules.items()) if by_rule.get(r, 0) < c]
+          base_total = sum(base.values())
+          print(f"基线提交 {base_sha[:7]}：{base_total} 条")
+          print(f"差值：{head_total - base_total:+d} 条")
 
-          lines += ["| 规则 | 当前 | 基线 |", "| --- | --- | --- |"]
-          for rule in sorted(set(by_rule) | set(base_rules)):
-              lines.append(f"| `{rule}` | {by_rule.get(rule, 0)} | {base_rules.get(rule, 0)} |")
-          if by_sev:
-              lines += ["", "按严重级：" + "、".join(f"{k} {v}" for k, v in by_sev.most_common())]
+          # 逐 (文件, 规则) 比较：head 多于 base 的部分即本次引入的新命中。
+          regressions = [(k, n - base.get(k, 0)) for k, n in sorted(head.items())
+                         if n > base.get(k, 0)]
 
-          summary = "\n".join(lines)
-          print(summary)
+          summary = [f"### ArkTS lint 差分：当前 {head_total} 条 vs base {base_total} 条",
+                     f"（差值 {head_total - base_total:+d} 条；base {base_sha[:7]}）", ""]
+          if regressions:
+              summary += ["| 文件 | 规则 | 新增 |", "| --- | --- | --- |"]
+              for (rel, rule), d in regressions:
+                  summary.append(f"| `{rel}` | `{rule}` | {d} |")
+          else:
+              summary.append("未引入新的 lint 命中。")
+          text = "\n".join(summary)
+          print("\n" + text)
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as fh:
-              fh.write(summary + "\n")
+              fh.write(text + "\n")
 
           if regressions:
-              print("\n::error::ArkTS lint 比基线变差：")
-              for r in regressions:
-                  print(f"  - {r}")
-              # 逐条给出文件位置：CI 失败信息只有"某规则由 N 升至 M"时无法定位，
-              # 必须再拉一次日志才能查。这里直接打印，并额外发 GitHub 注解
-              # （workflow 命令需逐行输出才能被解析，故不放进上面的字符串）。
-              for rule in sorted(by_rule):
-                  if rule not in base_rules:
-                      delta = locs[rule]
-                  elif by_rule[rule] > base_rules[rule]:
-                      # 只报超出的部分，避免把基线内已有的旧问题一起刷屏
-                      delta = locs[rule][base_rules[rule]:]
-                  else:
-                      continue
-                  print(f"\n  [{rule}] 新增 {len(delta)} 处：")
-                  for loc in delta:
-                      print(f"    {loc}")
-                      print(f"::error file={loc.rsplit(':', 1)[0]},line={loc.rsplit(':', 1)[1]},title=ArkTS lint::{rule}")
-              # 以及这些新增位置**按文件**的汇总。判断这类失败是不是真由本次改动引起，
-              # 只需要看两件事：命中是否集中在本 PR 改过的文件、未改动的文件是否也在涨。
-              # 明细提示里没有这个视角，第一次遇到时会误判成"代码问题"而去改无关文件。
-              print("\n  新增位置按文件汇总（未出现在本 PR 改动清单里的文件值得怀疑）：")
-              per_file = collections.Counter()
-              for rule in sorted(by_rule):
-                  if rule not in base_rules:
-                      delta = locs[rule]
-                  elif by_rule[rule] > base_rules[rule]:
-                      delta = locs[rule][base_rules[rule]:]
-                  else:
-                      continue
-                  for loc in delta:
-                      per_file[loc.rsplit(":", 1)[0]] += 1
-              for f, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
-                  print(f"    {n:4d}  {f}")
-              print("\n请修正上述问题，或在确认属误报后调整 codelinter-baseline.json")
+              print(f"\n::error::本次改动引入 {len(regressions)} 处新的 ArkTS lint 命中：")
+              for (rel, rule), d in regressions:
+                  print(f"  {rel}  {rule}  +{d}")
+                  print(f"::error file={rel},title=ArkTS lint::{rule} +{d}（本改动引入）")
+              print("\n请修正上述位置。这是与 base 在同一环境下的差分，与工具链版本无关，"
+                    "确由本次改动引入。")
               sys.exit(1)
-
-          if improvements:
-              print("\n提示：以下规则已比基线减少，请把 native/app/codelinter-baseline.json 调小以固化改进：")
-              for i in improvements:
-                  print(f"  - {i}")
+          print("\n[通过] 未引入新的 ArkTS lint 命中")
           PY
+
+          rm -f "$HOST_ROOT/head-report.json" "$HOST_ROOT/base-report.json" 2>/dev/null || true
+          [ -n "$WORK" ] && rm -rf "$WORK" || true
 
   build:
     name: 编译校验（debug，未签名）
