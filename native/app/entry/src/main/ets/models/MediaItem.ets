@@ -58,6 +58,19 @@ export class MediaItem {
    */
   childCount: number = 0;
 
+  /**
+   * 专辑艺术家（Jellyfin `AlbumArtist`）。
+   *
+   * 音乐条目专有：`MusicAlbum` / `Audio` 用它表示"这张专辑/这首歌属于谁"。
+   * 与 `Artists` 的区别（实测该库数据）：`AlbumArtist` 是**整张专辑**的署名
+   * （合辑里也只有一个），`Artists` 是**单曲**的演唱者数组、同一专辑内可能每首不同。
+   * 音乐列表按专辑聚合展示时应当用前者 —— 用后者会出现同一专辑在不同曲目上显示不同艺人。
+   *
+   * 只有请求了 `Fields` 含 `AlbumArtist` 的接口才有值（音乐相关查询已带上）。
+   * 视频条目为空，界面不渲染。
+   */
+  albumArtist: string = '';
+
   progress(): number {
     if (this.runTimeTicks <= 0 || this.playbackPositionTicks <= 0) {
       return 0;
@@ -168,6 +181,7 @@ export class MediaItem {
     item.parentIndexNumber = JsonUtil.getNumber(data, 'ParentIndexNumber', 0);
     item.playlistItemId = JsonUtil.getString(data, 'PlaylistItemId', '');
     item.childCount = JsonUtil.getNumber(data, 'ChildCount', 0);
+    item.albumArtist = JsonUtil.getString(data, 'AlbumArtist', '');
     item.isFolder = item.type === 'CollectionFolder' || item.type === 'UserView' ||
       item.type === 'Folder' || item.type === 'BoxSet';
 

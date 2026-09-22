@@ -17,6 +17,14 @@
         "description": "$string:EntryAbility_desc",
         "icon": "$media:icon",
         "label": "$string:EntryAbility_label",
+        // 音乐后台播放所需的长时任务模式。
+        // **必须有这一行**：只申请 ohos.permission.KEEP_BACKGROUND_RUNNING 是不够的，
+        // `backgroundTaskManager.startBackgroundRunning` 还会校验该 ability 是否声明了
+        // 对应的 backgroundModes，否则报 9800005「Continuous task verification failed」
+        // （设备实测：缺这行时后台播放提示"未启用"）。
+        "backgroundModes": [
+          "audioPlayback"
+        ],
         "startWindowIcon": "$media:icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
@@ -40,6 +48,13 @@
         // 会话令牌等敏感数据的主密钥保存在系统关键资产库（Asset Store Kit）中，
         // 该权限用于让资产在设备重启后仍然保留（否则重启即丢登录态）
         "name": "ohos.permission.STORE_PERSISTENT_DATA"
+      },
+      {
+        // 音频后台播放：AVSession 只负责"让系统媒体控件能看到/控制播放"，
+        // 应用退到后台后要**不被系统挂起**，还需要长时任务。
+        // `backgroundTaskManager.startBackgroundRunning` 要求本权限
+        // （普通权限，安装即授予，无需运行时弹窗）。
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
       }
     ]
   }

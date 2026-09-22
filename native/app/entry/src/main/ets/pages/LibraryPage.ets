@@ -72,6 +72,11 @@ struct LibraryPage {
       this.tabLabels = ['节目', '建议', '即将播出', '类型', '制片发行商', '剧集'];
     } else if (this.collectionType === 'movies') {
       this.tabLabels = ['电影', '建议', '我的最爱', '合集', '类型'];
+    } else if (this.collectionType === 'music') {
+      // 音乐库的根内容**就是艺术家**（实测该库根目录返回 42 个 MusicArtist），
+      // 所以「艺术家」放第一个且默认选中；再给出直接进专辑/曲目的视角，
+      // 否则只有艺术家一列，用户想按专辑或按单曲找就得一级一级点下去。
+      this.tabLabels = ['艺术家', '专辑', '曲目', '我的最爱'];
     } else {
       this.tabLabels = ['全部', '我的最爱'];
     }
@@ -109,6 +114,18 @@ struct LibraryPage {
     }
     if (label === '合集') {
       return 'boxsets';
+    }
+    // 音乐库的三个视角（标签即视角，见 setupTabs）。
+    // 不复用 'items'：那个 key 在下面的查询分支里只对 movies/tvshows 设类型，
+    // 音乐三个标签必须各自映射到 MusicArtist / MusicAlbum / Audio。
+    if (label === '艺术家') {
+      return 'artists';
+    }
+    if (label === '专辑') {
+      return 'albums';
+    }
+    if (label === '曲目') {
+      return 'songs';
     }
     return 'items';
   }
@@ -202,6 +219,20 @@ struct LibraryPage {
         query.includeItemTypes = 'Movie';
       } else if (this.collectionType === 'tvshows' && tabKey === 'items') {
         query.includeItemTypes = 'Series';
+      } else if (this.collectionType === 'music') {
+        // 音乐库三个视角各自只取一种类型：
+        //   艺术家 tab -> MusicArtist（库根内容本身，但显式指定可避免混入文件夹）
+        //   专辑   tab -> MusicAlbum（跨艺术家汇总所有专辑）
+        //   曲目   tab -> Audio（跨专辑汇总所有单曲）
+        // 不指定类型时服务端会返回混合结果（实测根目录是 MusicArtist + Folder），
+        // 所以这里必须显式指定，否则「专辑」标签会混进艺术家。
+        if (tabKey === 'artists') {
+          query.includeItemTypes = 'MusicArtist';
+        } else if (tabKey === 'albums') {
+          query.includeItemTypes = 'MusicAlbum';
+        } else if (tabKey === 'songs') {
+          query.includeItemTypes = 'Audio';
+        }
       }
       raw = await JellyfinNative.queryItems(query.toJson());
     }
@@ -287,6 +318,39 @@ struct LibraryPage {
     }
     if (item.type === 'Person') {
       router.pushUrl({ url: 'pages/PersonPage', params: { personId: item.id } });
+      return;
+    }
+    // 音乐条目各有专用页面：通用详情页没有音乐分支，进去只会拿不到任何有用信息
+    // （它按 Movie/Series 那套渲染，曲目与专辑都没有对应控件）。
+    if (item.type === 'MusicArtist') {
+      router.pushUrl({
+        url: 'pages/ArtistDetailPage',
+        params: { artistId: item.id, artistName: item.displayTitle() }
+      });
+      return;
+    }
+    if (item.type === 'MusicAlbum') {
+      router.pushUrl({
+        url: 'pages/AlbumDetailPage',
+        params: {
+          albumId: item.id,
+          albumName: item.displayTitle(),
+          artistName: item.albumArtist
+        }
+      });
+      return;
+    }
+    if (item.type === 'Audio') {
+      // 单曲：从「曲目」标签直接点播，只播这一首（专辑连播在专辑页的「播放全部」）
+      router.pushUrl({
+        url: 'pages/MusicPlayerPage',
+        params: {
+          trackIds: [item.id],
+          trackNames: [item.displayTitle()],
+          startIndex: 0,
+          artistName: item.albumArtist
+        }
+      });
       return;
     }
     router.pushUrl({ url: 'pages/DetailPage', params: { itemId: item.id } });
