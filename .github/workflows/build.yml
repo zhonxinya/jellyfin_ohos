@@ -391,6 +391,22 @@ jobs:
                   for loc in delta:
                       print(f"    {loc}")
                       print(f"::error file={loc.rsplit(':', 1)[0]},line={loc.rsplit(':', 1)[1]},title=ArkTS lint::{rule}")
+              # 以及这些新增位置**按文件**的汇总。判断这类失败是不是真由本次改动引起，
+              # 只需要看两件事：命中是否集中在本 PR 改过的文件、未改动的文件是否也在涨。
+              # 明细提示里没有这个视角，第一次遇到时会误判成"代码问题"而去改无关文件。
+              print("\n  新增位置按文件汇总（未出现在本 PR 改动清单里的文件值得怀疑）：")
+              per_file = collections.Counter()
+              for rule in sorted(by_rule):
+                  if rule not in base_rules:
+                      delta = locs[rule]
+                  elif by_rule[rule] > base_rules[rule]:
+                      delta = locs[rule][base_rules[rule]:]
+                  else:
+                      continue
+                  for loc in delta:
+                      per_file[loc.rsplit(":", 1)[0]] += 1
+              for f, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
+                  print(f"    {n:4d}  {f}")
               print("\n请修正上述问题，或在确认属误报后调整 codelinter-baseline.json")
               sys.exit(1)
 
