@@ -89,6 +89,231 @@ jobs:
 
           exit "$fail"
 
+  lint:
+    name: 代码规范检查（编译警告 + ArkTS lint）
+    runs-on: ubuntu-latest
+    env:
+      # 自有源码的 include 路径。third_party 的路径分开列，因为它们不参与"警告"检查。
+      LINT_INC: >-
+        -I native/core -I native/core/api -I native/feature/player
+        -I native/third_party -I native/third_party/nlohmann
+        -I native/third_party/mbedtls/include
+        -I native/third_party/ffmpeg/include -I native/third_party/dav1d/include
+      # 需要 OHOS SDK 头、在 ubuntu 上无法解析的自有源码。
+      # 这不是"被放过"：它们仍然在 build 任务里由真实工具链编译，只是不参与本步骤的
+      # 警告扫描（缺头会变成 fatal error，与警告混在一起没有信息量）。
+      # 清单是实测得出的 —— 无 sysroot 时 47 个自有 .cpp 可编，恰好这 4 个不行。
+      LINT_OHOS_ONLY: >-
+        native/app/entry/src/main/cpp/napi_init.cpp
+        native/napi/jellyfin_napi.cpp
+        native/feature/player/egl_renderer.cpp
+        native/feature/player/xcomponent_bridge.cpp
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # ── 1) 自有源码的编译警告 ───────────────────────────────────────────────
+      # 为什么单独做一遍而不用 build 任务的输出：CMake 那边已给自有源码加了
+      # -Wall -Wextra -Wpedantic（见 CMakeLists.txt），但 hvigor 的构建日志很长、
+      # 警告容易淹没在输出里；这里把"有输出即失败"独立成一步，问题不会被漏看。
+      #
+      # 为什么加 -DJELLYFIN_HAS_FFMPEG=1：不定义它时，源码里 `#if !defined(...)` 的
+      # 那半个文件根本不会被编译，**未使用参数之类的真实警告会被静默跳过**。
+      # （这正是本仓库踩过的坑：不定义该宏扫描时，soft_decode_session.cpp 会报出
+      # 3 个假的"未使用参数"，而定义后为 0 警告。）
+      - name: 自有源码编译警告（-Wall -Wextra -Wpedantic）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 用空格包起来，配合下面 case 做整词匹配，避免 napi.cpp 误命中 jellyfin_napi.cpp
+          skip=" $(echo $LINT_OHOS_ONLY) "
+          checked=0
+          fail=0
+          while IFS= read -r f; do
+            case "$skip" in
+              *" $f "*) echo "跳过（需 OHOS 头，改由 build 任务编译）: $f"; continue ;;
+            esac
+            checked=$((checked + 1))
+            out="$(g++ -std=c++17 -DJELLYFIN_HAS_FFMPEG=1 \
+                    -Wall -Wextra -Wpedantic -fsyntax-only $LINT_INC "$f" 2>&1 || true)"
+            if [[ -n "$out" ]]; then
+              echo "::error file=$f::编译警告或错误"
+              echo "$out"
+              fail=1
+            fi
+          done < <(git ls-files native | grep -E '\.cpp$' | grep -v '^native/third_party/')
+          echo "已检查 $checked 个自有源文件"
+          if [[ "$fail" -ne 0 ]]; then
+            echo "::error::自有源码存在编译警告，请按上面的位置修正"
+          fi
+          exit "$fail"
+
+      # ── 2) ArkTS 侧 lint（鸿蒙官方 codelinter）─────────────────────────────
+      # 此前 ETS 完全没有任何静态检查。接入后按**基线**门禁（而非按级别）：
+      #
+      # 为什么不直接用 codelinter 的 -e/--exit-on：实测**不起作用** ——
+      #   -e error / warn / suggestion / error,warn,warn,suggestion 四种取值下退出码皆为 0，
+      #   当前 181 条全是 warn 级，所以没有任何一个 -e 取值能让它失败。
+      # 因此这里自己比对 native/app/codelinter-baseline.json：
+      #   规则数量增加 -> 失败；总数下降 -> 通过并提示同步下调基线；一致 -> 通过。
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # 复用 build-hap 的同一份缓存键（tools-version 与那边默认值一致），
+      # 所以两个任务不会各下一份 ~2GB 的工具链
+      - name: Cache Command Line Tools
+        id: cache-tools
+        uses: actions/cache@v6
+        with:
+          path: ./command-line-tools
+          key: ${{ runner.os }}-harmony-tools-6.1.0.816
+
+      - name: Download Command Line Tools
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="6.1.0.816"
+          URL="https://github.com/Okysu/harmony-auto-build/releases/download/commandline-tools-linux-x64-${VER}/commandline-tools-linux-x64-${VER}.zip"
+          echo "下载鸿蒙命令行工具链: $URL"
+          curl -fL --retry 3 --retry-delay 5 -o tools.zip "$URL"
+          unzip -q tools.zip
+          rm -f tools.zip
+
+      # ── 2) clang-tidy（仓库自带的 native/app/.clang-tidy）────────────────────
+      # 该 `.clang-tidy` 此前从未被任何构建或 CI 执行过（CMake 里只留了一个默认关闭的
+      # 开关），等于摆设。这里把它真正跑起来。
+      #
+      # 用 CLT 自带的 clang-tidy（与工具链同源，保证 check 名称一致）：
+      # 直接调绝对路径，不把 tools/bin 加进 PATH（那里有 OHOS 版 diff 等会顶掉系统命令）。
+      # 因此本步骤必须放在工具链下载**之后**。
+      #
+      # 实测基线：47 个自有源文件、耗时约 105 秒、0 命中，故可以强制失败。
+      # 抽查证明该检查确实有效（故意写一个未使用参数会被 misc-unused-parameters 命中），
+      # 不是"永远通过"的空壳。
+      #
+      # 覆盖范围与上面警告扫描一致（排除需 OHOS 头的 4 个源文件）。
+      # 局限（据实说明）：`.clang-tidy` 的 checks 以 NAPI 相关为主（misc-napi-*、
+      # capi-version-validation），而那两个 NAPI 文件恰恰需要 OHOS 头、在本任务里编不了；
+      # 这条检查真正守住的是 misc-unused-parameters / modernize-use-auto 等通用规则
+      # （已据其修掉 10 处 modernize-use-auto）。
+      - name: clang-tidy（native/app/.clang-tidy）
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLANG_TIDY="$(pwd)/command-line-tools/sdk/default/openharmony/native/llvm/bin/clang-tidy"
+          if [ ! -x "$CLANG_TIDY" ]; then
+            echo "::error::未找到 clang-tidy($CLANG_TIDY)，请检查工具链版本"
+            exit 1
+          fi
+
+          # 取仓库自己的 checks 清单，保证 CI 与本地/IDE 看到同一套规则
+          CHECKS="$(grep -o "Checks: *'[^']*'" native/app/.clang-tidy | sed "s/Checks: *'//; s/'$//")"
+          echo "checks: $CHECKS"
+
+          # 用空格包起来做整词匹配，避免 napi.cpp 误命中 jellyfin_napi.cpp
+          skip=" $(echo $LINT_OHOS_ONLY) "
+          checked=0
+          fail=0
+          while IFS= read -r f; do
+            case "$skip" in
+              *" $f "*) echo "跳过（需 OHOS 头）: $f"; continue ;;
+            esac
+            checked=$((checked + 1))
+            # 只留自有代码的告警：vendored 头产生的告警会被标为 non-user code，
+            # 过滤掉它们，避免淹没真正要看的问题。
+            out="$("$CLANG_TIDY" --checks="$CHECKS" "$f" -- \
+                    -std=c++17 -DJELLYFIN_HAS_FFMPEG=1 $LINT_INC 2>&1 \
+                  | grep -E "^/.*(warning|error):" || true)"
+            if [ -n "$out" ]; then
+              echo "::error file=$f::clang-tidy 告警"
+              echo "$out"
+              fail=1
+            fi
+          done < <(git ls-files native | grep -E '\.cpp$' | grep -v '^native/third_party/')
+          echo "clang-tidy 已检查 $checked 个自有源文件（基线 0 命中）"
+          exit "$fail"
+
+      - name: ArkTS lint（codelinter + 基线比对）
+        shell: bash
+        working-directory: native/app
+        run: |
+          set -euo pipefail
+          TOOLS_DIR="$(cd ../.. && pwd)/command-line-tools"
+          # 不把 "$TOOLS_DIR/bin" 加进 PATH：那个目录里有 OHOS 版的 diff 等工具，
+          # 会把系统同名命令顶掉。这里按绝对路径调用。
+          CODELINTER="$TOOLS_DIR/bin/codelinter"
+          if [ ! -x "$CODELINTER" ]; then
+            echo "::error::未找到 codelinter($CODELINTER)，请检查工具链版本是否仍自带该工具"
+            ls "$TOOLS_DIR/bin" || true
+            exit 1
+          fi
+
+          # codelinter 需要 SDK 定位 ArkTS 声明（与 hvigor 用同一套环境变量）
+          export DEVECO_SDK_HOME="$TOOLS_DIR/sdk"
+          export HOS_SDK_HOME="$TOOLS_DIR/sdk"
+
+          "$CODELINTER" entry/src/main/ets -f json -o codelinter-report.json
+
+          python3 - <<'PY'
+          import json, collections, os, sys
+
+          report, baseline_path = "codelinter-report.json", "codelinter-baseline.json"
+          data = json.load(open(report, encoding="utf-8"))
+          base = json.load(open(baseline_path, encoding="utf-8"))
+
+          by_rule, by_sev, files = collections.Counter(), collections.Counter(), 0
+          for entry in data:
+              msgs = entry.get("messages") or []
+              if msgs:
+                  files += 1
+              for m in msgs:
+                  by_rule[m.get("rule", "?")] += 1
+                  by_sev[m.get("severity", "?")] += 1
+          total = sum(by_rule.values())
+          base_rules = {k: v for k, v in (base.get("byRule") or {}).items()}
+
+          lines = [f"### ArkTS lint：{total} 条 / {files} 个文件",
+                   f"（基线 {base.get('total', 0)} 条 / {base.get('files', 0)} 个文件）", ""]
+
+          # 1) 是否有规则条目新增，或某条规则数量上涨
+          regressions = []
+          for rule, count in sorted(by_rule.items()):
+              if rule not in base_rules:
+                  regressions.append(f"`{rule}` 新增 {count} 条")
+              elif count > base_rules[rule]:
+                  regressions.append(f"`{rule}` 由 {base_rules[rule]} 升至 {count}")
+
+          # 2) 是否有规则被修完（提示同步下调基线）
+          improvements = [f"`{r}` 由 {c} 降至 {by_rule.get(r, 0)}"
+                          for r, c in sorted(base_rules.items()) if by_rule.get(r, 0) < c]
+
+          lines += ["| 规则 | 当前 | 基线 |", "| --- | --- | --- |"]
+          for rule in sorted(set(by_rule) | set(base_rules)):
+              lines.append(f"| `{rule}` | {by_rule.get(rule, 0)} | {base_rules.get(rule, 0)} |")
+          if by_sev:
+              lines += ["", "按严重级：" + "、".join(f"{k} {v}" for k, v in by_sev.most_common())]
+
+          summary = "\n".join(lines)
+          print(summary)
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as fh:
+              fh.write(summary + "\n")
+
+          if regressions:
+              print("\n::error::ArkTS lint 比基线变差：")
+              for r in regressions:
+                  print(f"  - {r}")
+              print("请修正上述问题，或在确认属误报后调整 codelinter-baseline.json")
+              sys.exit(1)
+
+          if improvements:
+              print("\n提示：以下规则已比基线减少，请把 native/app/codelinter-baseline.json 调小以固化改进：")
+              for i in improvements:
+                  print(f"  - {i}")
+          PY
+
   build:
     name: 编译校验（debug，未签名）
     runs-on: ubuntu-latest

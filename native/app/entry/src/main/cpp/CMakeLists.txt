@@ -39,6 +39,49 @@ add_library(jellyfin_native SHARED
 
 target_compile_features(jellyfin_native PRIVATE cxx_std_17)
 
+# ── 编译警告：只作用于本工程自有源码 ──────────────────────────────────────────
+# 此前这里**没有**任何警告开关，于是 HAP 构建即便编出可疑代码也是全静默的。
+# 加开关是一条零改动的纯护栏：实测自有源码在 -Wall -Wextra -Wpedantic 下当前
+# **0 警告**（含启用 FFmpeg 分支的编译），所以打开它不会掩盖也不会制造噪声。
+#
+# 为什么不加 -Werror：
+#   本工程同时存在 vendored 第三方（mbedTLS/FFmpeg/dav1d/nlohmann）与两套编译器
+#   （hvigor 内的 clang、CI 上的 g++），不同版本会各自新增不同警告。一刀切 -Werror
+#   的后果是"换工具链版本就构建失败"，而这类失败与代码正确性无关。真要强制，应当
+#   在评审与 CI 上按具体警告逐条决定，而不是全局打开。
+#
+# 为什么用 set_source_files_properties 而不是 target_compile_options：
+#   target_compile_options 会连带作用于 vendored 的 mbedTLS（实测其源码在
+#   -Wall -Wextra 下自带 2 条警告）。那属于上游风格，不该由本工程"修"，也不该
+#   混进构建日志淹没有效信息。按源文件属性设置即可精确圈定自有代码。
+set(JELLYFIN_OWN_SOURCES
+  napi_init.cpp
+  ${NAPI_SOURCES}
+  ${CORE_SOURCES}
+  ${PLAYER_SOURCES}
+)
+set_source_files_properties(${JELLYFIN_OWN_SOURCES} PROPERTIES
+  COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic"
+)
+
+# ── clang-tidy（可选、默认关闭）───────────────────────────────────────────────
+# 仓库里已有一份 `native/app/.clang-tidy`（HarmonyOS 预设 checks），但此前从未接入
+# 任何构建，等于摆设。这里提供开关而**不**默认打开：
+#   clang-tidy 需要能完整解析该文件的 include（native/feature/player 的部分文件依赖
+#   OHOS 的 ACE/EGL 头，在主机与 CI 上都不具备），且会给每次构建增加可观耗时。
+#   持续执行交给 CI 的独立 lint 任务（见 .github/workflows/build.yml）。
+# 本地想跑：cmake -DJELLYFIN_ENABLE_CLANG_TIDY=ON ...
+option(JELLYFIN_ENABLE_CLANG_TIDY "在自有源码上启用 clang-tidy（需自备 clang-tidy）" OFF)
+if(JELLYFIN_ENABLE_CLANG_TIDY)
+  find_program(JELLYFIN_CLANG_TIDY NAMES clang-tidy)
+  if(JELLYFIN_CLANG_TIDY)
+    set(CMAKE_CXX_CLANG_TIDY "${JELLYFIN_CLANG_TIDY}")
+    message(STATUS "clang-tidy 已启用：${JELLYFIN_CLANG_TIDY}")
+  else()
+    message(WARNING "JELLYFIN_ENABLE_CLANG_TIDY=ON 但找不到 clang-tidy，已跳过")
+  endif()
+endif()
+
 # ── 版本号单一来源 ────────────────────────────────────────────────────────────
 # 应用版本只写在 AppScope/app.json5 的 versionName 里，这里在配置期读出来注入 C++，
 # 供 User-Agent、Jellyfin 鉴权头的 Client 版本以及各模块自报版本使用。

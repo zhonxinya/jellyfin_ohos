@@ -17,3 +17,7 @@ app/**/.preview/
 # Temporary
 *.log
 *.tmp
+
+# 静态检查产物
+# codelinter 在 native/app 下生成的报告（基线本身是 codelinter-baseline.json，要提交）
+app/codelinter-report.json
