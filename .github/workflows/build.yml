@@ -236,6 +236,22 @@ jobs:
           echo "clang-tidy 已检查 $checked 个自有源文件（基线 0 命中）"
           exit "$fail"
 
+      # codelinter 会从被检查路径向上找第一个含 `build-profile.json5` 的目录作为"工程根"，
+      # 找不到就直接报 "The entered inspection path is incorrect, please make sure this path
+      # is under the project path." 并 exit 1（不产出任何报告）。
+      #
+      # 而 `native/app/build-profile.json5` 被 .gitignore 排除（内含本机证书路径与密码），
+      # 在干净 checkout 里**根本不存在** —— 所以本步骤不是可选的：
+      # 缺了它，codelinter 连启动都做不到，与"lint 是否通过"无关。
+      # 复用 build-hap 的同一份无签名配置（不含 signingConfigs，可安全用于 CI）。
+      # 实测只需这一个文件：codelinter 靠 DEVECO_SDK_HOME 定位 ArkTS 声明，
+      # 不读 local.properties，故这里不额外生成它。
+      - name: 生成 CI 工程配置（codelinter 需要 build-profile.json5 才能定位工程根）
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp native/app/build-profile.ci.json5 native/app/build-profile.json5
+
       - name: ArkTS lint（codelinter + 基线比对）
         shell: bash
         working-directory: native/app
