@@ -281,13 +281,24 @@ jobs:
           base = json.load(open(baseline_path, encoding="utf-8"))
 
           by_rule, by_sev, files = collections.Counter(), collections.Counter(), 0
+          # rule -> [(相对路径:行, ...)]：只为了在"变差"时直接给出可跳转的位置。
+          # 没有它，失败信息只有"某规则由 N 升至 M"，拿到 CI 上根本无法定位是哪个文件
+          # （曾因此多花一轮 CI 才查明）。
+          locs = collections.defaultdict(list)
           for entry in data:
+              fp = entry.get("filePath") or "?"
+              try:
+                  rel = os.path.relpath(fp)
+              except ValueError:
+                  rel = fp
               msgs = entry.get("messages") or []
               if msgs:
                   files += 1
               for m in msgs:
-                  by_rule[m.get("rule", "?")] += 1
+                  rule = m.get("rule", "?")
+                  by_rule[rule] += 1
                   by_sev[m.get("severity", "?")] += 1
+                  locs[rule].append(f"{rel}:{m.get('line', '?')}")
           total = sum(by_rule.values())
           base_rules = {k: v for k, v in (base.get("byRule") or {}).items()}
 
@@ -321,7 +332,22 @@ jobs:
               print("\n::error::ArkTS lint 比基线变差：")
               for r in regressions:
                   print(f"  - {r}")
-              print("请修正上述问题，或在确认属误报后调整 codelinter-baseline.json")
+              # 逐条给出文件位置：CI 失败信息只有"某规则由 N 升至 M"时无法定位，
+              # 必须再拉一次日志才能查。这里直接打印，并额外发 GitHub 注解
+              # （workflow 命令需逐行输出才能被解析，故不放进上面的字符串）。
+              for rule in sorted(by_rule):
+                  if rule not in base_rules:
+                      delta = locs[rule]
+                  elif by_rule[rule] > base_rules[rule]:
+                      # 只报超出的部分，避免把基线内已有的旧问题一起刷屏
+                      delta = locs[rule][base_rules[rule]:]
+                  else:
+                      continue
+                  print(f"\n  [{rule}] 新增 {len(delta)} 处：")
+                  for loc in delta:
+                      print(f"    {loc}")
+                      print(f"::error file={loc.rsplit(':', 1)[0]},line={loc.rsplit(':', 1)[1]},title=ArkTS lint::{rule}")
+              print("\n请修正上述问题，或在确认属误报后调整 codelinter-baseline.json")
               sys.exit(1)
 
           if improvements:
