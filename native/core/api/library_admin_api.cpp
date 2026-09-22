@@ -1,5 +1,6 @@
 #include "library_admin_api.h"
 
+#include "json_arg.h"
 #include "url_util.h"
 
 #include <algorithm>
@@ -662,7 +663,12 @@ nlohmann::json buildMetadataSettingsModel(const nlohmann::json &serverConfig,
                     continue;
                 }
                 saverSeen.insert(name);
-                saverDefault.emplace_back(name, saver.value("defaultEnabled", false));
+                // 用 Bool() 而不是 saver.value("defaultEnabled", false)：
+                // default 为**具体类型**时 value() 会做类型检查，而服务端的
+                // defaultEnabled 可能是 null（本机实测 `value(k, false)` 对 null/数组/数字
+                // 均抛 type_error.302）。本函数经 RunAsync 在 worker 线程上执行，
+                // 异常逸出会把"读媒体库选项"变成"操作失败"。
+                saverDefault.emplace_back(name, jellyfin::json_arg::Bool(saver, "defaultEnabled", false));
             }
             for (const auto &typeOption : normalized["typeOptions"]) {
                 const std::string type = JsonStringOr(typeOption, "type");
@@ -696,9 +702,9 @@ nlohmann::json buildMetadataSettingsModel(const nlohmann::json &serverConfig,
                 if (name.empty()) {
                     continue;
                 }
-                const bool enabled = hasEntry
-                    ? !ArrayHas(entry[disabledField], name)
-                    : option.value("defaultEnabled", false);
+                const bool enabled =
+                    hasEntry ? !ArrayHas(entry[disabledField], name)
+                             : jellyfin::json_arg::Bool(option, "defaultEnabled", false);
                 list.push_back(nlohmann::json::object({{"name", name}, {"enabled", enabled}}));
             }
             return list;

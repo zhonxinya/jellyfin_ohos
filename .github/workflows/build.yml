@@ -45,7 +45,9 @@ jobs:
               test_image_url)
                 extra="native/core/image_url.cpp native/core/url_util.cpp" ;;
               test_items_query)
-                extra="native/core/api/items_query.cpp native/core/url_util.cpp" ;;
+                # options_parse.cpp：宿主 JSON → ItemsQuery/PlaybackInfoOptions 的容错解析
+                # （用 nlohmann 的 value() 会在"键存在但类型不符"时抛异常，见 json_arg.h）
+                extra="native/core/api/items_query.cpp native/core/api/options_parse.cpp native/core/url_util.cpp" ;;
               test_playback_resolve)
                 extra="native/core/api/playback_resolve.cpp native/core/url_util.cpp" ;;
               test_player_engine)
@@ -58,6 +60,16 @@ jobs:
               test_device_profile)
                 # 客户端能力声明：决定服务端会不会转码（av1 必须在直接播放列表之外）
                 extra="native/core/api/device_profile.cpp" ;;
+              test_json_arg)
+                # header-only（json_arg.h），无需额外源文件。
+                # 守住的是"异常不得从 NAPI 边界逸出"：value() 对 null/类型不符会抛，
+                # 而异常逸出 RunAsync 的 worker 线程 = std::terminate。
+                extra="" ;;
+              test_image_cache)
+                # 只依赖注入的下载函数（ImageDownloadFn），不需要 HttpClient/mbedTLS：
+                # 守住的是淘汰的触发频率与代价（旧实现每下载一张图就做一次 O(n²) 目录扫描，
+                # 且都在取图请求共用的锁内）、LRU、在途去重，以及"错误必须显式"。
+                extra="native/core/image_cache.cpp" ;;
               test_socket_util)
                 # socket_util.h 是 header-only（WaitSocketReady 为 inline），无需额外源文件。
                 # 守住的是"别再用 select()/FD_SET"：OpenHarmony 的 FD_SET 对 fd>=1024 直接 abort，

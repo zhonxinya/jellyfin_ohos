@@ -81,11 +81,21 @@ Invoke-CompileAndRun -Name "test_image_url" -Sources @(
     (Join-Path $Core "url_util.cpp")
 )
 
-# ItemsQuery：媒体库筛选/排序/分页的 query string 构造（纯函数，不依赖网络客户端）
+# ItemsQuery：媒体库筛选/排序/分页的 query string 构造（纯函数，不依赖网络客户端），
+# 外加 options_parse.cpp：宿主 JSON -> ItemsQuery/PlaybackInfoOptions 的容错解析
 Invoke-CompileAndRun -Name "test_items_query" -Sources @(
     (Join-Path $Core "tests\test_items_query.cpp"),
     (Join-Path $Core "api\items_query.cpp"),
+    (Join-Path $Core "api\options_parse.cpp"),
     (Join-Path $Core "url_util.cpp")
+)
+
+# json_arg：入参容错读取（header-only）。守住"异常不得从 NAPI 边界逸出"——
+# nlohmann 的 value() 对"键存在但类型不符"（尤其 ArkTS 传下来的 null）会抛异常，
+# 而异常一旦逸出 RunAsync 的 worker 线程就是 std::terminate、应用直接消失。
+# 该文件是 header-only，只需编译测试自身。
+Invoke-CompileAndRun -Name "test_json_arg" -Sources @(
+    (Join-Path $Core "tests\test_json_arg.cpp")
 )
 
 Invoke-CompileAndRun -Name "test_player_engine" -Sources @(
@@ -118,6 +128,13 @@ Invoke-CompileAndRun -Name "test_library_admin_api" -Sources @(
 Invoke-CompileAndRun -Name "test_device_profile" -Sources @(
     (Join-Path $Core "tests\test_device_profile.cpp"),
     (Join-Path $Core "api\device_profile.cpp")
+)
+
+# ImageCache：磁盘图片缓存（淘汰触发频率 / LRU / 在途去重 / 错误必须显式）。
+# 只依赖注入的下载函数（ImageDownloadFn），因此不需要 HttpClient 与 mbedTLS，可零依赖主机单测。
+Invoke-CompileAndRun -Name "test_image_cache" -Sources @(
+    (Join-Path $Core "tests\test_image_cache.cpp"),
+    (Join-Path $Core "image_cache.cpp")
 )
 
 Write-Host "All native core tests finished." -ForegroundColor Green
