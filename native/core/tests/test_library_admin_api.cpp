@@ -476,7 +476,7 @@ void TestLogFileRequestAndTail()
         const std::string tail = TailBytes(body, 21, truncated);
         ExpectTrue("cjk truncated", truncated == true);
         // 尾部必须是完整的 UTF-8：没有孤立的续字节开头
-        const unsigned char first = static_cast<unsigned char>(tail.front());
+        const auto first = static_cast<unsigned char>(tail.front());
         ExpectTrue("tail starts at a utf-8 boundary", (first & 0xC0u) != 0x80u);
         ExpectTrue("tail contains whole cjk lines", tail.size() % 16 == 0);
     }
