@@ -15,6 +15,11 @@ import { JellyfinImage } from '../components/JellyfinImage';
 /** 专辑一次取满即可（实测该库共 163 张，单艺术家最多数十张） */
 const kAlbumLimit: number = 200;
 
+/** 专辑标题行高（固定值，才能反推出格子高度；标题最多 2 行） */
+const kAlbumTitleLineHeight: number = 16;
+/** 专辑卡内封面与标题之间的间隙（= Column 的 space） */
+const kAlbumCardSpace: number = 6;
+
 /**
  * 艺术家详情页：列出这位艺术家的专辑。
  *
@@ -149,12 +154,27 @@ struct ArtistDetailPage {
     return parts.join(' ');
   }
 
+  /**
+   * 专辑格子高度 = 1:1 封面 + 间隙 + 标题 2 行。
+   *
+   * **必须显式给出**（设备实测的 bug）：GridItem 的高度本来由内容决定，而卡片里的 Column 是
+   * `height('100%')` —— 百分比在"高度由内容决定"的格子里没有可解析的基准，实测被解析成了
+   * Grid/视口的高度，于是**每个格子都被撑成将近一整屏**：周杰伦（6 张专辑）第一行之后，
+   * 第二行落到下一屏，看起来就是"每行间距过大"。
+   *
+   * 与 `MediaCollectionView` 是同一套做法：格子高度由页面按封面几何预留，卡片再撑满格子
+   * （卡片 `height('100%')` + 内容向上排，见 MediaCard 里的同源注释）。
+   */
+  private albumItemHeight(): number {
+    return this.cardWidth() + kAlbumCardSpace + kAlbumTitleLineHeight * 2;
+  }
+
   @Builder
   AlbumGrid() {
     Grid() {
       ForEach(this.albums, (album: MediaItem) => {
         GridItem() {
-          Column({ space: 6 }) {
+          Column({ space: kAlbumCardSpace }) {
             JellyfinImage({
               url: album.imageUrl(320, 'Primary'),
               // 封面用 1:1 方图（专辑封面是方的），宽度跟随列宽
@@ -165,6 +185,7 @@ struct ArtistDetailPage {
             Text(album.displayTitle())
               .fontSize(ThemeConstants.LABEL_SMALL)
               .fontColor(this.colors().textPrimary)
+              .lineHeight(kAlbumTitleLineHeight)
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .width('100%')
@@ -176,12 +197,16 @@ struct ArtistDetailPage {
             this.openAlbum(album);
           })
         }
+        .height(this.albumItemHeight())
       }, (album: MediaItem, index: number) => `${album.id}_${index}`)
     }
     .columnsTemplate(this.columnsTemplate())
     .columnsGap(ThemeConstants.GRID_COLUMN_GAP)
     .rowsGap(ThemeConstants.GRID_ROW_GAP)
     .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING, bottom: 24 })
+    // 撑满 Scroll 视口：内容比视口矮时 Scroll 会把内容垂直居中（与 `MediaCollectionView`
+    // 里的同源处理一致 —— 否则只有一两张专辑时会整块飘到屏幕中间）。
+    .height('100%')
     .width('100%')
   }
 
@@ -203,10 +228,7 @@ struct ArtistDetailPage {
         EmptyState({ message: '这位艺术家下没有可显示的专辑' })
       } else {
         Scroll() {
-          Column() {
-            this.AlbumGrid()
-          }
-          .width('100%')
+          this.AlbumGrid()
         }
         .layoutWeight(1)
         .width('100%')

@@ -9,6 +9,7 @@ import { AppTopBar } from '../components/AppTopBar';
 import { HomePage } from './HomePage';
 import { ShortVideoPage } from './ShortVideoPage';
 import { SettingsPage } from './SettingsPage';
+import { MusicPage } from './MusicPage';
 
 /**
  * 应用外壳 —— 按 mybooks_ohos 的 MainTabs 重构。
@@ -22,8 +23,10 @@ import { SettingsPage } from './SettingsPage';
  */
 /** 「视频」页在底部页签中的下标（与 ShortVideoPage.kVideoTabIndex 对应） */
 const kVideoTabIndex: number = 1;
+/** 「音乐」页在底部页签中的下标：媒体库 / 视频 / 音乐 / 设置 —— 三个"内容"页签相邻，设置收尾 */
+const kMusicTabIndex: number = 2;
 /** 「设置」页在底部页签中的下标 */
-const kSettingsTabIndex: number = 2;
+const kSettingsTabIndex: number = 3;
 /**
  * 挖孔（刘海/胶囊）避让高度的 `AppStorage` 键。
  *
@@ -328,7 +331,12 @@ struct MainShell {
       // 「视频」（短视频模式）与底部页签同一入口：抽屉里也放一个，长列表里更容易发现
       this.DrawerItem('视频', $r('sys.symbol.play_circle'), () => {
         this.drawerOpen = false;
-        this.shellTabIndex = 1;
+        this.shellTabIndex = kVideoTabIndex;
+      })
+      // 「音乐」同上（与底部页签同一入口）
+      this.DrawerItem('音乐', $r('sys.symbol.music'), () => {
+        this.drawerOpen = false;
+        this.shellTabIndex = kMusicTabIndex;
       })
       this.DrawerItem('继续观看', $r('sys.symbol.play_circle'), () => { this.pushPage('pages/ContinueWatchingPage'); })
       this.DrawerItem('播放列表', $r('sys.symbol.list_bullet'), () => { this.pushPage('pages/PlaylistsPage'); })
@@ -338,7 +346,7 @@ struct MainShell {
       }
       this.DrawerItem('设置', $r('sys.symbol.gearshape'), () => {
         this.drawerOpen = false;
-        this.shellTabIndex = 2;
+        this.shellTabIndex = kSettingsTabIndex;
       })
 
       Blank()
@@ -409,6 +417,14 @@ struct MainShell {
             }
             .tabBar('视频')
 
+            // 「音乐」页：音乐库的固定入口。音乐是本应用里少见的"点一首就播"的长内容形态，
+            // 原来只能在「媒体库」页签里横滑到最右找到那张卡；四个视角的内容复用
+            // `LibraryContentView`（见 MusicPage 与 LibraryPage 的壳/内容说明）。
+            TabContent() {
+              MusicPage({ themeTick: $themeTick })
+            }
+            .tabBar('音乐')
+
             TabContent() {
               SettingsPage({ themeTick: $themeTick, embedded: true,
                 settingsTick: this.settingsTabTick })
@@ -431,7 +447,8 @@ struct MainShell {
             Row() {
               this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
               this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
-              this.TabItem(2, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
+              this.TabItem(kMusicTabIndex, $r('sys.symbol.music'), '音乐')
+              this.TabItem(kSettingsTabIndex, $r('sys.symbol.gearshape'), $r('app.string.nav_settings'))
             }
             .width('100%')
             .height(ThemeConstants.TAB_BAR_HEIGHT)
@@ -479,7 +496,8 @@ struct MainShell {
         variant: 'ghost',
         iconSize: 20,
         onTap: () => {
-          this.shellTabIndex = 2;
+          // 顶栏的人形图标 = 账号入口，落在「设置」页
+          this.shellTabIndex = kSettingsTabIndex;
         }
       })
     }
