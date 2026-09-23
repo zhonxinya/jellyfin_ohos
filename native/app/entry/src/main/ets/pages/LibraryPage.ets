@@ -14,9 +14,20 @@ import { MediaCollectionView, MediaViewToggle } from '../components/MediaCollect
 import { ChipButton } from '../components/ChipButton';
 import { TextButton } from '../components/TextButton';
 
-@Entry
+/**
+ * 媒体库内容（全局唯一的媒体库浏览实现）。
+ *
+ * 两种用法：
+ *  - **路由页**：`pages/LibraryPage` 是 main_pages 里注册的路由，由文件末尾那个只做转发的
+ *    `LibraryPage` 壳承载（`embedded = false`，读路由参数、自己画顶栏）；
+ *  - **页签内嵌**：底部「音乐」页签由 `MusicPage` 传 `embedded = true` 直接嵌它。
+ *
+ * 为什么拆成"壳 + 内容"而不是让 `@Entry` 结构体直接被嵌：`@Entry` 是页面级声明，
+ * 页面自身要留在 main_pages 里给 `router.pushUrl` 用；把内容独立成普通组件后，
+ * 两条路都只维护这一份实现（音乐库的四个视角、排序筛选、分页、长按菜单都在这里）。
+ */
 @Component
-struct LibraryPage {
+export struct LibraryContentView {
   @State private status: string = UiState.LOADING;
   @State private errorMsg: string = '';
   @State private title: string = '媒体库';
@@ -46,23 +57,57 @@ struct LibraryPage {
   /** 服务端返回的总条数（TotalRecordCount）；-1 表示服务端未返回 */
   @State private totalCount: number = -1;
   private readonly pageSize: number = ThemeConstants.PAGE_SIZE;
+  /**
+   * 嵌到底部页签时用（见 `MusicPage`）：参数改由属性传入，且不再画自己的顶栏。
+   *
+   * 与 `SettingsPage` 的 `embedded` 是同一套做法（外壳里直接 `SettingsPage({ embedded: true, ... })`）。
+   * 复用而不是新写一份音乐列表：音乐库的四个视角（艺术家/专辑/曲目/我的最爱）、
+   * 排序筛选、分页与长按菜单都在这里，重写一份必然漂移。
+   */
+  @Prop embedded: boolean = false;
+  @Prop embeddedParentId: string = '';
+  @Prop embeddedTitle: string = '';
+  @Prop embeddedCollectionType: string = '';
+  /**
+   * 主题版本号，由外壳透传（路由页用法下不强求）。
+   *
+   * 内嵌页签**不会重建**，切换明暗主题时本页要能跟着重画 —— `colors()` 里读一下它，
+   * 与 `HomePage`/`SettingsPage` 的做法一致。
+   */
+  @Prop themeTick: number = 0;
 
   aboutToAppear(): void {
-    const params: Record<string, Object> = router.getParams() as Record<string, Object>;
-    if (params !== undefined && params !== null) {
-      const idVal: Object | undefined = params['parentId'];
-      if (typeof idVal === 'string') {
-        this.parentId = idVal;
+    // 参数先落到局部变量、末尾一次性回写 @State：本函数里每个 @State 只赋值一次
+    // （`@performance/hp-arkui-use-local-var-to-replace-state-var` 的计数口径是整个函数）
+    let parentId: string = '';
+    let title: string = '媒体库';
+    let collectionType: string = '';
+    if (this.embedded) {
+      parentId = this.embeddedParentId;
+      collectionType = this.embeddedCollectionType;
+      if (this.embeddedTitle.length > 0) {
+        title = this.embeddedTitle;
       }
-      const titleVal: Object | undefined = params['title'];
-      if (typeof titleVal === 'string' && titleVal.length > 0) {
-        this.title = titleVal;
-      }
-      const ct: Object | undefined = params['collectionType'];
-      if (typeof ct === 'string') {
-        this.collectionType = ct;
+    } else {
+      const params: Record<string, Object> = router.getParams() as Record<string, Object>;
+      if (params !== undefined && params !== null) {
+        const idVal: Object | undefined = params['parentId'];
+        if (typeof idVal === 'string') {
+          parentId = idVal;
+        }
+        const titleVal: Object | undefined = params['title'];
+        if (typeof titleVal === 'string' && titleVal.length > 0) {
+          title = titleVal;
+        }
+        const ct: Object | undefined = params['collectionType'];
+        if (typeof ct === 'string') {
+          collectionType = ct;
+        }
       }
     }
+    this.parentId = parentId;
+    this.title = title;
+    this.collectionType = collectionType;
     this.setupTabs();
     this.reload();
   }
@@ -83,6 +128,7 @@ struct LibraryPage {
   }
 
   private colors(): ThemeColors {
+    this.themeTick;
     return AppViewModel.getInstance().colors();
   }
 
@@ -228,6 +274,12 @@ struct LibraryPage {
         // 所以这里必须显式指定，否则「专辑」标签会混进艺术家。
         if (tabKey === 'artists') {
           query.includeItemTypes = 'MusicArtist';
+          // 只取**库根下的艺术家**（= 专辑艺术家）。默认的 recursive 会把"曲目级"的伪艺术家
+          // 也捞进来：服务端给每条曲目的 Artist 标签都建了 MusicArtist，标签不规范时名字就是
+          // 歌名/专辑名（「九万字」「北京巷弄」…），点进去只有一张 `Unknown Album`。
+          // 实测该库根 42 位艺术家，递归后变成 85 条 —— 用户看到的就是"艺术家页签里直接
+          // 显示了一堆专辑"。专辑/曲目两个页签要跨艺术家汇总，仍然保持递归。
+          query.recursive = false;
         } else if (tabKey === 'albums') {
           query.includeItemTypes = 'MusicAlbum';
         } else if (tabKey === 'songs') {
@@ -537,12 +589,25 @@ struct LibraryPage {
   build() {
     Stack() {
       Column() {
-        PageHeader({
-          title: this.title,
-          onBack: () => {
-            router.back();
-          }
-        })
+        if (!this.embedded) {
+          PageHeader({
+            title: this.title,
+            onBack: () => {
+              router.back();
+            }
+          })
+        } else {
+          // 内嵌页签下不画 PageHeader：外壳已经画了一条 56vp 的顶栏，再来一条就是两条。
+          // 这里只留标题行（音乐页需要"这是音乐库"这一层上下文，四个视角的页签就在它下面）。
+          Text(this.title)
+            .fontSize(ThemeConstants.TITLE_XLARGE)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.colors().textPrimary)
+            .width('100%')
+            .height(56)
+            .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING })
+            .backgroundColor(this.colors().cardBackground)
+        }
 
         this.TabChips()
 
@@ -647,6 +712,26 @@ struct LibraryPage {
         // 一旦上层遮罩也响应点击，某些 ArkUI 版本会把子组件的点击一并算到父级，
         // 表现为"点一下筛选条件面板就关了"。关闭统一走「完成」或再次点「筛选」。
       }
+    }
+    .width('100%')
+    .height('100%')
+  }
+}
+
+/**
+ * 路由页壳：`pages/LibraryPage`（HomePage 的媒体库卡片、搜索页等都用 `router.pushUrl` 进它）。
+ *
+ * 自身不持有任何状态，只把参数交给 `LibraryContentView` —— 页面级声明（`@Entry`）与
+ * 内容实现分开后，底部「音乐」页签才能复用同一份内容（见 `MusicPage`）。
+ */
+@Entry
+@Component
+struct LibraryPage {
+  build() {
+    // @Entry 的 build 必须只有一个容器根节点：内容组件自己一个节点还不够，
+    // 外面再套一层 Column（内容组件内部已经是 width/height 100% 的 Stack）
+    Column() {
+      LibraryContentView({ embedded: false })
     }
     .width('100%')
     .height('100%')
