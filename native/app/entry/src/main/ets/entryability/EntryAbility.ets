@@ -8,6 +8,7 @@ import fs from '@ohos.file.fs';
 import { SessionStore } from '../services/SessionStore';
 import { JellyfinNative } from '../plugins/JellyfinNative';
 import { PlaybackState } from '../common/PlaybackState';
+import { MusicPlayback } from '../common/MusicPlayback';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 
 const DOMAIN: number = 0x0000;
@@ -56,6 +57,10 @@ export default class EntryAbility extends UIAbility {
       hilog.info(DOMAIN, TAG, 'onDestroy: report playback stopped for %{public}s', itemId);
       JellyfinNative.reportPlaybackStopped(itemId, PlaybackState.positionTicks());
     }
+    // 音乐播放与页面解耦后（见 common/MusicPlayback），长时任务/AVSession 可能仍在运行：
+    // 退出时必须显式收尾 —— 上报已停止、结束长时任务、销毁会话，
+    // 否则下一次启动申请长时任务会被系统拒绝（#73 设备实测过的坑）。
+    MusicPlayback.getInstance().shutdown();
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {

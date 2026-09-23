@@ -4,8 +4,10 @@ import common from '@ohos.app.ability.common';
 import { WindowFullscreen, FullscreenResult } from '../common/WindowFullscreen';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
+import { MusicPlayback, MusicPlaybackState } from '../common/MusicPlayback';
 import { AppIconButton } from '../components/AppIconButton';
 import { AppTopBar } from '../components/AppTopBar';
+import { JellyfinImage } from '../components/JellyfinImage';
 import { HomePage } from './HomePage';
 import { ShortVideoPage } from './ShortVideoPage';
 import { SettingsPage } from './SettingsPage';
@@ -77,6 +79,18 @@ struct MainShell {
    * 只在「视频」页签下有意义，且**不持久化**（页签栏是唯一的页签入口，不能启动就没有）。
    */
   @State private videoFullscreen: boolean = false;
+  /**
+   * 底部「正在播放」迷你条的状态（音乐由 `MusicPlayback` 单例持有，本页只是它的一个视图）。
+   *
+   * 为什么外壳要持有这些：音乐播放已经与播放页解耦（见 `common/MusicPlayback`），
+   * 用户离开播放页后仍在播 —— 得有个常驻入口让他看得见、暂停得了、回得去。
+   */
+  @State private miniVisible: boolean = false;
+  @State private miniTitle: string = '';
+  @State private miniArtist: string = '';
+  @State private miniCover: string = '';
+  @State private miniPlaying: boolean = false;
+  private miniTimer: number = -1;
 
   aboutToAppear(): void {
     AppViewModel.getInstance().onThemeChanged = () => {
@@ -91,6 +105,12 @@ struct MainShell {
     // 先把挖孔避让的键建出来：`@StorageProp` 只在键**已存在**时才会收到后续更新，
     // 顶栏组件在本方法之后就会绑定，晚一步建键会让它们永远拿不到那个值（踩过一次）。
     AppStorage.setOrCreate(kTopInsetKey, 0);
+    // 迷你条跟随播放服务：外壳存活期间一直轮询（1s 一次足够 —— 条上不显示进度），
+    // 播放页与迷你条看到的是同一份状态，谁在前台都不会出现"两套播放状态"。
+    this.syncMiniBar();
+    this.miniTimer = setInterval(() => {
+      this.syncMiniBar();
+    }, 1000);
     // 窗口实例提前取回：外壳要立刻进沉浸式（三个页签都铺满整屏），
     // 不能等到用户切页签时才开始异步取
     window.getLastWindow(getContext(this) as common.UIAbilityContext).then((win: window.Window) => {
@@ -124,6 +144,10 @@ struct MainShell {
    * 那些页面就会顶着一个没人收拾的窗口状态 —— 它们并不走本外壳。
    */
   aboutToDisappear(): void {
+    if (this.miniTimer >= 0) {
+      clearInterval(this.miniTimer);
+      this.miniTimer = -1;
+    }
     AppStorage.setOrCreate(kTopInsetKey, 0);
     WindowFullscreen.exit(this.windowRef, this.colors().cardBackground);
   }
@@ -210,6 +234,122 @@ struct MainShell {
   private colors(): ThemeColors {
     this.themeTick;
     return AppViewModel.getInstance().colors();
+  }
+
+  /**
+   * 把播放服务状态同步到迷你条的 @State（只在值变化时回写）。
+   *
+   * 只取条上要显示的四项：曲名、副标题（艺术家，取不到就用专辑名）、封面、播放中。
+   */
+  private syncMiniBar(): void {
+    const s: MusicPlaybackState = MusicPlayback.getInstance().snapshot();
+    if (this.miniVisible !== s.hasTrack) {
+      this.miniVisible = s.hasTrack;
+    }
+    const title: string = s.currentTrackName();
+    if (this.miniTitle !== title) {
+      this.miniTitle = title;
+    }
+    let artist: string = s.artistName;
+    if (artist.length === 0) {
+      artist = s.albumName;
+    }
+    if (this.miniArtist !== artist) {
+      this.miniArtist = artist;
+    }
+    if (this.miniCover !== s.coverUrl) {
+      this.miniCover = s.coverUrl;
+    }
+    if (this.miniPlaying !== s.playing) {
+      this.miniPlaying = s.playing;
+    }
+  }
+
+  private openMusicPlayer(): void {
+    router.pushUrl({ url: 'pages/MusicPlayerPage' });
+  }
+
+  /**
+   * 底部「正在播放」迷你条。
+   *
+   * 为什么需要它：音乐播放已与播放页解耦（离开播放页继续播），没有这条就"看不到、暂停不了、
+   * 回不去"。点信息区回播放页（不带参数 = 挂载到当前曲目，不会重头播），右侧是暂停/下一首/关闭。
+   *
+   * 关闭（×）是**停止播放并释放**：上报已停止 + 结束长时任务 + 销毁 AVSession（见 MusicPlayback.stop），
+   * 不是"收起这一条"—— 否则音乐会一直在后台播着却没有任何入口。
+   */
+  @Builder
+  MiniPlayerBar() {
+    Column() {
+      Divider()
+        .color(this.colors().divider)
+        .strokeWidth(0.5)
+      Row({ space: 8 }) {
+        Row({ space: 10 }) {
+          JellyfinImage({
+            url: this.miniCover,
+            imgWidth: 40,
+            imgHeight: 40,
+            cornerRadius: 6,
+            placeholderIcon: 'music'
+          })
+          Column({ space: 2 }) {
+            Text(this.miniTitle)
+              .fontSize(ThemeConstants.META_MEDIUM)
+              .fontColor(this.colors().textPrimary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+            if (this.miniArtist.length > 0) {
+              Text(this.miniArtist)
+                .fontSize(ThemeConstants.LABEL_SMALL)
+                .fontColor(this.colors().textSecondary)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+        }
+        .layoutWeight(1)
+        .height('100%')
+        .onClick(() => {
+          this.openMusicPlayer();
+        })
+
+        AppIconButton({
+          icon: this.miniPlaying ? $r('sys.symbol.pause') : $r('sys.symbol.play_fill'),
+          variant: 'ghost',
+          iconSize: 22,
+          onTap: () => {
+            MusicPlayback.getInstance().togglePlay();
+          }
+        })
+        AppIconButton({
+          icon: $r('sys.symbol.forward_end_fill'),
+          variant: 'ghost',
+          iconSize: 20,
+          onTap: () => {
+            MusicPlayback.getInstance().playNext();
+          }
+        })
+        AppIconButton({
+          icon: $r('sys.symbol.xmark'),
+          variant: 'ghost',
+          iconSize: 18,
+          onTap: () => {
+            MusicPlayback.getInstance().stop();
+            this.syncMiniBar();
+          }
+        })
+      }
+      .width('100%')
+      .height(64)
+      .padding({ left: ThemeConstants.PAGE_PADDING, right: 4 })
+    }
+    .width('100%')
+    .backgroundColor(this.colors().cardBackground)
   }
 
   /**
@@ -444,6 +584,10 @@ struct MainShell {
           // 用 `if` 而不是 `opacity(0)`：透明的页签按钮**仍然可点**，
           // "藏起来却还吃触摸"是本项目已经踩过的一类 bug（见 ShortVideoPage 的工具行说明）。
           if (!this.videoFullscreen) {
+            // 「正在播放」迷你条：播放与播放页解耦后，用户离开播放页也能看到/控制/回到播放
+            if (this.miniVisible) {
+              this.MiniPlayerBar()
+            }
             Row() {
               this.TabItem(0, $r('sys.symbol.square_grid_2x2'), $r('app.string.tab_library'))
               this.TabItem(1, $r('sys.symbol.play_circle'), '视频')
