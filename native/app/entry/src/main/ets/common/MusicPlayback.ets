@@ -1,5 +1,6 @@
 import media from '@ohos.multimedia.media';
 import avSession from '@ohos.multimedia.avsession';
+import image from '@ohos.multimedia.image';
 import wantAgent, { WantAgent } from '@ohos.app.ability.wantAgent';
 import backgroundTaskManager from '@ohos.resourceschedule.backgroundTaskManager';
 import common from '@ohos.app.ability.common';
@@ -12,6 +13,15 @@ import { UiState } from './UiState';
 const kTickMs: number = 1000;
 /** 进度上报节流：Jellyfin 侧不需要高频 */
 const kReportEveryMs: number = 10000;
+/**
+ * 向系统会话对账播放状态的间隔。
+ *
+ * 面板进度条本可以靠 `position + speed` 自行推算，但状态会漂（会话创建晚于 `playing`、
+ * 跨进程丢包），一漂控制中心的中间按钮就和本机反着来 —— 实测点一次发的是 `play` 而不是 `pause`。
+ */
+const kSessionSyncEveryMs: number = 5000;
+/** 交给系统播控的封面边长：面板最大也就方形大图，按原图（常见 800~1400）解一次白占几兆内存 */
+const kCoverDecodePx: number = 320;
 
 /**
  * 播放状态的**值拷贝**快照，供 UI 渲染。
@@ -65,7 +75,10 @@ export class MusicPlaybackState {
  * 切歌到列表尽头、或应用退出（`EntryAbility.onDestroy` → `shutdown()`）才真正释放。
  *
  * ## 后台播放的两件事（缺一不可，见 #73 的设备实测）
- *   1. **AVSession（type=`'audio'`）** —— 让系统媒体控件（通知栏/锁屏/耳机按键）能看到并控制。
+ *   1. **AVSession（type=`'audio'`）** —— 让系统媒体控件（播控中心/锁屏/耳机按键）能看到并控制。
+ *      面板要显示完整就得把元数据和状态都喂够：`duration` 缺了时间是 `--:--`、进度条不可用；
+ *      封面必须是 `PixelMap`（控制中心是另一个进程，读不到本应用沙箱的 `file://`）；
+ *      `previousAssetId`/`nextAssetId` 决定上一首/下一首是否置灰。
  *   2. **长时任务 `startBackgroundRunning`** —— 应用退到后台后不被系统挂起；需要
  *      `ohos.permission.KEEP_BACKGROUND_RUNNING` + ability 的 `backgroundModes: ["audioPlayback"]`。
  *
@@ -88,6 +101,15 @@ export class MusicPlayback {
   private inBackgroundTask: boolean = false;
   private tickTimer: number = -1;
   private lastReportMs: number = 0;
+  private lastSessionSyncMs: number = 0;
+  /**
+   * 会话封面的解码缓存。
+   *
+   * 控制中心读不到应用沙箱里的 `file://` 路径（跨进程没有权限），只能收 `PixelMap`；
+   * 解码有成本，而同一张专辑切歌时封面不变，故按 `coverUrl` 缓存并复用。
+   */
+  private coverPix: image.PixelMap | null = null;
+  private coverKey: string = '';
   /** 拖动进度条期间冻结回写（受控 Slider 会被回写弹回，见 docs/player-seek-bar-drag.md） */
   private scrubbing: boolean = false;
 
@@ -239,6 +261,7 @@ export class MusicPlayback {
     this.stopBackgroundTask();
     this.releasePlayer();
     this.releaseSession();
+    this.releaseCover();
     this.trackIds = [];
     this.trackNames = [];
     this.currentIndex = 0;
@@ -314,8 +337,8 @@ export class MusicPlayback {
           this.status = UiState.SUCCESS;
           player.play();
           this.startTick();
+          // 时长已知，此刻才适合把元数据交给会话（会话已存在时这一步同时刷新封面/时长）
           this.ensureSession();
-          this.syncSessionState();
         } else if (state === 'playing') {
           this.playing = true;
           this.syncSessionState();
@@ -361,6 +384,10 @@ export class MusicPlayback {
         if (p > 0) {
           this.positionMs = p;
         }
+      }
+      // 定期与系统会话对账：状态一漂，控制中心的播放/暂停就和本机反着来
+      if (Date.now() - this.lastSessionSyncMs >= kSessionSyncEveryMs) {
+        this.syncSessionState();
       }
     }, kTickMs);
   }
@@ -411,58 +438,74 @@ export class MusicPlayback {
   // ── AVSession（type=audio）+ 长时任务 ─────────────────────────────
 
   private async ensureSession(): Promise<void> {
-    if (this.session !== null || this.ctx === null) {
-      return;
-    }
-    try {
-      // 类型必须是 'audio'：决定系统媒体控件把它当音乐会话展示（元数据、控制项都不同）
-      const session: avSession.AVSession = await avSession.createAVSession(this.ctx, 'jellyfin_music', 'audio');
-      session.on('play', () => {
-        this.avPlayer?.play();
-      });
-      session.on('pause', () => {
-        this.avPlayer?.pause();
-      });
-      session.on('stop', () => {
-        this.reportStopped();
-        this.avPlayer?.stop();
-      });
-      session.on('playNext', () => {
-        this.playNext();
-      });
-      session.on('playPrevious', () => {
-        this.playPrev();
-      });
-      session.on('seek', (timeMs: number) => {
-        // 与视频页一致：AVSession 的 seek 回调给的是**绝对时间**（毫秒），不是增量
-        this.seekTo(timeMs);
-      });
-      await session.activate();
-      this.session = session;
-      await this.updateSessionMetadata();
-      this.syncSessionState();
+    if (this.session === null) {
+      if (this.ctx === null) {
+        return;
+      }
+      try {
+        // 类型必须是 'audio'：决定系统媒体控件把它当音乐会话展示（元数据、控制项都不同）
+        const session: avSession.AVSession = await avSession.createAVSession(this.ctx, 'jellyfin_music', 'audio');
+        session.on('play', () => {
+          this.avPlayer?.play();
+        });
+        session.on('pause', () => {
+          this.avPlayer?.pause();
+        });
+        session.on('stop', () => {
+          // 控制中心的"停止"要的是**整条播放结束**：只停 AVPlayer 会留下
+          // "卡片还在、长时任务还在、迷你条还在"的半死状态。
+          this.stop();
+        });
+        session.on('playNext', () => {
+          this.playNext();
+        });
+        session.on('playPrevious', () => {
+          this.playPrev();
+        });
+        session.on('seek', (timeMs: number) => {
+          // 与视频页一致：AVSession 的 seek 回调给的是**绝对时间**（毫秒），不是增量
+          this.seekTo(timeMs);
+        });
+        await session.activate();
+        this.session = session;
+      } catch (err) {
+        // 会话不可用不应阻断播放本身（后台控制是增强项），但要让用户知道
+        this.note = '系统媒体控制不可用';
+        return;
+      }
       await this.startBackgroundTask();
-    } catch (err) {
-      // 会话不可用不应阻断播放本身（后台控制是增强项），但要让用户知道
-      this.note = '系统媒体控制不可用';
     }
+    await this.updateSessionMetadata();
+    this.syncSessionState();
+  }
+
+  /** 队列里相邻的一首（`-1` 上一首 / `+1` 下一首）；没有则空串 —— 控制中心据此置灰按钮 */
+  private neighborTrackId(delta: number): string {
+    const i: number = this.currentIndex + delta;
+    if (i < 0 || i >= this.trackIds.length) {
+      return '';
+    }
+    return this.trackIds[i];
   }
 
   private async updateSessionMetadata(): Promise<void> {
     if (this.session === null) {
       return;
     }
-    // 封面必须是**本地** URI：系统媒体控件不接受远程地址，直接传 http(s) 会被
-    // 判为无效并忽略（设备实测日志 `SetMediaImageUri mediaImage uri empty`）。
-    // 这里先用本工程自己的取图接口把封面落到磁盘缓存，再把本地路径交给会话。
-    const imageUri: string = await this.localCoverUri();
+    // 封面必须是位图：控制中心是另一个进程，读不到本应用沙箱的 file:// 路径
+    // （实测设备日志 `SetMediaImageUri mediaImage uri empty`，面板退化成音符占位图）
+    const cover: image.PixelMap | null = await this.coverPixel();
     try {
       await this.session.setAVMetadata({
         assetId: this.currentTrackId(),
         title: this.currentTrackName(),
         artist: this.artistName.length > 0 ? this.artistName : 'Jellyfin',
         album: this.albumName,
-        mediaImage: imageUri
+        // 时长缺失时，播控面板的时间显示成 `--:--`、进度条整条不可用
+        duration: this.durationMs,
+        mediaImage: cover === null ? undefined : cover,
+        previousAssetId: this.neighborTrackId(-1),
+        nextAssetId: this.neighborTrackId(1)
       });
     } catch (err) {
       // 元数据失败不影响播放
@@ -470,45 +513,89 @@ export class MusicPlayback {
   }
 
   /**
-   * 会话封面：把专辑封面取到本地并返回 `file://` URI。
+   * 会话封面位图：按 `coverUrl` 缓存，同一张专辑切歌不重复解码。
    *
    * 走 `JellyfinNative.loadImage`（与应用其它图片同一条链路：core 的 HTTP + 磁盘缓存），
-   * 命中缓存时不会产生网络请求。取不到就返回空串，会话只是不显示封面，不影响播放。
+   * 命中缓存时不会产生网络请求。取不到就返回 null，面板只是不显示封面，不影响播放。
    */
-  private async localCoverUri(): Promise<string> {
-    if (this.coverUrl.length === 0) {
-      return '';
+  private async coverPixel(): Promise<image.PixelMap | null> {
+    const key: string = this.coverUrl;
+    if (key.length === 0) {
+      return null;
     }
-    if (this.coverUrl.startsWith('file://')) {
-      return this.coverUrl;
+    if (this.coverPix !== null && this.coverKey === key) {
+      return this.coverPix;
+    }
+    let path: string = key.startsWith('file://') ? key.substring(7) : '';
+    if (path.length === 0) {
+      try {
+        const raw: string = await JellyfinNative.loadImage(key);
+        const result: NativeResult = JellyfinNative.parseResult(raw);
+        if (!result.ok || result.data === null) {
+          return null;
+        }
+        path = JsonUtil.getString(result.data as ESObject, 'path', '');
+      } catch (err) {
+        return null;
+      }
+    }
+    if (path.length === 0) {
+      return null;
     }
     try {
-      const raw: string = await JellyfinNative.loadImage(this.coverUrl);
-      const result: NativeResult = JellyfinNative.parseResult(raw);
-      if (!result.ok || result.data === null) {
-        return '';
+      const source: image.ImageSource = image.createImageSource(path);
+      const options: image.DecodingOptions = {
+        desiredSize: { width: kCoverDecodePx, height: kCoverDecodePx }
+      };
+      const pixel: image.PixelMap = await source.createPixelMap(options);
+      await source.release();
+      const previous: image.PixelMap | null = this.coverPix;
+      this.coverPix = pixel;
+      this.coverKey = key;
+      if (previous !== null) {
+        // 交给会话时已跨进程拷贝，旧的一张可以直接放掉
+        await previous.release();
       }
-      const path: string = JsonUtil.getString(result.data as ESObject, 'path', '');
-      if (path.length === 0) {
-        return '';
-      }
-      return path.startsWith('file://') ? path : `file://${path}`;
+      return pixel;
     } catch (err) {
-      return '';
+      return null;
     }
+  }
+
+  /** 会话侧的播放状态：只报 PLAY/PAUSE 会让面板和本机反着来（缓冲/失败时也显示暂停） */
+  private sessionState(): avSession.PlaybackState {
+    if (this.status === UiState.ERROR) {
+      return avSession.PlaybackState.PLAYBACK_STATE_ERROR;
+    }
+    if (this.playing) {
+      return avSession.PlaybackState.PLAYBACK_STATE_PLAY;
+    }
+    if (this.status === UiState.LOADING) {
+      return avSession.PlaybackState.PLAYBACK_STATE_PREPARE;
+    }
+    return avSession.PlaybackState.PLAYBACK_STATE_PAUSE;
   }
 
   private syncSessionState(): void {
     if (this.session === null) {
       return;
     }
-    this.session.setAVPlaybackState({
-      state: this.playing
-        ? avSession.PlaybackState.PLAYBACK_STATE_PLAY
-        : avSession.PlaybackState.PLAYBACK_STATE_PAUSE,
-      position: { elapsedTime: this.positionMs, updateTime: Date.now() },
-      speed: 1.0
-    }).catch(() => {
+    this.lastSessionSyncMs = Date.now();
+    const playing: boolean = this.playing;
+    // 暂停时只报 state + position：实测带上 `speed: 0` 会被会话判为 `state not valid`
+    // 而**整条丢弃**（设备表现：播控中心停在"播放中"，再点一次发的是 pause 而不是 play，
+    // 用户没法从面板恢复播放）。时长走元数据的 `duration`，这里不重复给。
+    const playbackState: avSession.AVPlaybackState = {
+      state: this.sessionState(),
+      position: { elapsedTime: Math.floor(this.positionMs), updateTime: Date.now() }
+    };
+    if (playing) {
+      playbackState.speed = 1.0;
+      playbackState.duration = this.durationMs;
+      // 不报 `activeItemId`：它要对照 `setAVQueueItems` 注册过的队列，本工程没有队列
+      playbackState.loopMode = avSession.LoopMode.LOOP_MODE_SEQUENCE;
+    }
+    this.session.setAVPlaybackState(playbackState).catch(() => {
       // 状态同步失败不影响本机播放
     });
   }
@@ -571,6 +658,18 @@ export class MusicPlayback {
         // 已在别处释放
       }
       this.session = null;
+    }
+  }
+
+  /** 停播即放掉封面位图；下次起播重新解码（同专辑切歌走 coverKey 缓存） */
+  private releaseCover(): void {
+    const previous: image.PixelMap | null = this.coverPix;
+    this.coverPix = null;
+    this.coverKey = '';
+    if (previous !== null) {
+      previous.release().catch(() => {
+        // 释放失败交给 GC，不影响停播流程
+      });
     }
   }
 }
