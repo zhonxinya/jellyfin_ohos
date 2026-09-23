@@ -23,20 +23,24 @@ function Invoke-CompileAndRun {
     $gpp = Get-Command g++ -ErrorAction SilentlyContinue
     $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
 
+    # -I $Core\api：api 目录下的头文件（library_admin_api.h / item_metadata_api.h …）
+    # 被测试以 `#include "xxx_api.h"` 直接引用，不加这条路径测试根本编不过。
+    # -I native\feature\player：同上，player 的可移植能力目录（range_cache.h / engine.h …）。
+    $Player = Join-Path $RepoRoot "native\feature\player"
     if ($clang) {
         Write-Host "Compiling $Name with clang++..."
-        & clang++.exe -std=c++17 -pthread -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
+        & clang++.exe -std=c++17 -pthread -I $Core -I (Join-Path $Core "api") -I $Player -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } elseif ($gpp) {
         Write-Host "Compiling $Name with g++..."
         # -pthread：RangeCache 含后台预取线程（std::thread），链接需要 pthread
-        & g++ -std=c++17 -pthread -I $Core -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
+        & g++ -std=c++17 -pthread -I $Core -I (Join-Path $Core "api") -I $Player -I $ThirdParty -I (Join-Path $ThirdParty "nlohmann") @Sources -o $Exe
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } elseif ($cl) {
         Write-Host "Compiling $Name with cl.exe..."
         Push-Location $OutDir
         try {
-            & cl.exe /nologo /EHsc /std:c++17 /I $Core /I $ThirdParty /I (Join-Path $ThirdParty "nlohmann") @Sources /Fe:$Exe
+            & cl.exe /nologo /EHsc /std:c++17 /I $Core /I (Join-Path $Core "api") /I $Player /I $ThirdParty /I (Join-Path $ThirdParty "nlohmann") @Sources /Fe:$Exe
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         } finally {
             Pop-Location
@@ -121,6 +125,13 @@ Invoke-CompileAndRun -Name "test_range_cache" -Sources @(
 Invoke-CompileAndRun -Name "test_library_admin_api" -Sources @(
     (Join-Path $Core "tests\test_library_admin_api.cpp"),
     (Join-Path $Core "api\library_admin_api.cpp"),
+    (Join-Path $Core "url_util.cpp")
+)
+
+# 条目元数据管理：整体替换的字段完整性（少带字段 = 服务端清空；ProviderIds 缺失 = 500）
+Invoke-CompileAndRun -Name "test_item_metadata_api" -Sources @(
+    (Join-Path $Core "tests\test_item_metadata_api.cpp"),
+    (Join-Path $Core "api\item_metadata_api.cpp"),
     (Join-Path $Core "url_util.cpp")
 )
 

@@ -682,6 +682,83 @@ export class JellyfinNative {
     }
   }
 
+  // ── 条目（影视）元数据管理 ─────────────────────────────────────────────────
+  // 与 library* 同一套：这里只接线，路径 / 请求体形状在 C++ `core/api/item_metadata_api.*`，
+  // 由主机单测逐字断言（`native/core/tests/test_item_metadata_api.cpp`）。
+
+  /** 条目完整 DTO + 元数据编辑器信息（`data: { item, editor, editorError }`） */
+  static async itemMetadata(itemId: string): Promise<string> {
+    try {
+      return await jellyfinNative.itemMetadata(itemId);
+    } catch (error) {
+      return JellyfinNative.fail('itemMetadata', error);
+    }
+  }
+
+  /**
+   * 整体替换条目元数据（`POST /Items/{itemId}`）。
+   * `itemJson` 必须是**完整条目对象** —— 少带字段会被服务端清空（见 native 侧注释）。
+   */
+  static async itemUpdateMetadata(itemId: string, itemJson: string): Promise<string> {
+    try {
+      return await jellyfinNative.itemUpdateMetadata(itemId, itemJson);
+    } catch (error) {
+      return JellyfinNative.fail('itemUpdateMetadata', error);
+    }
+  }
+
+  /** 该条目可用的外部 ID 提供方（`GET /Items/{itemId}/ExternalIdInfos`） */
+  static async itemExternalIdInfos(itemId: string): Promise<string> {
+    try {
+      return await jellyfinNative.itemExternalIdInfos(itemId);
+    } catch (error) {
+      return JellyfinNative.fail('itemExternalIdInfos', error);
+    }
+  }
+
+  /** 设置条目内容类型覆盖（空串 = 清除覆盖，回到从媒体库继承） */
+  static async itemUpdateContentType(itemId: string, contentType: string): Promise<string> {
+    try {
+      return await jellyfinNative.itemUpdateContentType(itemId, contentType);
+    } catch (error) {
+      return JellyfinNative.fail('itemUpdateContentType', error);
+    }
+  }
+
+  /** 刷新条目元数据（`POST /Items/{itemId}/Refresh`） */
+  static async itemRefreshMetadata(itemId: string, metadataRefreshMode: string,
+                                   imageRefreshMode: string, replaceAllMetadata: boolean,
+                                   replaceAllImages: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.itemRefreshMetadata(itemId, metadataRefreshMode,
+        imageRefreshMode, replaceAllMetadata, replaceAllImages);
+    } catch (error) {
+      return JellyfinNative.fail('itemRefreshMetadata', error);
+    }
+  }
+
+  /** 远程搜索（识别）候选条目 */
+  static async itemRemoteSearch(itemType: string, searchTerm: string, providerIdsJson: string,
+                                year: number, metadataLanguage: string,
+                                metadataCountryCode: string, itemId: string): Promise<string> {
+    try {
+      return await jellyfinNative.itemRemoteSearch(itemType, searchTerm, providerIdsJson, year,
+        metadataLanguage, metadataCountryCode, itemId);
+    } catch (error) {
+      return JellyfinNative.fail('itemRemoteSearch', error);
+    }
+  }
+
+  /** 应用识别结果（会 FullRefresh + 覆盖元数据） */
+  static async itemApplyRemoteSearch(itemId: string, resultJson: string,
+                                     replaceAllImages: boolean): Promise<string> {
+    try {
+      return await jellyfinNative.itemApplyRemoteSearch(itemId, resultJson, replaceAllImages);
+    } catch (error) {
+      return JellyfinNative.fail('itemApplyRemoteSearch', error);
+    }
+  }
+
   static setPreference(key: string, value: string): string {
     try {
       return jellyfinNative.setPreference(key, value);

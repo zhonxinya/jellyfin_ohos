@@ -2,6 +2,7 @@
 
 #include "api/account_api.h"
 #include "api/catalog_api.h"
+#include "api/item_metadata_api.h"
 #include "api/library_admin_api.h"
 #include "api/media_api.h"
 #include "api/options_parse.h"
@@ -121,6 +122,21 @@ jellyfin::JellyfinApiClient &Api()
     static jellyfin::JellyfinApiClient client = []() {
         jellyfin::HttpClient http;
         http.setReadTimeoutSec(15);
+        return jellyfin::JellyfinApiClient(std::move(http));
+    }();
+    return client;
+}
+
+jellyfin::JellyfinApiClient &SlowApi()
+{
+    // 会**回源**抓取的端点专用：远程搜索、应用识别结果、刷新元数据都要服务端去问
+    // TMDb / TVDB 等外部提供方，首查冷启动远超交互式的 15s。设备实测：15s 直接落到
+    // "Read timeout"，60s 仍在 ~64s 处失败，放宽到 180s 后一次冷启动搜索在 ~106s 完成。
+    // 所以按实测上限留一倍余量取 240s —— 这几个入口用户都是显式点击后等待，
+    // 超时定得比真实耗时更紧只会白等一场。
+    static jellyfin::JellyfinApiClient client = []() {
+        jellyfin::HttpClient http;
+        http.setReadTimeoutSec(240);
         return jellyfin::JellyfinApiClient(std::move(http));
     }();
     return client;
@@ -2752,6 +2768,12 @@ std::string RunLibraryRequest(const jellyfin::api::LibraryRequest &request)
     return FromApi(jellyfin::api::execute(Api(), request)).dump();
 }
 
+/** 同 `RunLibraryRequest`，但走慢端点客户端（服务端会回源抓取的请求） */
+std::string RunSlowLibraryRequest(const jellyfin::api::LibraryRequest &request)
+{
+    return FromApi(jellyfin::api::execute(SlowApi(), request)).dump();
+}
+
 napi_value LibraryVirtualFolders(napi_env env, napi_callback_info /*info*/)
 {
     const nlohmann::json guard = RequireAdmin();
@@ -3045,6 +3067,181 @@ napi_value LibraryDeleteCover(napi_env env, napi_callback_info info)
     return RunAsync(env, [itemId, imageType, imageIndex]() {
         return RunLibraryRequest(jellyfin::api::buildDeleteItemImageRequest(
             itemId, imageType, static_cast<int>(imageIndex)));
+    });
+}
+
+// ── 条目元数据管理（影视）───────────────────────────────────────────────────
+// 与 library* 一样：路径与请求体形状都在 core 的 `item_metadata_api`，由主机单测逐字断言
+// （尤其是 POST /Items/{id} 的"整体替换"——少带字段会被服务端清空）。
+// 服务端的 ItemUpdate / ItemLookup / ItemRefresh 三个控制器都是管理员权限，这里 RequireAdmin 兜底。
+
+napi_value ItemMetadata(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    ReadStringArg(env, info, 0, itemId);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item id is required"));
+    }
+    const std::string userId = jellyfin::SessionManager::instance().userId();
+    return RunAsync(env, [userId, itemId]() {
+        // 条目原文 + 编辑器信息两次 GET 在 core 里合成一个结果
+        return FromApi(jellyfin::api::getItemMetadata(Api(), userId, itemId)).dump();
+    });
+}
+
+napi_value ItemUpdateMetadata(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string itemJson;
+    nlohmann::json item;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, itemJson);
+    if (!ReadJsonArg(env, info, 1, item)) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item metadata JSON is required"));
+    }
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item id is required"));
+    }
+    return RunAsync(env, [itemId, item]() {
+        return RunLibraryRequest(jellyfin::api::buildUpdateItemRequest(itemId, item));
+    });
+}
+
+napi_value ItemExternalIdInfos(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    ReadStringArg(env, info, 0, itemId);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item id is required"));
+    }
+    return RunAsync(env, [itemId]() {
+        return RunLibraryRequest(jellyfin::api::buildExternalIdInfosRequest(itemId));
+    });
+}
+
+napi_value ItemUpdateContentType(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string contentType;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, contentType);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item id is required"));
+    }
+    return RunAsync(env, [itemId, contentType]() {
+        return RunLibraryRequest(jellyfin::api::buildUpdateContentTypeRequest(itemId, contentType));
+    });
+}
+
+napi_value ItemRefreshMetadata(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string metadataRefreshMode;
+    std::string imageRefreshMode;
+    bool replaceAllMetadata = false;
+    bool replaceAllImages = false;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, metadataRefreshMode);
+    ReadStringArg(env, info, 2, imageRefreshMode);
+    ReadBoolArg(env, info, 3, replaceAllMetadata);
+    ReadBoolArg(env, info, 4, replaceAllImages);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item id is required"));
+    }
+    // 与 `libraryScanFolder` 是**同一个端点**（`POST /Items/{id}/Refresh`，共用 core 的
+    // `buildRefreshItemRequest`）：那边是"扫描媒体库"的口径，这边是"刷新这个影片的元数据"。
+    // 刻意保留两个名字而不是让元数据页去调 `libraryScanFolder` —— 后者在元数据语境下读起来是错的。
+    return RunAsync(env, [itemId, metadataRefreshMode, imageRefreshMode, replaceAllMetadata,
+                          replaceAllImages]() {
+        return RunSlowLibraryRequest(jellyfin::api::buildRefreshItemRequest(
+            itemId, metadataRefreshMode, imageRefreshMode, replaceAllMetadata, replaceAllImages));
+    });
+}
+
+napi_value ItemRemoteSearch(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemType;
+    std::string searchTerm;
+    std::string providerIdsJson;
+    nlohmann::json providerIds;
+    int64_t year = 0;
+    std::string metadataLanguage;
+    std::string metadataCountryCode;
+    std::string itemId;
+    ReadStringArg(env, info, 0, itemType);
+    ReadStringArg(env, info, 1, searchTerm);
+    ReadStringArg(env, info, 2, providerIdsJson);
+    ReadIntArg(env, info, 3, year);
+    ReadStringArg(env, info, 4, metadataLanguage);
+    ReadStringArg(env, info, 5, metadataCountryCode);
+    ReadStringArg(env, info, 6, itemId);
+    if (!providerIdsJson.empty()) {
+        ReadJsonArg(env, info, 2, providerIds);
+    }
+    if (itemType.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item type is required"));
+    }
+    return RunAsync(env, [itemType, searchTerm, providerIds, year, metadataLanguage,
+                          metadataCountryCode, itemId]() {
+        jellyfin::api::RemoteSearchQuery query;
+        query.itemType = itemType;
+        query.searchTerm = searchTerm;
+        query.providerIds = providerIds;
+        query.year = static_cast<int>(year);
+        query.metadataLanguage = metadataLanguage;
+        query.metadataCountryCode = metadataCountryCode;
+        query.itemId = itemId;
+        return FromApi(jellyfin::api::remoteSearch(SlowApi(), query)).dump();
+    });
+}
+
+napi_value ItemApplyRemoteSearch(napi_env env, napi_callback_info info)
+{
+    const nlohmann::json guard = RequireAdmin();
+    if (!guard.is_null()) {
+        return ToNapiJson(env, guard);
+    }
+    std::string itemId;
+    std::string resultJson;
+    nlohmann::json searchResult;
+    bool replaceAllImages = true;
+    ReadStringArg(env, info, 0, itemId);
+    ReadStringArg(env, info, 1, resultJson);
+    if (!ReadJsonArg(env, info, 1, searchResult)) {
+        return ToNapiJson(env, MakeResult(false, 400, "Remote search result JSON is required"));
+    }
+    ReadBoolArg(env, info, 2, replaceAllImages);
+    if (itemId.empty()) {
+        return ToNapiJson(env, MakeResult(false, 400, "Item id is required"));
+    }
+    return RunAsync(env, [itemId, searchResult, replaceAllImages]() {
+        // 应用识别结果 = 服务端 FullRefresh + ReplaceAllMetadata，同样要回源抓取，走慢端点客户端
+        return RunSlowLibraryRequest(jellyfin::api::buildApplyRemoteSearchRequest(
+            itemId, searchResult, replaceAllImages));
     });
 }
 
@@ -3518,6 +3715,19 @@ napi_value jellyfin_napi_init(napi_env env, napi_value exports)
         {"libraryNamedConfig", nullptr, LibraryNamedConfig, nullptr, nullptr, nullptr, napi_default,
          nullptr},
         {"libraryUpdateNamedConfig", nullptr, LibraryUpdateNamedConfig, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"itemMetadata", nullptr, ItemMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"itemUpdateMetadata", nullptr, ItemUpdateMetadata, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"itemExternalIdInfos", nullptr, ItemExternalIdInfos, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"itemUpdateContentType", nullptr, ItemUpdateContentType, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"itemRefreshMetadata", nullptr, ItemRefreshMetadata, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"itemRemoteSearch", nullptr, ItemRemoteSearch, nullptr, nullptr, nullptr, napi_default,
+         nullptr},
+        {"itemApplyRemoteSearch", nullptr, ItemApplyRemoteSearch, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"setPreference", nullptr, SetPreference, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getPreferences", nullptr, GetPreferences, nullptr, nullptr, nullptr, napi_default,

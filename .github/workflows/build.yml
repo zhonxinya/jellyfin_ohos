@@ -57,6 +57,10 @@ jobs:
                 extra="native/feature/player/range_cache.cpp native/feature/player/range_fetcher.cpp native/feature/player/player_log.cpp" ;;
               test_library_admin_api)
                 extra="native/core/api/library_admin_api.cpp native/core/url_util.cpp" ;;
+              test_item_metadata_api)
+                # 条目元数据：请求构造 + 整体替换的字段完整性
+                # （POST /Items/{id} 少带字段 = 服务端清空，ProviderIds 缺失 = 500）
+                extra="native/core/api/item_metadata_api.cpp native/core/url_util.cpp" ;;
               test_device_profile)
                 # 客户端能力声明：决定服务端会不会转码（av1 必须在直接播放列表之外）
                 extra="native/core/api/device_profile.cpp" ;;
