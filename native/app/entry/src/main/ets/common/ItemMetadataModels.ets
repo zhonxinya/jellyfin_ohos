@@ -56,7 +56,7 @@ export class ProviderIdEntry {
   static build(options: MetadataOption[], providerIds: ESObject | null): ProviderIdEntry[] {
     const out: ProviderIdEntry[] = [];
     const seen: string[] = [];
-    const unique: MetadataOption[] = [];
+    const uniqueOptions: MetadataOption[] = [];
     const labels: string[] = [];
     for (let i = 0; i < options.length; i++) {
       const option: MetadataOption = options[i];
@@ -64,7 +64,7 @@ export class ProviderIdEntry {
         continue;
       }
       seen.push(option.value);
-      unique.push(option);
+      uniqueOptions.push(option);
       labels.push(option.displayName.length > 0 ? option.displayName : option.value);
     }
     const duplicated: string[] = [];
@@ -73,8 +73,8 @@ export class ProviderIdEntry {
         duplicated.push(labels[i]);
       }
     }
-    for (let i = 0; i < unique.length; i++) {
-      const option: MetadataOption = unique[i];
+    for (let i = 0; i < uniqueOptions.length; i++) {
+      const option: MetadataOption = uniqueOptions[i];
       const label: string = option.displayName.length > 0 ? option.displayName : option.value;
       const entry: ProviderIdEntry = new ProviderIdEntry();
       entry.key = option.value;

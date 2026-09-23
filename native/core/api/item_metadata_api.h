@@ -148,7 +148,7 @@ LibraryRequest buildApplyRemoteSearchRequest(const std::string &itemId,
  */
 nlohmann::json normalizeMetadataEditorInfo(const nlohmann::json &serverJson);
 
-/** `POST /Items/RemoteSearch/*` 的响应 → UI 模型（`RemoteSearchResult[]`）。 */
+/** `POST /Items/RemoteSearch/{itemType}` 的响应 → UI 模型（`RemoteSearchResult[]`）。 */
 nlohmann::json normalizeRemoteSearchResults(const nlohmann::json &serverJson);
 
 /**

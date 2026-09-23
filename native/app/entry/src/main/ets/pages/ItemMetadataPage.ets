@@ -164,15 +164,13 @@ struct ItemMetadataPage {
     const raw: string = await JellyfinNative.itemMetadata(this.itemId);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok || result.data === null) {
-      this.status = UiState.ERROR;
-      this.errorMsg = result.message.length > 0 ? result.message : '读取条目元数据失败';
+      this.failLoad(result.message.length > 0 ? result.message : '读取条目元数据失败');
       return;
     }
     const data: ESObject = result.data as ESObject;
     const item: ESObject | null = JsonUtil.getObject(data, 'item');
     if (item === null) {
-      this.status = UiState.ERROR;
-      this.errorMsg = '服务端没有返回条目内容';
+      this.failLoad('服务端没有返回条目内容');
       return;
     }
     this.rawItem = JsonUtil.toPretty(item);
@@ -199,6 +197,18 @@ struct ItemMetadataPage {
     this.applyItemToForm(item);
     this.status = UiState.SUCCESS;
     await this.loadCoverImages();
+  }
+
+  /**
+   * 读取失败的统一出口。
+   *
+   * 单独一个方法是为了把 `this.status` 的赋值次数压到每函数 2 次以内 ——
+   * codelinter 的 `hp-arkui-use-local-var-to-replace-state-var` 要求"函数内状态变量赋值
+   * 不超过 2 次"（状态赋值会触发组件刷新）。`load()` 本来有 4 处，现在 2 处。
+   */
+  private failLoad(message: string): void {
+    this.errorMsg = message;
+    this.status = UiState.ERROR;
   }
 
   /** 把条目原文摊到表单字段上（没请求到的字段按"空"处理，与服务端行为一致） */
@@ -321,29 +331,40 @@ struct ItemMetadataPage {
     }
     this.saving = true;
     this.notice('', true);
+    const failure: string = await this.pushEdits(body);
+    this.saving = false;
+    if (failure.length > 0) {
+      this.notice(failure, false);
+      return;
+    }
+    this.mutated = true;
+    this.notice('元数据已保存（服务端为整体替换，本次提交了完整条目）', true);
+    await this.load();
+  }
+
+  /**
+   * 把改动提交给服务端：先整体替换条目，再单独提交内容类型（它不在整体替换里）。
+   *
+   * 返回空串 = 全部成功；否则是给用户看的失败说明。把这一段单独拆出来是为了让
+   * `save()` 里 `this.saving` 的赋值只有 2 次（见 `failLoad` 的说明）。
+   */
+  private async pushEdits(body: string): Promise<string> {
     const raw: string = await JellyfinNative.itemUpdateMetadata(this.itemId, body);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     if (!result.ok) {
-      this.saving = false;
-      this.notice(result.message.length > 0 ? `保存失败：${result.message}` : '保存失败', false);
-      return;
+      return result.message.length > 0 ? `保存失败：${result.message}` : '保存失败';
     }
-    // 内容类型走单独端点（不在整体替换里）：先记下旧值，保存成功后再提交
+    // 内容类型走单独端点（不在整体替换里）：字段保存成功后再提交
     if (this.loadedContentType !== this.contentType) {
       const typeRaw: string =
         await JellyfinNative.itemUpdateContentType(this.itemId, this.contentType);
       const typeResult: NativeResult = JellyfinNative.parseResult(typeRaw);
       if (!typeResult.ok) {
-        this.saving = false;
         this.mutated = true;
-        this.notice('字段已保存，但内容类型设置失败（服务端按路径写入，需管理员权限）', false);
-        return;
+        return '字段已保存，但内容类型设置失败（服务端按路径写入，需管理员权限）';
       }
     }
-    this.saving = false;
-    this.mutated = true;
-    this.notice('元数据已保存（服务端为整体替换，本次提交了完整条目）', true);
-    await this.load();
+    return '';
   }
 
   // ── 刷新元数据 ──────────────────────────────────────────────────────────
