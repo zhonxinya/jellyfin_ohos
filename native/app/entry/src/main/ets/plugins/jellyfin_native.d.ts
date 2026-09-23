@@ -170,6 +170,46 @@ declare module 'libjellyfin_native.so' {
     libraryNamedConfig(key: string): string;
     /** 整体替换某一段命名配置（只替换这一段，不动整份 ServerConfiguration） */
     libraryUpdateNamedConfig(key: string, configJson: string): string;
+    /**
+     * 条目（影视）元数据：返回 `{ ok, code, message, data: { item, editor, editorError } }`。
+     *
+     * `item` 是 `GET /Users/{userId}/Items/{itemId}` 的**完整 DTO 原文**（表单回填 + 整体回传都用它），
+     * `editor` 是 `MetadataEditorInfo` 归一化后的下拉数据源；`editorError` 非空表示下拉拿不到，
+     * 但字段仍可编辑（页面据此提示，而不是让整页失败）。
+     *
+     * 服务端 `ItemUpdateController` 是管理员权限，原生侧 `RequireAdmin` 兜底。
+     */
+    itemMetadata(itemId: string): string;
+    /**
+     * 整体替换条目元数据（`POST /Items/{itemId}`）。
+     *
+     * `itemJson` **必须是完整条目对象**（`itemMetadata()` 的 `item` 原文 + 用户改动）：
+     * 服务端把请求里没带的字段写空，其中 `LockData` 缺失会静默解锁。
+     */
+    itemUpdateMetadata(itemId: string, itemJson: string): string;
+    /** 该条目可用的外部 ID 提供方（`GET /Items/{itemId}/ExternalIdInfos`） */
+    itemExternalIdInfos(itemId: string): string;
+    /**
+     * 设置条目内容类型覆盖（`POST /Items/{itemId}/ContentType?contentType=`）。
+     * 内容类型**不在**整体替换的字段里（服务端按路径写进服务器配置），所以单独一个端点；
+     * 空串 = 清除覆盖（回到从媒体库继承）。
+     */
+    itemUpdateContentType(itemId: string, contentType: string): string;
+    /**
+     * 刷新条目元数据（`POST /Items/{itemId}/Refresh`）。
+     * 模式取 `None` / `ValidationOnly` / `FullRefresh`；与 `libraryScanFolder` 同一端点。
+     */
+    itemRefreshMetadata(itemId: string, metadataRefreshMode: string, imageRefreshMode: string,
+                        replaceAllMetadata: boolean, replaceAllImages: boolean): string;
+    /**
+     * 远程搜索（识别）：`POST /Items/RemoteSearch/{itemType}`，返回归一化的候选数组。
+     * `itemType` 只支持 Movie/Series/BoxSet/MusicVideo/MusicArtist/MusicAlbum/Trailer/Book
+     * （10.8 没有 Episode 端点）。
+     */
+    itemRemoteSearch(itemType: string, searchTerm: string, providerIdsJson: string, year: number,
+                     metadataLanguage: string, metadataCountryCode: string, itemId: string): string;
+    /** 应用识别结果（`POST /Items/RemoteSearch/Apply/{itemId}`）：会 FullRefresh + 覆盖元数据 */
+    itemApplyRemoteSearch(itemId: string, resultJson: string, replaceAllImages: boolean): string;
     setPreference(key: string, value: string): string;
     getPreferences(): string;
     getImageUrl(itemId: string, imageType: string, maxWidth: number, tag: string): string;

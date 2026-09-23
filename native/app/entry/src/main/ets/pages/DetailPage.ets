@@ -6,6 +6,7 @@ import { UiState } from '../common/UiState';
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { MediaItem } from '../models/MediaItem';
+import { ItemMetadataRefreshSignal } from '../common/ItemMetadataModels';
 import { formatTicks } from '../common/format';
 import { PageHeader } from '../components/PageHeader';
 import { LoadingState } from '../components/LoadingState';
@@ -99,6 +100,42 @@ struct DetailPage {
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
+  }
+
+  /**
+   * 从「编辑元数据」页返回且**真的改过数据**时重载详情。
+   *
+   * 为什么不无条件重载：`loadDetail()` 会把季标签重置回第 1 季，
+   * 而用户从播放页返回详情页时已选中的季不该被清掉（信号按 itemId 精确匹配、取走即清）。
+   */
+  onPageShow(): void {
+    if (this.itemId.length > 0 && ItemMetadataRefreshSignal.consume(this.itemId)) {
+      this.reloadKeepingSeason();
+    }
+  }
+
+  /** 元数据改过后的重载：保留当前选中的季（否则会被重置回第 1 季） */
+  private async reloadKeepingSeason(): Promise<void> {
+    const season: number = this.activeSeasonIndex;
+    await this.loadDetail();
+    if (season > 0 && season < this.seasons.length) {
+      await this.loadSeasonEpisodes(season);
+    }
+  }
+
+  /** 打开条目元数据管理页（服务端三个控制器都是 RequiresElevation，入口仅管理员可见） */
+  private openMetadataEditor(): void {
+    if (this.item.id.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/ItemMetadataPage',
+      params: {
+        itemId: this.item.id,
+        itemType: this.item.type,
+        title: this.item.displayTitle()
+      }
+    });
   }
 
   /**
@@ -1177,6 +1214,17 @@ struct DetailPage {
                     }
                   })
                     .margin({ right: 4, bottom: 4 })
+                  if (AppViewModel.getInstance().isAdmin) {
+                    AppIconButton({
+                      icon: $r('sys.symbol.doc_text'),
+                      variant: 'surface',
+                      iconSize: 18,
+                      onTap: () => {
+                        this.openMetadataEditor();
+                      }
+                    })
+                      .margin({ right: 4, bottom: 4 })
+                  }
                   AppIconButton({
                     icon: $r('sys.symbol.ellipsis_circle'),
                     variant: 'surface',
