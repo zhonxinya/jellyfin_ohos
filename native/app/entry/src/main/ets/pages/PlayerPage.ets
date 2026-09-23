@@ -717,6 +717,24 @@ struct PlayerPage {
     // 用户只能靠杀进程恢复。与 onPageHide 的退出是幂等的（见 exitFullscreen 的状态判断）。
     this.exitFullscreen();
     this.flushStop();
+    // 视频会话必须随页面一起收掉：AVSession 是设备级的"当前会话"，退页不 destroy 就留下一个
+    // 仍激活的 'video' 会话，和音乐会话（common/MusicPlayback）抢系统播控中心的展示。
+    this.releaseAvSession();
+  }
+
+  /** 释放视频会话（幂等：会话没建成时直接返回） */
+  private releaseAvSession(): void {
+    const session: avSession.AVSession | null = this.avSessionRef;
+    if (session === null) {
+      return;
+    }
+    this.avSessionRef = null;
+    try {
+      session.deactivate();
+      session.destroy();
+    } catch (err) {
+      // 已在别处释放
+    }
   }
 
   private colors(): ThemeColors {
