@@ -1,13 +1,18 @@
 import media from '@ohos.multimedia.media';
+import audio from '@ohos.multimedia.audio';
 import avSession from '@ohos.multimedia.avsession';
 import image from '@ohos.multimedia.image';
 import wantAgent, { WantAgent } from '@ohos.app.ability.wantAgent';
 import backgroundTaskManager from '@ohos.resourceschedule.backgroundTaskManager';
 import common from '@ohos.app.ability.common';
+import hilog from '@ohos.hilog';
 import { BusinessError } from '@ohos.base';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 import { JsonUtil } from './JsonUtil';
 import { UiState } from './UiState';
+
+const DOMAIN: number = 0x0000;
+const TAG: string = 'MusicPlayback';
 
 /** 进度刷新间隔（毫秒）。与视频播放页同一量级：太密会让受控 Slider 被回写弹回。 */
 const kTickMs: number = 1000;
@@ -112,6 +117,15 @@ export class MusicPlayback {
   private coverKey: string = '';
   /** 拖动进度条期间冻结回写（受控 Slider 会被回写弹回，见 docs/player-seek-bar-drag.md） */
   private scrubbing: boolean = false;
+  /** 这次暂停是"被系统抢焦点"造成的：焦点还回来要替他恢复（用户自己按的暂停不算，见 handleAudioInterrupt） */
+  private interruptedBySystem: boolean = false;
+  /**
+   * 最近一次写入 `note` 的**能力降级**文案（会话不可用 / 长时任务失败）。
+   *
+   * 为什么要记住它：能力补齐（例如自愈后长时任务申请成功）时要能按内容擦掉，
+   * 否则一次偶发失败会一直挂在播放页上，用户以为后台播放一直是坏的。
+   */
+  private capabilityNote: string = '';
 
   // ── 状态 ───────────────────────────────────────────────────────────
   private status: string = UiState.INITIAL;
@@ -161,6 +175,12 @@ export class MusicPlayback {
     const wantId: string = trackIds[wantIndex];
     if (this.hasTrack() && wantId === this.currentTrackId()) {
       this.ctx = ctx;
+      // 同一首只挂载不重启，但**顺手补申请一次长时任务**：长时任务失败后，
+      // 用户重进播放页是唯一的重试时机（起播时机只在新曲目上出现）。
+      // 会话已建好才申请 —— 没有活动会话的申请会被系统按 9800005 拒掉。
+      if (this.session !== null) {
+        this.startBackgroundTask();
+      }
       return;
     }
     this.ctx = ctx;
@@ -195,6 +215,8 @@ export class MusicPlayback {
       return;
     }
     if (this.playing) {
+      // 用户自己按的暂停优先：别让随后到来的"焦点归还"把他按下的暂停顶掉
+      this.interruptedBySystem = false;
       this.avPlayer.pause();
     } else {
       this.avPlayer.play();
@@ -272,8 +294,15 @@ export class MusicPlayback {
     this.durationMs = 0;
     this.playing = false;
     this.note = '';
+    this.capabilityNote = '';
     this.errorMsg = '';
     this.status = UiState.INITIAL;
+    this.interruptedBySystem = false;
+    // 上下文只服务于会话与长时任务，两者都已释放，就不能再留着：
+    // ability 销毁后旧上下文已失效，留着它会让新一轮播放拿着死上下文去申请长时任务
+    // （真机表现：后台播放莫名"未启用"）。下一次 request() 会带新的上下文进来。
+    this.ctx = null;
+    this.wantAgentObj = null;
   }
 
   /** 应用退出（`EntryAbility.onDestroy`）：与 stop() 同义，但语义上强调"收尾" */
@@ -326,6 +355,13 @@ export class MusicPlayback {
     try {
       const player: media.AVPlayer = await media.createAVPlayer();
       this.avPlayer = player;
+      this.interruptedBySystem = false;
+
+      // 音频焦点被抢占（来电、别的应用开始播…）：系统会强制暂停并通知；
+      // 焦点还回来时若没人接着恢复，用户看到的就是"音乐自己停了"——按规范接管这两个 hint。
+      player.on('audioInterrupt', (event: audio.InterruptEvent) => {
+        this.handleAudioInterrupt(player, event);
+      });
 
       player.on('stateChange', (state: string) => {
         if (state === 'initialized') {
@@ -411,6 +447,46 @@ export class MusicPlayback {
     this.playing = false;
   }
 
+  /**
+   * 音频中断（焦点被抢占 / 归还）。
+   *
+   * `FORCE` 表示系统已经替应用处理完了（暂停/停止），这里只记账；`SHARE` 是"交给你自己处理"，
+   * 要主动暂停。恢复只认"这次暂停是被中断造成的"：用户自己按的暂停不能被焦点归还顶掉
+   * （用户按暂停时清掉这个标记，见 `togglePlay` 与会话的 `pause` 回调）。
+   *
+   * `STOP` 也按"可恢复的暂停"处理，不按字面销毁会话/播放器：焦点归还就能接着播，
+   * 而销毁会连带丢掉正在播的这首与迷你条 —— 用户要的是"被打断了，还能回来"。
+   */
+  private handleAudioInterrupt(player: media.AVPlayer, event: audio.InterruptEvent): void {
+    if (player !== this.avPlayer) {
+      // 已经被换掉的旧播放器（切歌了）：它的事件不该影响新曲目
+      return;
+    }
+    hilog.info(DOMAIN, TAG, '音频中断：hint=%{public}d force=%{public}d',
+      event.hintType, event.forceType);
+    const hint: audio.InterruptHint = event.hintType;
+    if (hint === audio.InterruptHint.INTERRUPT_HINT_PAUSE ||
+      hint === audio.InterruptHint.INTERRUPT_HINT_STOP) {
+      this.interruptedBySystem = true;
+      if (event.forceType === audio.InterruptForceType.INTERRUPT_FORCE) {
+        // 系统已经暂停/停止了它，等 stateChange 回来改写 playing
+        return;
+      }
+      if (player.state === 'playing' || player.state === 'prepared') {
+        player.pause();
+      }
+      return;
+    }
+    if (hint === audio.InterruptHint.INTERRUPT_HINT_RESUME && this.interruptedBySystem) {
+      this.interruptedBySystem = false;
+      // 被系统"停止"过（不是暂停）的播放器要重新 prepare 才能播，那不在这里偷偷做 ——
+      // 保持暂停、让用户从迷你条/播放页点一下，比悄悄重开更不容易出怪状态
+      if (player.state === 'paused' || player.state === 'prepared') {
+        player.play();
+      }
+    }
+  }
+
   // ── 进度上报（与视频页同一套桥接；音乐更需要它 —— 常听的专辑要能续播）────────
 
   private reportProgressIfNeeded(force: boolean): void {
@@ -449,6 +525,8 @@ export class MusicPlayback {
           this.avPlayer?.play();
         });
         session.on('pause', () => {
+          // 播控中心按暂停 = 用户意图，别被随后到来的"焦点归还"顶掉（见 handleAudioInterrupt）
+          this.interruptedBySystem = false;
           this.avPlayer?.pause();
         });
         session.on('stop', () => {
@@ -470,13 +548,29 @@ export class MusicPlayback {
         this.session = session;
       } catch (err) {
         // 会话不可用不应阻断播放本身（后台控制是增强项），但要让用户知道
-        this.note = '系统媒体控制不可用';
+        this.setCapabilityNote('系统媒体控制不可用');
         return;
       }
-      await this.startBackgroundTask();
     }
+    // 长时任务**不在**"会话是否新建"的分支里：会话建好而任务申请失败时，下一首起播
+    // 必须还能补申请 —— 嵌在分支里的话，一次失败就让整轮聆听都没有后台能力（退到后台即被挂起）。
+    await this.startBackgroundTask();
     await this.updateSessionMetadata();
     this.syncSessionState();
+  }
+
+  /** 记一条"能力降级"提示（会话不可用 / 长时任务失败），能力恢复后由 `clearCapabilityNote` 擦掉 */
+  private setCapabilityNote(text: string): void {
+    this.capabilityNote = text;
+    this.note = text;
+  }
+
+  /** 能力补齐：只在 note 里仍是自己写的那条降级文案时才擦（不误伤"已经是最后一首"这类瞬时提示） */
+  private clearCapabilityNote(): void {
+    if (this.note === this.capabilityNote) {
+      this.note = '';
+    }
+    this.capabilityNote = '';
   }
 
   /** 队列里相邻的一首（`-1` 上一首 / `+1` 下一首）；没有则空串 —— 控制中心据此置灰按钮 */
@@ -603,48 +697,84 @@ export class MusicPlayback {
   /**
    * 申请长时任务，使应用退到后台后不被挂起。
    *
-   * 用 `wantAgent` 让系统在用户点击通知时回到本应用。
-   * 失败（例如权限被拒）不阻断前台播放，只提示一次 —— 否则用户会以为整个播放坏了。
+   * **失败会自愈**：先 `stopBackgroundRunning` 清掉可能残留的长时任务再试一次 ——
+   * 真机实测（#73）：上一次没收干净的长时任务会让新的申请被系统直接拒绝，而残留只有
+   * `stopBackgroundRunning` 能清。少了这一步，一次失败就让整轮聆听都没有后台能力，
+   * 用户看到的就是"离开播放页/锁屏后音乐停了"。
+   *
+   * 用 `wantAgent` 让系统在用户点击通知时回到本应用。仍失败（例如权限被拒）不阻断前台播放，
+   * 只如实提示 —— 否则用户会以为整个播放坏了。
    */
   private async startBackgroundTask(): Promise<void> {
     if (this.inBackgroundTask || this.ctx === null) {
       return;
     }
+    const ctx: common.UIAbilityContext = this.ctx;
+    let error: BusinessError | null = await this.requestBackgroundTask(ctx);
+    if (error !== null) {
+      // 自愈：清残留后再试一次（真机实测过的拒因，见上）
+      hilog.warn(DOMAIN, TAG, '长时任务申请被拒（%{public}d），清残留后重试', error.code);
+      await this.clearBackgroundTask(ctx);
+      error = await this.requestBackgroundTask(ctx);
+    }
+    if (error === null) {
+      hilog.info(DOMAIN, TAG, '长时任务已就绪：退到后台不被挂起');
+      this.clearCapabilityNote();
+      return;
+    }
+    // 201 = 权限未授予；9800005 = 长时任务校验失败（多为残留/未声明 backgroundModes）。如实提示，不静默失败。
+    hilog.error(DOMAIN, TAG, '长时任务申请失败：%{public}d %{public}s', error.code, error.message);
+    this.setCapabilityNote(error.code === 201
+      ? '缺少长时任务权限，退到后台可能暂停'
+      : `后台播放未启用（${error.code}），退到后台可能暂停`);
+  }
+
+  /** 申请一次长时任务：成功返回 null，失败返回错误（不改状态、不提示，由调用方决定怎么办） */
+  private async requestBackgroundTask(ctx: common.UIAbilityContext): Promise<BusinessError | null> {
     try {
-      const ctx: common.UIAbilityContext = this.ctx;
-      const agentInfo: wantAgent.WantAgentInfo = {
-        wants: [{
-          bundleName: ctx.abilityInfo.bundleName,
-          abilityName: ctx.abilityInfo.name
-        }],
-        actionType: wantAgent.OperationType.START_ABILITY,
-        requestCode: 0,
-        actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
-      };
-      this.wantAgentObj = await wantAgent.getWantAgent(agentInfo);
+      if (this.wantAgentObj === null) {
+        const agentInfo: wantAgent.WantAgentInfo = {
+          wants: [{
+            bundleName: ctx.abilityInfo.bundleName,
+            abilityName: ctx.abilityInfo.name
+          }],
+          actionType: wantAgent.OperationType.START_ABILITY,
+          requestCode: 0,
+          actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
+        };
+        this.wantAgentObj = await wantAgent.getWantAgent(agentInfo);
+      }
       await backgroundTaskManager.startBackgroundRunning(
         ctx,
         backgroundTaskManager.BackgroundMode.AUDIO_PLAYBACK,
         this.wantAgentObj
       );
       this.inBackgroundTask = true;
+      return null;
     } catch (err) {
-      const e = err as BusinessError;
-      // 201 = 权限未授予；其它多为系统限制。如实提示，不静默失败。
-      this.note = e.code === 201
-        ? '缺少长时任务权限，退到后台可能暂停'
-        : `后台播放未启用（${e.code}）`;
+      return err as BusinessError;
     }
   }
 
+  /**
+   * 结束长时任务。
+   *
+   * **不做"没申请过就跳过"的短路**：残留的长时任务（上一次进程被系统杀掉时留下的）
+   * 只能在这次进程里靠这一步清掉，而它正是下一次申请被拒的原因。
+   */
   private async stopBackgroundTask(): Promise<void> {
-    if (!this.inBackgroundTask || this.ctx === null) {
+    if (this.ctx === null) {
       return;
     }
+    await this.clearBackgroundTask(this.ctx);
+  }
+
+  /** 与系统的长时任务对账：无论本进程记没记，都通知系统结束一次（没有在跑的任务会报错，忽略即可） */
+  private async clearBackgroundTask(ctx: common.UIAbilityContext): Promise<void> {
     try {
-      await backgroundTaskManager.stopBackgroundRunning(this.ctx);
+      await backgroundTaskManager.stopBackgroundRunning(ctx);
     } catch (err) {
-      // 停止失败不阻断退出流程
+      // "当前没有长时任务"之类的报错属正常情况，不阻断流程
     }
     this.inBackgroundTask = false;
   }
