@@ -1,7 +1,9 @@
-# 条目（影视）元数据管理
+# 条目元数据管理（影视 + 音乐）
 
-影片 / 剧集详情页操作区的「编辑元数据」入口（仅管理员可见），进入独立页面
+影片 / 剧集 / 音乐条目详情页操作区的「编辑元数据」入口（仅管理员可见），进入独立页面
 `pages/ItemMetadataPage.ets`，可编辑字段、识别（远程搜索）、刷新元数据、管理封面。
+
+音乐条目的专属差异见下文「[音乐条目](#音乐条目专辑--艺术家--曲目)」一节。
 
 请求构造与响应解析集中在 C++（`native/core/api/item_metadata_api.*`），ArkTS 页面只做展示与表单状态。
 本页对照 Jellyfin 服务端源码（`docs/jellyfin-10.8.12`）实现，下面每一条服务端语义都标了出处。
@@ -25,6 +27,10 @@
 后三个端点（图片列表 / 设为 URL 图 / 删除）**没有新写 core 代码**，直接复用了媒体库管理
 已有的 NAPI（`libraryCoverInfo` / `librarySetCoverFromUrl` / `libraryDeleteCover`）——
 它们是"对任意 itemId 的图片操作"，与"对媒体库"只是调用方不同。
+
+`RemoteSearch` 的 `{itemType}` 白名单（10.8 `ItemLookupController`）：Movie / Trailer /
+MusicVideo / Series / BoxSet / **MusicArtist / MusicAlbum** / Person / Book。**没有
+Episode / Season / Audio** —— 分集跟着剧走，单曲跟着专辑走。
 
 ## 权限
 
@@ -74,10 +80,15 @@ item.ProviderIds = request.ProviderIds;
 （主机单测逐项断言了这一点）。未被门控的字段（`People` / `IndexNumber` / `RuntimeTicks` …）
 也一并取回，回传时更完整。
 
-### 3. `Studios` 必须是 `[{ "Name": "..." }]`
+### 3. `Studios` / `AlbumArtists` / `ArtistItems` 必须是 `[{ "Name": "..." }]`
 
 服务端取 `request.Studios.Select(x => x.Name)`，而界面把它当字符串列表编辑。
 `normalizeItemMetadataBody` 会把 `["华纳"]` 这种写法转成 `[{ "Name": "华纳" }]`，否则服务端读到 `null` 名字。
+
+音乐的两组人名字段是同一个形状（`NameGuidPair[]`，见
+`MediaBrowser.Model/Dto/NameGuidPair.cs`）：`AlbumArtists` 与 `ArtistItems`。只发字符串数组会让
+System.Text.Json 反序列化失败（拿不到对象）→ 服务端直接 **400**。`NormalizeNameList`
+统一处理这三个字段：字符串 → `{"Name": …}`，已是对象则原样透传（保留 `Id`）。
 
 ### 4. `Taglines` 只保留第一条
 
@@ -94,10 +105,10 @@ if (request.Taglines != null) { item.Tagline = request.Taglines.FirstOrDefault()
 （`Configuration.ContentTypes`），所以没法跟其它字段一起整体替换，只能单独
 `POST /Items/{itemId}/ContentType?contentType=`。空串 = 清除覆盖（回到从媒体库继承）。
 
-### 6. 识别：`RemoteSearch` 的类型白名单里**没有 Episode**
+### 6. 识别：`RemoteSearch` 的类型白名单里**没有 Episode / Season / Audio**
 
 `ItemLookupController` 的 10.8 端点只有 Movie / Trailer / MusicVideo / Series / BoxSet /
-MusicArtist / MusicAlbum / Person / Book —— 分集元数据跟着剧走，不单独识别。
+MusicArtist / MusicAlbum / Person / Book —— 分集元数据跟着剧走、单曲跟着专辑走，都不单独识别。
 `remoteSearchTypeFor` 对不支持的类型返回空串，界面据此**隐藏**「识别」区而不是发一个必然 404 的请求。
 
 搜索请求体里的两个细节：
@@ -159,6 +170,103 @@ RefreshFullItem(item, new MetadataRefreshOptions(...) {
 
 > 同类先例：取流与图片下载本来就用更长的超时（`setReadTimeoutSec(60)`）。
 
+## 音乐条目（专辑 / 艺术家 / 曲目）
+
+### 入口
+
+音乐条目走的是各自专用的详情页（`LibraryPage` 对 `MusicArtist` / `MusicAlbum` / `Audio`
+分别 `pushUrl` 到 `ArtistDetailPage` / `AlbumDetailPage` / 直接进播放页），
+**通用 `DetailPage` 永远收不到它们**，所以元数据入口必须挂在这两个音乐页上：
+
+| 页面 | 入口 | itemType |
+| --- | --- | --- |
+| `AlbumDetailPage` 顶栏右侧 | 专辑元数据（`sys.symbol.doc_text`） | `MusicAlbum` |
+| `AlbumDetailPage` 每行曲目右侧 | 单曲元数据（不打断点击播放：与可播区域是**兄弟节点**） | `Audio` |
+| `ArtistDetailPage` 顶栏右侧 | 艺术家元数据 | `MusicArtist` |
+
+三处都包在 `AppViewModel.getInstance().isAdmin` 里（服务端 `RequiresElevation`）。
+改完返回时，两个页面各自在 `onPageShow` 里 `ItemMetadataRefreshSignal.consume(id)` 命中才重载；
+`AlbumDetailPage` 会把专辑与**每个曲目**的 id 都对一次（两条入口都可能改过数据）。
+
+### 可编辑字段按「服务端实际会赋值的类型」显示
+
+`ItemUpdateController.UpdateItem` 里这几行的守卫各不相同：
+
+```csharp
+item.IndexNumber = request.IndexNumber;          // 无条件（对所有条目）
+item.ParentIndexNumber = request.ParentIndexNumber;
+if (request.AlbumArtists != null) { if (item is IHasAlbumArtist x) { x.AlbumArtists = …; } }
+if (request.ArtistItems  != null) { if (item is IHasArtist     x) { x.Artists      = …; } }
+switch (item) { case Audio song: song.Album = request.Album; break; … }
+```
+
+所以 `MusicSection` 的分区与行都按 itemType 门控：
+
+| 字段 | MusicAlbum | Audio | MusicVideo | MusicArtist |
+| --- | --- | --- | --- | --- |
+| 专辑艺术家 `AlbumArtists` | ✔ | ✔ | | |
+| 艺术家 `ArtistItems` | ✔ | ✔ | ✔ | |
+| 所属专辑 `Album` | | ✔ | ✔ | |
+| 音轨号 / 碟号 | | ✔ | | |
+
+`MusicArtist` 一个都不适用（它是 `IItemByName`），整个「音乐」分区对它**不渲染**
+（`showsMusicRows()`），否则只会得到一张空卡片。
+
+**但提交时的门控比显示更宽**（`isMusicItemType`，含 `MusicArtist`）：`IndexNumber` /
+`ParentIndexNumber` 是无条件赋值，而表单对非音乐条目不显示它们 —— 若一并写回，就会把没让
+用户看见的值（例如分集的集号）当成"用户清空"发出去。反过来，`MusicArtist` 虽然不显示音乐分区，
+仍要把从原文读到的 `IndexNumber` 带回去，否则整体替换会把它清成 `null`。
+非音乐条目完全不写这五个键（`buildBody(..., includeMusicFields=false)`）。
+
+### 专辑「识别」必须带专辑艺术家
+
+`MusicBrainzAlbumProvider.GetSearchResults` 的查询是
+`release/?query="{名称}" AND artist:"{GetAlbumArtist()}"`，而
+`AlbumInfoExtensions.GetAlbumArtist()` 只认 `AlbumInfo.AlbumArtists`：
+
+```csharp
+public static string GetAlbumArtist(this AlbumInfo info)
+{
+    var id = info.SongInfos.FirstOrDefault(i => !string.IsNullOrEmpty(i.AlbumArtists?.FirstOrDefault()))
+        ?.AlbumArtists.FirstOrDefault();
+    return id ?? info.AlbumArtists?.FirstOrDefault();
+}
+```
+
+不带它查询就退化成 `artist:""`，等于搜不出东西 —— 这正是音乐「识别」原本失效的原因。
+所以 `RemoteSearchQuery` 新增两个字段：
+
+- `albumArtists`（`AlbumInfo.AlbumArtists`）：界面取「音乐」分区里的**专辑艺术家**，
+  为空时退回「艺术家」（部分专辑的 `AlbumArtists` 是空的）；
+- `artistProviderIds`（`AlbumInfo.ArtistProviderIds`）：条目上的 `MusicBrainzAlbumArtist`
+  搬成服务端要的 `MusicBrainzArtist` 键。命中后 `GetMusicBrainzArtistId()` 改用 `arid:` 精确查。
+
+两者都为空时**整个字段省略**（发空数组与"带空艺术家去查"结果相同，省略更干净）。
+
+### 音乐候选没有封面
+
+`RemoteSearchResult.ImageUrl` 只有 TMDb / OMDb 会填；`MusicBrainzAlbumProvider.GetImageResponse`
+直接 `throw new NotImplementedException()`。而 `ApplySearchCriteria` 的 `replaceAllImages`
+是"**先删掉条目的图片**再抓候选的图" —— 对音乐开启它等于纯删除，封面会丢。
+界面因此：
+
+- 候选行的缩略图**整块不画**（`imageUrl` 为空时不渲染 `JellyfinImage`，画空框会让人以为加载失败）；
+- 「同时替换图片」的说明文案对音乐单独换成"开启后会删除现有封面且抓不回新的，请保持关闭"。
+
+### 专辑「应用」结果可能被曲目覆盖
+
+`AlbumMetadataService` 有 `EnableUpdatingGenresFromChildren = true`，且
+`UpdateMetadataFromChildren` 在 `FullRefresh` 时用**内部曲目**的值重算专辑的
+`Name`（取曲目的 `Album`）/ `AlbumArtists` / `Artists`。而 `ApplySearchCriteria` 走的正是
+`FullRefresh` + `ReplaceAllMetadata`，所以「应用」之后这几项可能又被曲目里的值盖回去。
+确认浮层与页面说明都显式提示了这一点。
+
+### 单曲没有「识别」端点
+
+`ItemLookupController` 只到 MusicAlbum / MusicArtist / MusicVideo，`Audio` 没有端点。
+`remoteSearchTypeFor('Audio')` 返回空串，页面显示一段单独的解释（曲目跟着专辑走，
+可在专辑页对专辑做「识别」），但字段与封面仍可直接编辑。
+
 ## 分层与可测性
 
 ```
@@ -185,17 +293,25 @@ itemUpdateMetadata(itemId, itemJson)       → 整体替换
 itemExternalIdInfos(itemId)
 itemUpdateContentType(itemId, contentType)
 itemRefreshMetadata(itemId, metadataRefreshMode, imageRefreshMode, replaceAllMetadata, replaceAllImages)
-itemRemoteSearch(itemType, searchTerm, providerIdsJson, year, metadataLanguage, metadataCountryCode, itemId)
+itemRemoteSearch(itemType, searchTerm, providerIdsJson, year, metadataLanguage, metadataCountryCode, itemId,
+                 albumArtistsJson, artistProviderIdsJson)
 itemApplyRemoteSearch(itemId, resultJson, replaceAllImages)
 ```
+
+后两个参数（`albumArtistsJson` / `artistProviderIdsJson`）只对 `MusicAlbum` 有意义，
+ArkTS 包装层给了默认值 `''`（= 不发该字段），影视调用方不必改。
 
 主机单测：`native/core/tests/test_item_metadata_api.cpp`
 （已在 `.github/workflows/build.yml` 的 `core-tests` 与 `scripts/force-build.ps1` 中登记），
 卡三件事：
 
 1. `GET` 的 `Fields` 覆盖全部被门控的可编辑字段（少一个 = 回传时清空一个）；
-2. `POST` 请求体**原样保留**不认识的字段，只对服务端会崩/写错的两处（`ProviderIds` / `Studios`）兜底；
-3. 归一化把服务端各 DTO 收敛成界面能直接画的形状。
+2. `POST` 请求体**原样保留**不认识的字段，只对服务端会崩/写错的三处（`ProviderIds` / `Studios` /
+   `AlbumArtists` / `ArtistItems`）兜底；
+3. 归一化把服务端各 DTO 收敛成界面能直接画的形状；
+4. 音乐：`AlbumArtists` / `ArtistItems` 转成 `NameGuidPair[]`（对象形状保留 `Id`、空数组保持空数组、
+   缺字段不补）、`RemoteSearchQuery` 的 `AlbumArtists` 去空去空白且为空时整字段省略、
+   `ArtistProviderIds` 透传、`remoteSearchTypeFor` 认得 `MusicArtist` / `MusicVideo`。
 
 > 顺带修了 `scripts/force-build.ps1` 的一个既有问题：它没给编译器加 `-I native/core/api`
 > 与 `-I native/feature/player`，导致所有 `*_api` 与 player 相关的测试目标**根本编不过**
@@ -234,6 +350,7 @@ itemApplyRemoteSearch(itemId, resultJson, replaceAllImages)
 | --- | --- |
 | 基本信息 | 名称、原始标题、排序名、简介、发行年、首播日期 |
 | 分类 | 类型（Genres）、标签（Tags）、制片公司（Studios）、拍摄地点（ProductionLocations）、宣传语（Tagline） |
+| 音乐 | 专辑艺术家 / 艺术家 / 所属专辑 / 音轨号 / 碟号 —— 仅音乐条目显示，且每行按 itemType 再门控（见上） |
 | 分级与评分 | 官方分级（下拉）、自定义分级、社区评分（可空小数）、影评人评分 |
 | 外部 ID | 提供方定义 × 当前取值（重名补 Key、定义外的键补漏，见上文第 8 点） |
 | 语言与锁定 | 元数据语言、元数据国家、内容类型（单独端点）、锁定条目开关、锁定字段多选 |
@@ -254,6 +371,10 @@ itemApplyRemoteSearch(itemId, resultJson, replaceAllImages)
 `consume(itemId)`（按 itemId 精确匹配、取走即清）命中才 `reloadKeepingSeason()`
 （重载后把当前选中的季恢复回去）。
 
+音乐页没有"季"这回事，所以 `AlbumDetailPage` / `ArtistDetailPage` 命中信号后直接整页 `reload()`；
+`AlbumDetailPage` 还要先把路由带下来的 `artistName` / `coverUrl` 清空，否则 `reload()` 会因为
+"路由参数优先"而不回读专辑条目，改完的封面与艺术家名不会刷新。
+
 ## 设备验收记录（模拟器 + 真实 Jellyfin 10.8.12）
 
 | 项目 | 观测到的证据 |
@@ -272,6 +393,23 @@ itemApplyRemoteSearch(itemId, resultJson, replaceAllImages)
 | 刷新元数据 | 返回「已请求服务端刷新（异步执行，稍后重新进入本页可看到结果）」 |
 | 封面与图片 | 列表如实显示 `Primary` / `Disc` / `Logo` / `Backdrop` 及尺寸；删除有确认浮层，取消可返回 |
 | 本地上传提示 | 界面明确标注「本地上传暂未实现」 |
+
+### 音乐条目验收记录（2026-09-24，模拟器 + 真实 Jellyfin 10.8.12）
+
+| 项目 | 观测到的证据 |
+| --- | --- |
+| 专辑入口 | 「音乐 → 专辑 → 范特西（周杰伦）」顶栏右侧出现元数据按钮 |
+| 曲目入口 | 同一专辑每行右侧各有一个元数据按钮，与"点行播放"是分开的命中区 |
+| 艺术家入口 | 「音乐 → 万芳」顶栏右侧出现元数据按钮 |
+| 专辑「音乐」分区 | 专辑艺术家 = `万芳`、艺术家 = `万芳`（`爱情论`）；`范特西` 的曲目页上两项分别是 `周杰伦` 与 `周杰倫` —— 两者来自服务端**两个不同的数组**（`AlbumArtists` / `ArtistItems`），字段映射未串位 |
+| 曲目「音乐」分区 | 所属专辑 = `范特西`、音轨号 = `1`、碟号 = `1` |
+| 曲目无「识别」 | `Audio` 页显示「服务端没有为「Audio」（单曲）提供远程搜索端点…可在专辑详情页对专辑做「识别」；本页仍可直接编辑字段。」 |
+| 艺术家无空分区 | `MusicArtist` 页在「分类」与「分级与评分」之间**没有**空的「音乐」卡片 |
+| 音乐字段改动往返 | 曲目 `爱在西元前` 的音轨号 `1 → 511` 保存（提示「元数据已保存（服务端为整体替换，本次提交了完整条目）」），**退回后重新进入本页**读到 `511`；再改回 `1` 保存并重新进入，读到 `1` |
+| 专辑「识别」（按名字 + 专辑艺术家） | `范特西` / 发行年 `2001` → `候选（2）`：「范特西 · MusicBrainz · 2020 · MusicBrainzAlbum 9fc471a4-… · MusicBrainzReleaseGroup 732b78cb-…」与「依然范特西 · MusicBrainz · MusicBrainzAlbum a2d2ad17-…」。其中 `732b78cb-9f7d-383d-86cc-5cf7e43c9658` 与该条目**已有的** `MusicBrainzReleaseGroup` 外部 ID 完全一致 —— 说明带专辑艺术家的查询确实命中了正确的发行组 |
+| 音乐候选无图 | 候选行不画缩略图（`imageUrl` 为空）；「同时替换图片」的说明为「音乐候选没有图片（MusicBrainz 不返回封面）：开启后会删除现有封面且抓不回新的，请保持关闭」 |
+| 专辑识别无结果的文案 | 另一个专辑（`爱情论` / 万芳）返回 `没有候选条目。`，不是超时或错误 —— 该专辑在 MusicBrainz 上没有对应发行 |
+| 专辑「应用」提示 | 确认浮层额外追加「专辑还会用内部曲目的值重算名称 / 专辑艺术家 / 艺术家，结果可能与候选不一致。」 |
 
 ### 未通过项：应用识别结果返回 HTTP 500（服务端侧）
 
@@ -295,7 +433,8 @@ itemApplyRemoteSearch(itemId, resultJson, replaceAllImages)
 
 - **本地上传图片未实现**（原因见上）。
 - **应用识别结果当前 500**（服务端侧，见上）。
-- 服务端 `RemoteSearch` 无 Episode 端点，分集不提供「识别」入口。
+- 服务端 `RemoteSearch` 无 Episode / Season / **Audio** 端点：分集与单曲不提供「识别」入口
+  （单曲的字段仍可编辑）。
 - 编辑页不提供"只改一个字段"的快捷路径，保存始终提交完整条目 —— 这是整体替换语义下唯一安全的方式。
 - 刷新元数据是**异步**的，页面只确认"已请求"，实际结果要稍后重新进入本页查看。
 - 保存后用**系统返回键**（而非页面左上角返回箭头）退回详情页，详情页不会自动重载，仍显示旧值，

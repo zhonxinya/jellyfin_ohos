@@ -7,7 +7,9 @@ import { WindowLayout } from '../common/WindowLayout';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { MediaItem } from '../models/MediaItem';
+import { ItemMetadataRefreshSignal } from '../common/ItemMetadataModels';
 import { PageHeader } from '../components/PageHeader';
+import { AppIconButton } from '../components/AppIconButton';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
@@ -59,6 +61,60 @@ struct ArtistDetailPage {
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
+  }
+
+  /**
+   * 从「编辑元数据」页返回且**真的改过数据**时重载。
+   *
+   * 艺术家名就是本页标题，改完必须重读条目 —— 路由参数里的名字是进来时那一份，已经过期。
+   * 专辑列表一并重载：艺术家条目的改动（如排序名）可能改变服务端对名下专辑的归类顺序。
+   */
+  onPageShow(): void {
+    if (this.artistId.length === 0) {
+      return;
+    }
+    if (!ItemMetadataRefreshSignal.consume(this.artistId)) {
+      return;
+    }
+    this.reloadArtistName();
+    this.reload();
+  }
+
+  private async reloadArtistName(): Promise<void> {
+    const result: NativeResult =
+      JellyfinNative.parseResult(await JellyfinNative.getItemDetail(this.artistId));
+    if (!result.ok || result.data === null) {
+      return;
+    }
+    const name: string = MediaItem.fromJson(result.data).displayTitle();
+    if (name.length > 0) {
+      this.artistName = name;
+    }
+  }
+
+  /** 顶栏右侧：管理员才显示「编辑元数据」（服务端是 RequiresElevation） */
+  @Builder
+  HeaderAction() {
+    if (AppViewModel.getInstance().isAdmin) {
+      AppIconButton({
+        icon: $r('sys.symbol.doc_text'),
+        variant: 'ghost',
+        iconSize: 18,
+        onTap: () => {
+          this.openMetadata();
+        }
+      })
+    }
+  }
+
+  private openMetadata(): void {
+    if (this.artistId.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/ItemMetadataPage',
+      params: { itemId: this.artistId, itemType: 'MusicArtist', title: this.artistName }
+    });
   }
 
   private async reload(): Promise<void> {
@@ -212,7 +268,11 @@ struct ArtistDetailPage {
 
   build() {
     Column() {
-      PageHeader({ title: this.artistName, onBack: () => { router.back(); } })
+      PageHeader({
+        title: this.artistName,
+        onBack: () => { router.back(); },
+        action: () => { this.HeaderAction(); }
+      })
 
       if (this.status === UiState.LOADING) {
         LoadingState({ hint: '正在加载专辑…' })

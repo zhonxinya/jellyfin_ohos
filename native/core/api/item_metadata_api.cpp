@@ -64,6 +64,32 @@ nlohmann::json NormalizeStringArray(const nlohmann::json &src)
 }
 
 /**
+ * 服务端把「人名/公司名」类字段声明成 `NameGuidPair[]`（`Studios` / `AlbumArtists` /
+ * `ArtistItems`），更新时只取 `.Name`。界面按字符串列表编辑，所以两种形状都要能收：
+ * 字符串 → `{ "Name": ... }`，已经是对象（带 `Id`）则原样透传。
+ *
+ * 只发字符串会被 System.Text.Json 反序列化失败（拿不到对象），服务端直接 400。
+ */
+nlohmann::json NormalizeNameList(const nlohmann::json &src)
+{
+    nlohmann::json out = nlohmann::json::array();
+    if (!src.is_array()) {
+        return out;
+    }
+    for (const auto &item : src) {
+        if (item.is_string()) {
+            const std::string name = Trimmed(item.get<std::string>());
+            if (!name.empty()) {
+                out.push_back(nlohmann::json::object({{"Name", name}}));
+            }
+        } else if (item.is_object() && item.contains("Name") && item["Name"].is_string()) {
+            out.push_back(item);
+        }
+    }
+    return out;
+}
+
+/**
  * 服务端的 `CountryInfo` / `CultureDto` / `ParentalRating` / `ExternalIdInfo` / `NameValuePair`
  * 都收敛成 `{ name, displayName, value }`：页面只认这三个键，不必知道各 DTO 的字段名。
  */
@@ -139,6 +165,15 @@ LibraryRequest buildRemoteSearchRequest(const RemoteSearchQuery &query)
     }
     if (!query.metadataCountryCode.empty()) {
         searchInfo["MetadataCountryCode"] = query.metadataCountryCode;
+    }
+    // 音乐：专辑搜索按「名称 + 专辑艺术家」查（`AlbumInfo.GetAlbumArtist()`），
+    // 空数组要整个省略 —— 发一个空数组和"带空艺术家去查"是同一个结果，但省略更干净
+    const nlohmann::json albumArtists = NormalizeStringArray(query.albumArtists);
+    if (!albumArtists.empty()) {
+        searchInfo["AlbumArtists"] = albumArtists;
+    }
+    if (query.artistProviderIds.is_object() && !query.artistProviderIds.empty()) {
+        searchInfo["ArtistProviderIds"] = query.artistProviderIds;
     }
 
     nlohmann::json body = nlohmann::json::object({
@@ -273,20 +308,17 @@ nlohmann::json normalizeItemMetadataBody(const nlohmann::json &body)
         }
     }
 
-    // `Studios` 服务端取 `.Name`：界面把它当字符串列表编辑，两种形状都要能收
-    if (out.contains("Studios") && out["Studios"].is_array()) {
-        nlohmann::json studios = nlohmann::json::array();
-        for (const auto &item : out["Studios"]) {
-            if (item.is_string()) {
-                const std::string name = Trimmed(item.get<std::string>());
-                if (!name.empty()) {
-                    studios.push_back(nlohmann::json::object({{"Name", name}}));
-                }
-            } else if (item.is_object() && item.contains("Name") && item["Name"].is_string()) {
-                studios.push_back(item);
-            }
+    // `Studios` / `AlbumArtists` / `ArtistItems` 服务端都取 `.Name`（且 DTO 是
+    // `NameGuidPair[]`）：界面把它们当字符串列表编辑，两种形状都要能收。
+    //
+    // **只在字段存在时归一化**：凭空补一个空数组会被服务端当成"清空这个字段"
+    // （`item.AlbumArtists = request.AlbumArtists.Select(...)`），而字段缺失时服务端
+    // 会跳过 —— 这正是"本页不管的字段不该被动到"的保证。
+    static const char *const kNameListFields[] = {"Studios", "AlbumArtists", "ArtistItems"};
+    for (const char *field : kNameListFields) {
+        if (out.contains(field) && out[field].is_array()) {
+            out[field] = NormalizeNameList(out[field]);
         }
-        out["Studios"] = studios;
     }
 
     return out;

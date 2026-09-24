@@ -326,10 +326,18 @@ bool ReadFiniteInt64(double d, int64_t &out)
     return true;
 }
 
+/**
+ * 参数读取助手一次最多取多少个实参。
+ *
+ * 取多了是安全的（`napi_get_cb_info` 会把 `argc` 改写成实际个数），取少了才会静默丢参数
+ * —— 所以这里给足余量：目前参数最多的是 `itemRemoteSearch`（9 个）。
+ */
+constexpr size_t kMaxNapiArgs = 12;
+
 bool ReadStringArg(napi_env env, napi_callback_info info, size_t index, std::string &out)
 {
-    size_t argc = 8;
-    napi_value args[8] = {};
+    size_t argc = kMaxNapiArgs;
+    napi_value args[kMaxNapiArgs] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (index >= argc) {
         out.clear();
@@ -347,8 +355,8 @@ bool ReadStringArg(napi_env env, napi_callback_info info, size_t index, std::str
 
 bool ReadIntArg(napi_env env, napi_callback_info info, size_t index, int64_t &out)
 {
-    size_t argc = 8;
-    napi_value args[8] = {};
+    size_t argc = kMaxNapiArgs;
+    napi_value args[kMaxNapiArgs] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (index >= argc) {
         out = 0;
@@ -439,8 +447,8 @@ bool ReadJsonArg(napi_env env, napi_callback_info info, size_t index, nlohmann::
 
 bool ReadBoolArg(napi_env env, napi_callback_info info, size_t index, bool &out)
 {
-    size_t argc = 8;
-    napi_value args[8] = {};
+    size_t argc = kMaxNapiArgs;
+    napi_value args[kMaxNapiArgs] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (index >= argc) {
         out = false;
@@ -3192,6 +3200,12 @@ napi_value ItemRemoteSearch(napi_env env, napi_callback_info info)
     std::string metadataLanguage;
     std::string metadataCountryCode;
     std::string itemId;
+    // 音乐（专辑）：服务端 `AlbumInfo.GetAlbumArtist()` 只认 `AlbumArtists`，
+    // 不带它 MusicBrainz 查询会退化成 `artist:""`（见 item_metadata_api.h）
+    std::string albumArtistsJson;
+    nlohmann::json albumArtists;
+    std::string artistProviderIdsJson;
+    nlohmann::json artistProviderIds;
     ReadStringArg(env, info, 0, itemType);
     ReadStringArg(env, info, 1, searchTerm);
     ReadStringArg(env, info, 2, providerIdsJson);
@@ -3199,14 +3213,22 @@ napi_value ItemRemoteSearch(napi_env env, napi_callback_info info)
     ReadStringArg(env, info, 4, metadataLanguage);
     ReadStringArg(env, info, 5, metadataCountryCode);
     ReadStringArg(env, info, 6, itemId);
+    ReadStringArg(env, info, 7, albumArtistsJson);
+    ReadStringArg(env, info, 8, artistProviderIdsJson);
     if (!providerIdsJson.empty()) {
         ReadJsonArg(env, info, 2, providerIds);
+    }
+    if (!albumArtistsJson.empty()) {
+        ReadJsonArg(env, info, 7, albumArtists);
+    }
+    if (!artistProviderIdsJson.empty()) {
+        ReadJsonArg(env, info, 8, artistProviderIds);
     }
     if (itemType.empty()) {
         return ToNapiJson(env, MakeResult(false, 400, "Item type is required"));
     }
     return RunAsync(env, [itemType, searchTerm, providerIds, year, metadataLanguage,
-                          metadataCountryCode, itemId]() {
+                          metadataCountryCode, itemId, albumArtists, artistProviderIds]() {
         jellyfin::api::RemoteSearchQuery query;
         query.itemType = itemType;
         query.searchTerm = searchTerm;
@@ -3215,6 +3237,8 @@ napi_value ItemRemoteSearch(napi_env env, napi_callback_info info)
         query.metadataLanguage = metadataLanguage;
         query.metadataCountryCode = metadataCountryCode;
         query.itemId = itemId;
+        query.albumArtists = albumArtists;
+        query.artistProviderIds = artistProviderIds;
         return FromApi(jellyfin::api::remoteSearch(SlowApi(), query)).dump();
     });
 }
