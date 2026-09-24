@@ -112,6 +112,21 @@ struct RemoteSearchQuery {
     /** 元数据语言（三字母码）与地区码，取自条目本身，让搜索在正确的语言下进行。 */
     std::string metadataLanguage;
     std::string metadataCountryCode;
+    /**
+     * 专辑艺术家名（`AlbumInfo.AlbumArtists`）——**专辑搜索必须带**。
+     *
+     * `MusicBrainzAlbumProvider.GetSearchResults` 走的是
+     * `release/?query="{名称}" AND artist:"{GetAlbumArtist()}"`，而 `GetAlbumArtist()`
+     * 只认 `AlbumInfo.AlbumArtists`（见 `MediaBrowser.Providers/Music/AlbumInfoExtensions.cs`）。
+     * 不带它查询就退化成 `artist:""`，等于搜不出东西 —— 这是音乐「识别」原本失效的原因。
+     */
+    nlohmann::json albumArtists = nlohmann::json::array();
+    /**
+     * 专辑艺术家的外部 ID（`AlbumInfo.ArtistProviderIds`）。
+     *
+     * 有 `MusicBrainzArtist` 时服务端改用 `arid:` 精确查，比按名字查准得多。
+     */
+    nlohmann::json artistProviderIds = nullptr;
 };
 
 /**
@@ -152,10 +167,12 @@ nlohmann::json normalizeMetadataEditorInfo(const nlohmann::json &serverJson);
 nlohmann::json normalizeRemoteSearchResults(const nlohmann::json &serverJson);
 
 /**
- * 整体替换请求体的兜底，只做两件服务端会直接崩/写错的事：
+ * 整体替换请求体的兜底，只做服务端会直接崩/写错的事：
  * - `ProviderIds` 必须是对象（服务端 `request.ProviderIds.ToList()` 无 null 保护）；
  * - `Studios` 必须是 `[{ "Name": "..." }]`（服务端取 `.Name`；界面把它当字符串列表编辑，
- *   所以这里要能接受 `["华纳"]` 这种写法）。
+ *   所以这里要能接受 `["华纳"]` 这种写法）；
+ * - `AlbumArtists` / `ArtistItems` 必须是 `[{ "Name": "..." }]`（服务端同样取 `.Name`，
+ *   且 DTO 类型是 `NameGuidPair[]` —— 收到 `["周杰伦"]` 这种字符串数组会反序列化失败）。
  *
  * 其余字段原样保留 —— 包括本模块不认识的字段，这是"整体替换"安全的前提。
  */

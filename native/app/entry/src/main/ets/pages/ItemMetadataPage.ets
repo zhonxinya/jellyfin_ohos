@@ -8,6 +8,7 @@ import {
   ItemImage,
   ItemMetadataEdits,
   ItemMetadataRefreshSignal,
+  isMusicItemType,
   ITEM_IMAGE_TYPES,
   LockedFieldOption,
   lockedFieldOptions,
@@ -90,6 +91,13 @@ struct ItemMetadataPage {
   @State private locationsText: string = '';
   @State private taglinesText: string = '';
   @State private providerEntries: ProviderIdEntry[] = [];
+
+  // ── 音乐字段（仅音乐类型显示 / 提交，见 isMusicItemType）─────────────────
+  @State private albumArtistsText: string = '';
+  @State private artistsText: string = '';
+  @State private album: string = '';
+  @State private indexNumber: string = '';
+  @State private parentIndexNumber: string = '';
 
   @State private saving: boolean = false;
   @State private refreshing: boolean = false;
@@ -241,11 +249,105 @@ struct ItemMetadataPage {
     this.taglinesText = MetadataDraft.toLines(this.stringList(item, 'Taglines'));
     this.providerEntries = ProviderIdEntry.build(this.externalIdOptions(),
       JsonUtil.getObject(item, 'ProviderIds'));
+    // 音乐字段总是从原文读出来（即使当前类型不显示），这样"不显示"就等于"不改"
+    this.albumArtistsText = MetadataDraft.toLines(MetadataDraft.nameList(item, 'AlbumArtists'));
+    this.artistsText = MetadataDraft.toLines(MetadataDraft.nameList(item, 'ArtistItems'));
+    this.album = JsonUtil.getString(item, 'Album', '');
+    this.indexNumber = this.numberText(item, 'IndexNumber');
+    this.parentIndexNumber = this.numberText(item, 'ParentIndexNumber');
     // 识别默认值：搜索词 = 条目名，年份 = 条目年份（Jellyfin 各客户端的惯例）
     this.searchTerm = this.name;
     this.searchYear = this.productionYear;
     this.candidates = [];
     this.searched = false;
+  }
+
+  /** 当前条目是否属于音乐（决定是否显示 / 提交音乐字段） */
+  private isMusic(): boolean {
+    return isMusicItemType(this.itemType);
+  }
+
+  /**
+   * 是否显示「音乐」分区。
+   *
+   * 比 `isMusic()` 窄一档：`MusicArtist` 是 `IItemByName`，服务端对它一个音乐字段都不赋值
+   * （`AlbumArtists`/`ArtistItems` 有 `item is IHasAlbumArtist` / `IHasArtist` 守卫，
+   * `Album` 只认 Audio/MusicVideo），所以它只显示分区标题会得到一张空卡片。
+   *
+   * 注意：**提交**仍按 `isMusic()` 走 —— `IndexNumber` / `ParentIndexNumber` 是无条件赋值，
+   * 不把原文读到的值带回去就等于把它们清成 null。
+   */
+  private showsMusicRows(): boolean {
+    return this.itemType === 'MusicAlbum' || this.itemType === 'Audio'
+      || this.itemType === 'MusicVideo';
+  }
+
+  /** 「搜索名称」那一行的说明：提供方随类型不同（影视 TMDb/TVDB，音乐 MusicBrainz） */
+  private searchHint(): string {
+    if (this.isMusic()) {
+      return '去服务端内置的 MusicBrainz 搜候选条目（音乐类型没有 TMDb/TVDB 提供方）';
+    }
+    return '去外部提供方（TMDb / TVDB…）搜候选条目';
+  }
+
+  /**
+   * 「同时替换图片」的说明。
+   *
+   * 音乐必须区别对待：`replaceAllImages` 会先删掉条目的图片再抓取候选的图，
+   * 而音乐候选（MusicBrainz）**没有图** —— 打开它等于纯删除，封面会丢。
+   */
+  private replaceImagesHint(): string {
+    if (this.isMusic()) {
+      return '音乐候选没有图片（MusicBrainz 不返回封面）：开启后会删除现有封面且抓不回新的，'
+        + '请保持关闭';
+    }
+    return '把候选条目的图片一并抓取覆盖（`replaceAllImages`）';
+  }
+
+  /**
+   * 候选封面高度：专辑是方图（1:1），其余按海报比例。
+   *
+   * 实际多数音乐候选没有图（MusicBrainz 不返回 `ImageUrl`），`CandidateRow` 会整块不画 —— 
+   * 这里只是"万一有图"时的比例。
+   */
+  private candidateImageHeight(): number {
+    return this.remoteSearchType === 'MusicAlbum' ? 60 : 90;
+  }
+
+  /**
+   * 该类型没有「识别」端点时的说明。
+   *
+   * 分集与单曲的原因不一样，不能共用一句话：分集是"跟着剧走"，单曲是"跟着专辑走"，
+   * 而 `Audio` 恰恰是音乐类型里唯一**没有**端点的一个（`ItemLookupController` 只到
+   * MusicAlbum/MusicArtist/MusicVideo）。
+   */
+  private noRemoteSearchReason(): string {
+    const label: string = this.itemType.length > 0 ? this.itemType : '该类型';
+    if (this.itemType === 'Audio') {
+      return `服务端没有为「${label}」（单曲）提供远程搜索端点 —— 10.8 的 ItemLookupController`
+        + ' 只到 MusicAlbum / MusicArtist / MusicVideo。曲目的元数据跟着专辑走，'
+        + '可在专辑详情页对专辑做「识别」；本页仍可直接编辑字段。';
+    }
+    if (this.itemType === 'Episode' || this.itemType === 'Season') {
+      return `服务端没有为「${label}」提供远程搜索端点（10.8 的 ItemLookupController 不含`
+        + ' Episode/Season），因此本页不提供识别。分集的元数据跟着剧走，可在剧集详情页操作。';
+    }
+    return `服务端没有为「${label}」提供远程搜索端点，因此本页不提供识别。`;
+  }
+
+  /**
+   * 专辑艺术家（`AlbumArtists`）为空时退回曲目艺术家（`ArtistItems`）。
+   *
+   * 为什么需要：`AlbumInfo.GetAlbumArtist()` 会先在 `AlbumArtists` 里找，找不到就返回 null；
+   * 而部分专辑的 `AlbumArtists` 是空的（元数据不完整）。用 `ArtistItems` 兜底比让搜索
+   * 退化成 `artist:""` 好。
+   */
+  private searchAlbumArtists(): string[] {
+    const albumArtists: string[] = MetadataDraft.fromLines(this.albumArtistsText);
+    if (albumArtists.length > 0) {
+      return albumArtists;
+    }
+    return MetadataDraft.fromLines(this.artistsText);
   }
 
   /**
@@ -312,7 +414,12 @@ struct ItemMetadataPage {
       studios: MetadataDraft.fromLines(this.studiosText),
       productionLocations: MetadataDraft.fromLines(this.locationsText),
       taglines: MetadataDraft.fromLines(this.taglinesText),
-      providerIds: this.providerEntries
+      providerIds: this.providerEntries,
+      albumArtists: MetadataDraft.fromLines(this.albumArtistsText),
+      artists: MetadataDraft.fromLines(this.artistsText),
+      album: this.album,
+      indexNumber: this.indexNumber,
+      parentIndexNumber: this.parentIndexNumber
     } as ItemMetadataEdits;
   }
 
@@ -324,7 +431,7 @@ struct ItemMetadataPage {
       this.notice('名称不能为空（服务端会把它写成 null）', false);
       return;
     }
-    const body: string = MetadataDraft.buildBody(this.rawItem, this.currentEdits());
+    const body: string = MetadataDraft.buildBody(this.rawItem, this.currentEdits(), this.isMusic());
     if (body.length === 0) {
       this.notice('条目原文不可解析，已中止保存（避免发一个空请求体把条目清空）', false);
       return;
@@ -401,9 +508,20 @@ struct ItemMetadataPage {
       ? JsonUtil.toPretty(JsonUtil.getObject(JsonUtil.parseObject(this.rawItem), 'ProviderIds'))
       : '';
     const year: number | null = MetadataDraft.nullableNumber(this.searchYear);
+    // 专辑搜索必须带专辑艺术家：服务端 `MusicBrainzAlbumProvider` 的查询是
+    // 「名称 AND 专辑艺术家」，而专辑艺术家只从 `AlbumInfo.AlbumArtists` 取
+    // （见 `AlbumInfoExtensions.GetAlbumArtist()`）—— 不带它查询退化成 `artist:""`。
+    const isAlbumSearch: boolean = this.remoteSearchType === 'MusicAlbum';
+    const albumArtistsJson: string =
+      isAlbumSearch ? JSON.stringify(this.searchAlbumArtists()) : '';
+    const artistProviderIdsJson: string = isAlbumSearch
+      ? MetadataDraft.albumArtistProviderIds(
+        JsonUtil.getObject(JsonUtil.parseObject(this.rawItem), 'ProviderIds'))
+      : '';
     const raw: string = await JellyfinNative.itemRemoteSearch(this.remoteSearchType,
       this.searchTerm, providerIds, year === null ? 0 : year,
-      this.preferredMetadataLanguage, this.preferredMetadataCountryCode, this.itemId);
+      this.preferredMetadataLanguage, this.preferredMetadataCountryCode, this.itemId,
+      albumArtistsJson, artistProviderIdsJson);
     const result: NativeResult = JellyfinNative.parseResult(raw);
     this.searching = false;
     this.searched = true;
@@ -428,9 +546,15 @@ struct ItemMetadataPage {
     if (candidate === null) {
       return '';
     }
-    return `将用「${candidate.name}」的元数据覆盖当前条目`
+    let body: string = `将用「${candidate.name}」的元数据覆盖当前条目`
       + (this.replaceImagesOnApply ? '，并替换图片' : '')
       + '。服务端会执行完整刷新（FullRefresh + ReplaceAllMetadata），你手改过的字段会被覆盖。';
+    if (this.remoteSearchType === 'MusicAlbum') {
+      // 服务端 `AlbumMetadataService.UpdateMetadataFromChildren`：完整刷新时专辑的名称/
+      // 专辑艺术家/艺术家会被内部曲目的值重算，所以"应用"的结果不一定会留下来
+      body += '专辑还会用内部曲目的值重算名称 / 专辑艺术家 / 艺术家，结果可能与候选不一致。';
+    }
+    return body;
   }
 
   private async applyCandidate(): Promise<void> {
@@ -787,6 +911,55 @@ struct ItemMetadataPage {
     }
   }
 
+  /**
+   * 音乐专属字段。
+   *
+   * 每一行都按**服务端实际会赋值的类型**显示（`ItemUpdateController.UpdateItem`）：
+   * - `AlbumArtists` → `item is IHasAlbumArtist`：MusicAlbum / Audio；
+   * - `ArtistItems` → `item is IHasArtist`：MusicAlbum / Audio / MusicVideo；
+   * - `Album` → `switch (item)` 里只有 `Audio` / `MusicVideo`；
+   * - `IndexNumber` / `ParentIndexNumber` → 所有条目无条件赋值，但只有曲目上语义明确。
+   *
+   * MusicArtist 一个都不适用（它是 `IItemByName`，只有名称/简介/类型/标签/封面），
+   * 所以整个分区对它不渲染（见 `showsMusicRows`）。
+   */
+  @Builder
+  MusicSection() {
+    SectionCard({ title: '音乐', icon: $r('sys.symbol.music'), showHeaderIcon: true }) {
+      Column() {
+        if (this.itemType === 'MusicAlbum' || this.itemType === 'Audio') {
+          this.TextAreaRow('专辑艺术家', '每行一位（`AlbumArtists`）；专辑「识别」按它精确匹配',
+            this.albumArtistsText, '每行一位', (value: string) => {
+              this.albumArtistsText = value;
+            })
+        }
+        if (this.itemType !== 'MusicArtist') {
+          this.TextAreaRow('艺术家', '每行一位（`ArtistItems`）；参与演唱/演奏的艺术家',
+            this.artistsText, '每行一位', (value: string) => {
+              this.artistsText = value;
+            })
+        }
+        if (this.itemType === 'Audio' || this.itemType === 'MusicVideo') {
+          this.TextRow('所属专辑', '这一首/这支 MV 归属的专辑（`Album`）；专辑条目请改「名称」',
+            this.album, '可选', 'text', (value: string) => {
+              this.album = value;
+            })
+        }
+        if (this.itemType === 'Audio') {
+          this.TextRow('音轨号', '专辑内序号（`IndexNumber`）；清空 = 移除',
+            this.indexNumber, '例如 3', 'number', (value: string) => {
+              this.indexNumber = value;
+            })
+          this.TextRow('碟号', '多碟专辑的碟序号（`ParentIndexNumber`）；清空 = 移除',
+            this.parentIndexNumber, '例如 1', 'number', (value: string) => {
+              this.parentIndexNumber = value;
+            })
+        }
+      }
+      .width('100%')
+    }
+  }
+
   @Builder
   RatingSection() {
     SectionCard({ title: '分级与评分', icon: $r('sys.symbol.star'), showHeaderIcon: true }) {
@@ -911,7 +1084,7 @@ struct ItemMetadataPage {
     SectionCard({ title: '识别（远程搜索）', icon: $r('sys.symbol.magnifyingglass'),
       showHeaderIcon: true }) {
       Column() {
-        this.TextRow('搜索名称', '去外部提供方（TMDb / TVDB…）搜候选条目', this.searchTerm,
+        this.TextRow('搜索名称', this.searchHint(), this.searchTerm,
           this.name, 'text', (value: string) => {
             this.searchTerm = value;
           })
@@ -939,6 +1112,28 @@ struct ItemMetadataPage {
         .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING,
           bottom: 8 })
 
+        if (this.remoteSearchType === 'MusicAlbum') {
+          Text('音乐元数据由服务端内置的 MusicBrainz 提供方返回：专辑按「专辑名 + 专辑艺术家」'
+            + '搜索，专辑艺术家取自上面「音乐」分区里的字段（为空时退回「艺术家」）。'
+            + 'MusicBrainz 不返回封面图，所以候选没有缩略图。\n'
+            + '另注意：服务端在「完全刷新」时会用专辑内曲目的值重算名称 / 专辑艺术家 / 艺术家'
+            + '（`AlbumMetadataService.UpdateMetadataFromChildren`），'
+            + '因此「应用」之后这几项可能又被曲目里的值覆盖。')
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textTertiary)
+            .width('100%')
+            .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING,
+              bottom: 8 })
+        } else if (this.remoteSearchType === 'MusicArtist') {
+          Text('艺术家同样来自服务端内置的 MusicBrainz；候选只带 MusicBrainz 的艺术家 ID，'
+            + '不含图片。')
+            .fontSize(ThemeConstants.META_SMALL)
+            .fontColor(this.colors().textTertiary)
+            .width('100%')
+            .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING,
+              bottom: 8 })
+        }
+
         if (this.candidates.length > 0) {
           Text(`候选（${this.candidates.length}）—— 「应用」会用该结果覆盖当前元数据`)
             .fontSize(ThemeConstants.META_SMALL)
@@ -946,7 +1141,7 @@ struct ItemMetadataPage {
             .width('100%')
             .padding({ left: ThemeConstants.PAGE_PADDING, right: ThemeConstants.PAGE_PADDING,
               bottom: 4 })
-          this.ToggleRow('同时替换图片', '把候选条目的图片一并抓取覆盖（`replaceAllImages`）',
+          this.ToggleRow('同时替换图片', this.replaceImagesHint(),
             this.replaceImagesOnApply, (value: boolean) => {
               this.replaceImagesOnApply = value;
             })
@@ -968,12 +1163,15 @@ struct ItemMetadataPage {
   @Builder
   CandidateRow(candidate: RemoteSearchCandidate) {
     Row({ space: 12 }) {
-      JellyfinImage({
-        url: candidate.imageUrl,
-        imgWidth: 60,
-        imgHeight: 90,
-        cornerRadius: 8
-      })
+      // 音乐候选（MusicBrainz）没有图片，画一个空框只会让人以为加载失败 —— 整块不画
+      if (candidate.imageUrl.length > 0) {
+        JellyfinImage({
+          url: candidate.imageUrl,
+          imgWidth: 60,
+          imgHeight: this.candidateImageHeight(),
+          cornerRadius: 8
+        })
+      }
       Column({ space: 4 }) {
         Text(candidate.name)
           .fontSize(ThemeConstants.TITLE_MEDIUM)
@@ -1213,6 +1411,9 @@ struct ItemMetadataPage {
         }
         this.BasicSection()
         this.CategorySection()
+        if (this.showsMusicRows()) {
+          this.MusicSection()
+        }
         this.RatingSection()
         this.ExternalIdSection()
         this.LanguageSection()
@@ -1221,9 +1422,7 @@ struct ItemMetadataPage {
         } else {
           SectionCard({ title: '识别（远程搜索）', icon: $r('sys.symbol.magnifyingglass'),
             showHeaderIcon: true }) {
-            Text(`服务端没有为「${this.itemType.length > 0 ? this.itemType : '该类型'}」提供远程搜索端点`
-              + '（10.8 的 ItemLookupController 不含 Episode/Season），因此本页不提供识别。'
-              + '分集的元数据跟着剧走，可在剧集详情页操作。')
+            Text(this.noRemoteSearchReason())
               .fontSize(ThemeConstants.META_SMALL)
               .fontColor(this.colors().textSecondary)
               .width('100%')

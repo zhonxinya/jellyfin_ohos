@@ -6,8 +6,10 @@ import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { AppViewModel } from '../viewmodel/AppViewModel';
 import { ItemsQueryOptions } from '../common/ItemsQueryOptions';
 import { MediaItem } from '../models/MediaItem';
+import { ItemMetadataRefreshSignal } from '../common/ItemMetadataModels';
 import { formatTicks } from '../common/format';
 import { PageHeader } from '../components/PageHeader';
+import { AppIconButton } from '../components/AppIconButton';
 import { LoadingState } from '../components/LoadingState';
 import { EmptyState } from '../components/EmptyState';
 import { JellyfinImage } from '../components/JellyfinImage';
@@ -67,6 +69,64 @@ struct AlbumDetailPage {
 
   private colors(): ThemeColors {
     return AppViewModel.getInstance().colors();
+  }
+
+  /**
+   * 从「编辑元数据」页返回且**真的改过数据**时重载。
+   *
+   * 先把路由带下来的艺术家 / 封面清掉：`reload()` 只在它们为空时才回读专辑条目
+   * （路由参数优先），而改完元数据后正是需要重新回读的场景。
+   *
+   * 专辑与曲目都可能被编辑（本页既有专辑的入口，也有每行的曲目入口），所以两个 id 都要
+   * 对一次 —— `consume` 只在命中时清空，反复调用不会误伤。
+   */
+  onPageShow(): void {
+    if (this.albumId.length === 0) {
+      return;
+    }
+    let changed: boolean = ItemMetadataRefreshSignal.consume(this.albumId);
+    for (let i = 0; i < this.tracks.length; i++) {
+      if (ItemMetadataRefreshSignal.consume(this.tracks[i].id)) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.artistName = '';
+      this.coverUrl = '';
+      this.reload();
+    }
+  }
+
+  /** 顶栏右侧：管理员才显示「编辑元数据」（服务端是 RequiresElevation） */
+  @Builder
+  HeaderAction() {
+    if (AppViewModel.getInstance().isAdmin) {
+      AppIconButton({
+        icon: $r('sys.symbol.doc_text'),
+        variant: 'ghost',
+        iconSize: 18,
+        onTap: () => {
+          this.openMetadata(this.albumId, 'MusicAlbum', this.albumName);
+        }
+      })
+    }
+  }
+
+  /**
+   * 打开条目元数据管理页。
+   *
+   * 音乐元数据的编辑能力在 core 与 `ItemMetadataPage` 里早已就绪（含 MusicAlbum/MusicArtist
+   * 的远程搜索端点），缺的只是入口 —— 音乐条目在 `DetailPage` 会被 `replaceUrl` 到本页，
+   * 永远走不到那边的元数据按钮。
+   */
+  private openMetadata(itemId: string, itemType: string, title: string): void {
+    if (itemId.length === 0) {
+      return;
+    }
+    router.pushUrl({
+      url: 'pages/ItemMetadataPage',
+      params: { itemId: itemId, itemType: itemType, title: title }
+    });
   }
 
   private async reload(): Promise<void> {
@@ -338,45 +398,69 @@ struct AlbumDetailPage {
     .padding({ left: 16, right: 16, bottom: 12 })
   }
 
-  /** 曲目行：按住时整行点亮，让"点哪里都能播"这件事在视觉上成立 */
+  /**
+   * 曲目行：按住时整行点亮，让"点哪里都能播"这件事在视觉上成立。
+   *
+   * 可播区域与「编辑元数据」按钮是**兄弟节点**而不是嵌套：点击在 ArkUI 里会落到最内层的
+   * 命中组件，但把按钮放进可点区域内仍会让"点按钮"和"点行"的语义纠缠（按下态、事件分发），
+   * 分开更稳。非管理员时按钮不渲染，可播区域自然占满整行。
+   */
   @Builder
   TrackRow(track: MediaItem, index: number) {
-    Row({ space: 12 }) {
-      // 序号等宽居中，位数不同的曲目也能对齐
-      Text(`${index + 1}`)
-        .fontSize(ThemeConstants.META_SMALL)
-        .fontColor(this.colors().textTertiary)
-        .width(28)
-        .textAlign(TextAlign.Center)
-      Column({ space: 3 }) {
-        Text(track.displayTitle())
-          .fontSize(ThemeConstants.BODY_MEDIUM)
-          .fontColor(this.colors().textPrimary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Text(formatTicks(track.runTimeTicks))
-          .fontSize(ThemeConstants.LABEL_SMALL)
+    Row({ space: 4 }) {
+      Row({ space: 12 }) {
+        // 序号等宽居中，位数不同的曲目也能对齐
+        Text(`${index + 1}`)
+          .fontSize(ThemeConstants.META_SMALL)
           .fontColor(this.colors().textTertiary)
+          .width(28)
+          .textAlign(TextAlign.Center)
+        Column({ space: 3 }) {
+          Text(track.displayTitle())
+            .fontSize(ThemeConstants.BODY_MEDIUM)
+            .fontColor(this.colors().textPrimary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+          Text(formatTicks(track.runTimeTicks))
+            .fontSize(ThemeConstants.LABEL_SMALL)
+            .fontColor(this.colors().textTertiary)
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        SymbolGlyph($r('sys.symbol.play_fill'))
+          .fontSize(ThemeConstants.ICON_SMALL)
+          .fontColor([this.colors().textTertiary])
       }
       .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
+      .padding({ top: 12, bottom: 12 })
+      .borderRadius(ThemeConstants.CHIP_RADIUS)
+      .stateStyles({
+        pressed: {
+          .backgroundColor(this.colors().surfacePressed)
+        }
+      })
+      .onClick(() => {
+        this.playTrack(index);
+      })
 
-      SymbolGlyph($r('sys.symbol.play_fill'))
-        .fontSize(ThemeConstants.ICON_SMALL)
-        .fontColor([this.colors().textTertiary])
+      // 单曲元数据：服务端没有 Audio 的远程搜索端点（识别跟着专辑走），但字段与封面可编辑
+      if (AppViewModel.getInstance().isAdmin) {
+        AppIconButton({
+          icon: $r('sys.symbol.doc_text'),
+          variant: 'ghost',
+          iconSize: 16,
+          buttonSize: 32,
+          onTap: () => {
+            this.openMetadata(track.id, 'Audio', track.displayTitle());
+          }
+        })
+      }
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-    .borderRadius(ThemeConstants.CHIP_RADIUS)
-    .stateStyles({
-      pressed: {
-        .backgroundColor(this.colors().surfacePressed)
-      }
-    })
-    .onClick(() => {
-      this.playTrack(index);
-    })
+    .padding({ left: 16, right: 16 })
+    .alignItems(VerticalAlign.Center)
   }
 
   /** 曲目区小标题：与工程其它分节标题（SectionHeader）的视觉层级一致 */
@@ -420,7 +504,12 @@ struct AlbumDetailPage {
 
           // 返回按钮浮在最上层：背板是图片，标题放在背板上会与封面争夺注意力，
           // 所以标题留空、只保留返回。
-          PageHeader({ title: '', transparent: true, onBack: () => { router.back(); } })
+          PageHeader({
+            title: '',
+            transparent: true,
+            onBack: () => { router.back(); },
+            action: () => { this.HeaderAction(); }
+          })
         }
         .width('100%')
         .height('100%')

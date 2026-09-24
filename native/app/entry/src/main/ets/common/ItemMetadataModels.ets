@@ -299,9 +299,23 @@ export class ItemImage {
 }
 
 /**
+ * 该条目类型是否属于音乐 —— 决定元数据页是否显示（并提交）音乐专属字段。
+ *
+ * `MusicArtist` 也在内：它没有专辑艺术家/所属专辑，但有类型/标签/简介/封面，
+ * 且服务端为它提供了 `RemoteSearch/MusicArtist` 端点，所以同样要能进编辑页。
+ */
+export function isMusicItemType(itemType: string): boolean {
+  return itemType === 'MusicAlbum' || itemType === 'MusicArtist'
+    || itemType === 'MusicVideo' || itemType === 'Audio';
+}
+
+/** 服务端 `MetadataProvider` 里与音乐相关的提供方键（`ProviderIds` 的键名） */
+export const MUSIC_BRAINZ_ARTIST_KEY: string = 'MusicBrainzArtist';
+
+/**
  * 页面上的可编辑字段集合（就是 `ItemMetadataEdits` 的输入）。
  *
- * 数组类字段（类型/标签/制片公司/拍摄地点/宣传语）在页面上是多行文本（每行一项）。
+ * 数组类字段（类型/标签/制片公司/拍摄地点/宣传语/专辑艺术家/艺术家）在页面上是多行文本（每行一项）。
  * 可空字段（年份/首播日期/评分）用字符串承载，空串 = 清除 —— 服务端是整体替换，
  * 「清空」必须显式发 `null`/省略，不能靠"不发这个字段"。
  */
@@ -326,6 +340,16 @@ export interface ItemMetadataEdits {
   productionLocations: string[];
   taglines: string[];
   providerIds: ProviderIdEntry[];
+  /**
+   * 音乐字段 —— 只在 `isMusicItemType` 为真时提交（见 `MetadataDraft.buildBody` 的
+   * `includeMusicFields`）。非音乐条目里这些值仍从原文读出，只是不写回，
+   * 避免误改（服务端 `item.IndexNumber = request.IndexNumber` 是无条件的）。
+   */
+  albumArtists: string[];
+  artists: string[];
+  album: string;
+  indexNumber: string;
+  parentIndexNumber: string;
 }
 
 export class MetadataDraft {
@@ -342,6 +366,22 @@ export class MetadataDraft {
       const value: string = lines[i].trim();
       if (value.length > 0) {
         out.push(value);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * `AlbumArtists` / `ArtistItems` 在条目 DTO 里是 `[{ Name, Id }]`（服务端 `NameGuidPair`），
+   * 表单按字符串列表编辑，这里只取 `Name`。
+   */
+  static nameList(item: ESObject, key: string): string[] {
+    const out: string[] = [];
+    const values: Object[] = JsonUtil.getArray(item, key);
+    for (let i = 0; i < values.length; i++) {
+      const name: string = JsonUtil.getString(values[i] as ESObject, 'Name', '');
+      if (name.length > 0) {
+        out.push(name);
       }
     }
     return out;
@@ -381,9 +421,15 @@ export class MetadataDraft {
    * 以原文为底是关键：原文里带着本页不编辑的字段（`People` / `Path` / `MediaSources` /
    * `UserData` …），漏掉它们就等于让服务端把条目清空。合并只覆盖本页负责的字段。
    *
+   * `includeMusicFields` 只对音乐条目为真（见 `isMusicItemType`）。为什么必须分开：
+   * 服务端 `item.IndexNumber = request.IndexNumber` 与 `item.AlbumArtists = ...` 都是**无条件**赋值，
+   * 而本页对非音乐条目不显示这些字段 —— 若一并写回，就会把没让用户看见的值（例如分集的集号）
+   * 当成"用户清空"发出去。
+   *
    * 返回空串表示原文不可解析（调用方应中止保存并提示，而不是发一个空 body 出去）。
    */
-  static buildBody(rawItem: string, edits: ItemMetadataEdits): string {
+  static buildBody(rawItem: string, edits: ItemMetadataEdits,
+                   includeMusicFields: boolean): string {
     const parsed: ESObject | null = JsonUtil.parseObject(rawItem);
     if (parsed === null) {
       return '';
@@ -412,7 +458,34 @@ export class MetadataDraft {
     map['Taglines'] = edits.taglines;
     map['ProviderIds'] = MetadataDraft.providerIdsOf(edits.providerIds);
 
+    if (includeMusicFields) {
+      map['AlbumArtists'] = edits.albumArtists;
+      map['ArtistItems'] = edits.artists;
+      map['Album'] = MetadataDraft.nullableText(edits.album);
+      map['IndexNumber'] = MetadataDraft.nullableNumber(edits.indexNumber);
+      map['ParentIndexNumber'] = MetadataDraft.nullableNumber(edits.parentIndexNumber);
+    }
+
     return JSON.stringify(map);
+  }
+
+  /**
+   * 专辑识别要带上的「专辑艺术家外部 ID」（`AlbumInfo.ArtistProviderIds`）。
+   *
+   * 服务端 `GetMusicBrainzArtistId(AlbumInfo)` 先看条目自己的 `ProviderIds`，
+   * 再看 `ArtistProviderIds["MusicBrainzArtist"]`；命中就改用 `arid:` 精确查。
+   * 条目上存的是 `MusicBrainzAlbumArtist`（专辑艺术家），这里按服务端要的键名搬过去。
+   *
+   * 没有就返回空串 —— 调用方传空串表示"不发这个字段"（见 core `buildRemoteSearchRequest`）。
+   */
+  static albumArtistProviderIds(albumProviderIds: ESObject | null): string {
+    const artistId: string = JsonUtil.getString(albumProviderIds, 'MusicBrainzAlbumArtist', '');
+    if (artistId.length === 0) {
+      return '';
+    }
+    const out: Record<string, string> = {} as Record<string, string>;
+    out[MUSIC_BRAINZ_ARTIST_KEY] = artistId;
+    return JSON.stringify(out);
   }
 
   /** 外部 ID 行 → `{ Tmdb: "4176" }`（空值不发：服务端也会把空值删掉） */

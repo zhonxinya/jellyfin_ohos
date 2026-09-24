@@ -737,13 +737,22 @@ export class JellyfinNative {
     }
   }
 
-  /** 远程搜索（识别）候选条目 */
+  /**
+   * 远程搜索（识别）候选条目。
+   *
+   * `albumArtistsJson` / `artistProviderIdsJson` 只对 MusicAlbum 有意义 —— 服务端
+   * `MusicBrainzAlbumProvider` 的查询是「名称 + 专辑艺术家」，而专辑艺术家取自
+   * `AlbumInfo.AlbumArtists`（不传就退化成 `artist:""`，搜不出东西）。
+   * 非音乐类型传空串即可。
+   */
   static async itemRemoteSearch(itemType: string, searchTerm: string, providerIdsJson: string,
                                 year: number, metadataLanguage: string,
-                                metadataCountryCode: string, itemId: string): Promise<string> {
+                                metadataCountryCode: string, itemId: string,
+                                albumArtistsJson: string = '',
+                                artistProviderIdsJson: string = ''): Promise<string> {
     try {
       return await jellyfinNative.itemRemoteSearch(itemType, searchTerm, providerIdsJson, year,
-        metadataLanguage, metadataCountryCode, itemId);
+        metadataLanguage, metadataCountryCode, itemId, albumArtistsJson, artistProviderIdsJson);
     } catch (error) {
       return JellyfinNative.fail('itemRemoteSearch', error);
     }

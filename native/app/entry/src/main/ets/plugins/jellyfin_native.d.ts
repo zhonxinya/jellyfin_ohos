@@ -205,9 +205,14 @@ declare module 'libjellyfin_native.so' {
      * 远程搜索（识别）：`POST /Items/RemoteSearch/{itemType}`，返回归一化的候选数组。
      * `itemType` 只支持 Movie/Series/BoxSet/MusicVideo/MusicArtist/MusicAlbum/Trailer/Book
      * （10.8 没有 Episode 端点）。
+     *
+     * `albumArtistsJson` / `artistProviderIdsJson` 只对 MusicAlbum 有意义：
+     * 服务端 `AlbumInfo.GetAlbumArtist()` 只认 `AlbumArtists`，不传的话 MusicBrainz 查询
+     * 会退化成 `artist:""`。传空串 = 不发这两个字段。
      */
     itemRemoteSearch(itemType: string, searchTerm: string, providerIdsJson: string, year: number,
-                     metadataLanguage: string, metadataCountryCode: string, itemId: string): string;
+                     metadataLanguage: string, metadataCountryCode: string, itemId: string,
+                     albumArtistsJson: string, artistProviderIdsJson: string): string;
     /** 应用识别结果（`POST /Items/RemoteSearch/Apply/{itemId}`）：会 FullRefresh + 覆盖元数据 */
     itemApplyRemoteSearch(itemId: string, resultJson: string, replaceAllImages: boolean): string;
     setPreference(key: string, value: string): string;

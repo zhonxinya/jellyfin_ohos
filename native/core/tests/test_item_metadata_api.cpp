@@ -194,6 +194,32 @@ void TestNormalizeItemMetadataBody()
                  nlohmann::json::array({nlohmann::json::object({{"Name", "华纳"}}),
                                         nlohmann::json::object({{"Name", "A24"}})}));
 
+    // AlbumArtists / ArtistItems 同为 `NameGuidPair[]`：界面按字符串列表编辑，
+    // 只发字符串会被服务端反序列化失败（服务端取 `.Select(i => i.Name)`）
+    const nlohmann::json music = jellyfin::api::normalizeItemMetadataBody(nlohmann::json::object({
+        {"AlbumArtists", nlohmann::json::array({" 周杰伦 ", ""})},
+        {"ArtistItems", nlohmann::json::array(
+            {nlohmann::json::object({{"Name", "费玉清"}, {"Id", "a-1"}})})},
+    }));
+    ExpectJsonEq("body.AlbumArtists 转成 NameGuidPair[]", music["AlbumArtists"],
+                 nlohmann::json::array({nlohmann::json::object({{"Name", "周杰伦"}})}));
+    ExpectJsonEq("body.ArtistItems 对象形状透传（保留 Id）", music["ArtistItems"],
+                 nlohmann::json::array(
+                     {nlohmann::json::object({{"Name", "费玉清"}, {"Id", "a-1"}})}));
+
+    // 字段缺失时**不能**凭空补空数组：服务端 `item.AlbumArtists = request.AlbumArtists...`
+    // 会把专辑艺术家清空，而字段缺失时服务端会跳过
+    const nlohmann::json noMusic = jellyfin::api::normalizeItemMetadataBody(
+        nlohmann::json::object({{"Name", "x"}}));
+    ExpectTrue("body 缺 AlbumArtists 时不补字段", !noMusic.contains("AlbumArtists"));
+    ExpectTrue("body 缺 ArtistItems 时不补字段", !noMusic.contains("ArtistItems"));
+
+    // 用户清空是合法意图：空数组保持空数组
+    const nlohmann::json clearedArtists = jellyfin::api::normalizeItemMetadataBody(
+        nlohmann::json::object({{"AlbumArtists", nlohmann::json::array()}}));
+    ExpectJsonEq("body.空 AlbumArtists 保持空数组", clearedArtists["AlbumArtists"],
+                 nlohmann::json::array());
+
     // 空数组保持空数组（用户清空标签是合法意图，不能变成 null/缺字段之外的东西）
     const nlohmann::json cleared = jellyfin::api::normalizeItemMetadataBody(
         nlohmann::json::object({{"Genres", nlohmann::json::array()}}));
@@ -251,6 +277,35 @@ void TestRemoteSearchRequest()
     const LibraryRequest idRequest = jellyfin::api::buildRemoteSearchRequest(byId);
     ExpectJsonEq("remoteSearch.ProviderIds 透传", idRequest.body["SearchInfo"]["ProviderIds"],
                  nlohmann::json::object({{"Tvdb", "12345"}}));
+
+    // 音乐专辑：服务端 `MusicBrainzAlbumProvider` 走
+    // `release/?query="{名称}" AND artist:"{GetAlbumArtist()}"`，而 `GetAlbumArtist()`
+    // 只认 `AlbumInfo.AlbumArtists` —— 不带它查询退化成 `artist:""`，等于搜不出来
+    RemoteSearchQuery album;
+    album.itemType = "MusicAlbum";
+    album.searchTerm = "范特西";
+    album.albumArtists = nlohmann::json::array({" 周杰伦 ", ""});
+    album.artistProviderIds = nlohmann::json::object({{"MusicBrainzArtist", "mbid-1"}});
+    const LibraryRequest albumRequest = jellyfin::api::buildRemoteSearchRequest(album);
+    ExpectEq("remoteSearch.album.path", albumRequest.path, "/Items/RemoteSearch/MusicAlbum");
+    ExpectJsonEq("remoteSearch.AlbumArtists 去空去空白",
+                 albumRequest.body["SearchInfo"]["AlbumArtists"],
+                 nlohmann::json::array({"周杰伦"}));
+    ExpectJsonEq("remoteSearch.ArtistProviderIds 透传",
+                 albumRequest.body["SearchInfo"]["ArtistProviderIds"],
+                 nlohmann::json::object({{"MusicBrainzArtist", "mbid-1"}}));
+
+    // 没有专辑艺术家时整个省略（发空数组与"带空艺术家去查"是同一个坏结果）
+    RemoteSearchQuery noArtist;
+    noArtist.itemType = "MusicAlbum";
+    noArtist.searchTerm = "x";
+    const LibraryRequest noArtistRequest = jellyfin::api::buildRemoteSearchRequest(noArtist);
+    ExpectTrue("remoteSearch 无专辑艺术家不发 AlbumArtists",
+               !noArtistRequest.body["SearchInfo"].contains("AlbumArtists"));
+    ExpectTrue("remoteSearch 无艺术家外部 ID 不发 ArtistProviderIds",
+               !noArtistRequest.body["SearchInfo"].contains("ArtistProviderIds"));
+    ExpectTrue("remoteSearch 空 artistProviderIds 不误判为对象",
+               !noArtistRequest.body["SearchInfo"].contains("ArtistProviderIds"));
 }
 
 void TestApplyRemoteSearchRequest()
@@ -370,6 +425,8 @@ void TestRemoteSearchTypeFor()
     ExpectEq("type.Series", jellyfin::api::remoteSearchTypeFor("Series"), "Series");
     ExpectEq("type.BoxSet", jellyfin::api::remoteSearchTypeFor("BoxSet"), "BoxSet");
     ExpectEq("type.MusicAlbum", jellyfin::api::remoteSearchTypeFor("MusicAlbum"), "MusicAlbum");
+    ExpectEq("type.MusicArtist", jellyfin::api::remoteSearchTypeFor("MusicArtist"), "MusicArtist");
+    ExpectEq("type.MusicVideo", jellyfin::api::remoteSearchTypeFor("MusicVideo"), "MusicVideo");
     // 10.8 没有 Episode/Season 的 RemoteSearch 端点：必须返回空串，界面据此不提供「识别」
     ExpectEq("type.Episode 无端点", jellyfin::api::remoteSearchTypeFor("Episode"), "");
     ExpectEq("type.Season 无端点", jellyfin::api::remoteSearchTypeFor("Season"), "");
