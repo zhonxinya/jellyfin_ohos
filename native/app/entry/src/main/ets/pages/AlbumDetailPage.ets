@@ -123,7 +123,8 @@ struct AlbumDetailPage {
             }
             this.year = JsonUtil.getNumber(albumRes.data as ESObject, 'ProductionYear', 0);
             if (this.artistName.length === 0) {
-              this.artistName = JsonUtil.getString(albumRes.data as ESObject, 'AlbumArtist', '');
+              // 用 MediaItem 里已过乱码修复的字段，别再自己读一遍原文（见 common/TextRepair）
+              this.artistName = detail.albumArtist;
             }
             if (this.coverUrl.length === 0) {
               this.coverUrl = detail.imageUrl(600, 'Primary');

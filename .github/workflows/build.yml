@@ -69,6 +69,11 @@ jobs:
                 # 守住的是"异常不得从 NAPI 边界逸出"：value() 对 null/类型不符会抛，
                 # 而异常逸出 RunAsync 的 worker 线程 = std::terminate。
                 extra="" ;;
+              test_text_repair)
+                # header-only（text_util.h / json_dump.h），无需额外源文件。
+                # 守住的是"解析响应体前必须先收敛非法 UTF-8"：parse() 对 GBK 等非法字节
+                # 会抛 parse_error.101，一抛整份响应就变成 "JSON parse error"。
+                extra="" ;;
               test_image_cache)
                 # 只依赖注入的下载函数（ImageDownloadFn），不需要 HttpClient/mbedTLS：
                 # 守住的是淘汰的触发频率与代价（旧实现每下载一张图就做一次 O(n²) 目录扫描，
