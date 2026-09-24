@@ -1,6 +1,7 @@
 import { ThemeColors, ThemeConstants } from '../common/ThemeConstants';
 import { formatTicks } from '../common/format';
 import { JsonUtil } from '../common/JsonUtil';
+import { TextRepair } from '../common/TextRepair';
 import { JellyfinNative, NativeResult } from '../plugins/JellyfinNative';
 
 /**
@@ -163,25 +164,28 @@ export class MediaItem {
       return item;
     }
     const data: ESObject = obj as ESObject;
+    // 名字类字段统一过一遍乱码修复：中文音乐库里的 GBK 标签会让「测试」变成「²âÊÔ」，
+    // 那是**合法**字符，整条链路都不会报错，只是显示成乱码。见 common/TextRepair。
     item.id = JsonUtil.getString(data, 'Id', JsonUtil.getString(data, 'id', ''));
-    item.name = JsonUtil.getString(data, 'Name', JsonUtil.getString(data, 'name', ''));
+    item.name = TextRepair.repair(
+      JsonUtil.getString(data, 'Name', JsonUtil.getString(data, 'name', '')));
     item.type = JsonUtil.getString(data, 'Type',
       JsonUtil.getString(data, 'CollectionType', JsonUtil.getString(data, 'type', '')));
     item.collectionType = JsonUtil.getString(data, 'CollectionType', '');
     const yearNum: number = JsonUtil.getNumber(data, 'ProductionYear', 0);
     item.year = yearNum > 0 ? `${yearNum}` : JsonUtil.getString(data, 'ProductionYear', '');
-    item.overview = JsonUtil.getString(data, 'Overview', '');
+    item.overview = TextRepair.repair(JsonUtil.getString(data, 'Overview', ''));
     item.runTimeTicks = JsonUtil.getNumber(data, 'RunTimeTicks', 0);
     item.communityRating = JsonUtil.getNumber(data, 'CommunityRating', 0);
     item.officialRating = JsonUtil.getString(data, 'OfficialRating', '');
-    item.seriesName = JsonUtil.getString(data, 'SeriesName', '');
+    item.seriesName = TextRepair.repair(JsonUtil.getString(data, 'SeriesName', ''));
     item.seriesId = JsonUtil.getString(data, 'SeriesId',
       JsonUtil.getString(data, 'seriesId', ''));
     item.indexNumber = JsonUtil.getNumber(data, 'IndexNumber', 0);
     item.parentIndexNumber = JsonUtil.getNumber(data, 'ParentIndexNumber', 0);
     item.playlistItemId = JsonUtil.getString(data, 'PlaylistItemId', '');
     item.childCount = JsonUtil.getNumber(data, 'ChildCount', 0);
-    item.albumArtist = JsonUtil.getString(data, 'AlbumArtist', '');
+    item.albumArtist = TextRepair.repair(JsonUtil.getString(data, 'AlbumArtist', ''));
     item.isFolder = item.type === 'CollectionFolder' || item.type === 'UserView' ||
       item.type === 'Folder' || item.type === 'BoxSet';
 
@@ -209,7 +213,7 @@ export class MediaItem {
     const genres: string[] = [];
     for (let i = 0; i < genreArr.length; i++) {
       if (typeof genreArr[i] === 'string') {
-        genres.push(genreArr[i] as string);
+        genres.push(TextRepair.repair(genreArr[i] as string));
       }
     }
     item.genres = genres;

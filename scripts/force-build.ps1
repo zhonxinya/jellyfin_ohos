@@ -102,8 +102,14 @@ Invoke-CompileAndRun -Name "test_json_arg" -Sources @(
     (Join-Path $Core "tests\test_json_arg.cpp")
 )
 
-Invoke-CompileAndRun -Name "test_player_engine" -Sources @(
-    (Join-Path $Core "tests\test_player_engine.cpp"),
+# text_repair：UTF-8 容错（header-only 的 text_util.h / json_dump.h）。
+# 守住"解析响应体前必须先收敛非法 UTF-8"：parse() 对非法字节会抛（parse_error.101），
+# 一抛整份响应就变成 "JSON parse error" —— 音乐库里的 GBK 标签会让**整个列表打不开**。
+Invoke-CompileAndRun -Name "test_text_repair" -Sources @(
+    (Join-Path $Core "tests\test_text_repair.cpp")
+)
+
+Invoke-CompileAndRun -Name "test_player_engine" -Sources @(    (Join-Path $Core "tests\test_player_engine.cpp"),
     (Join-Path $RepoRoot "native\feature\player\engine.cpp"),
     (Join-Path $RepoRoot "native\feature\player\ffmpeg_decoder.cpp"),
     (Join-Path $RepoRoot "native\feature\player\hw_decoder.cpp"),

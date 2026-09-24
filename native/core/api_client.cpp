@@ -61,7 +61,8 @@ ApiResult JellyfinApiClient::interpret(const HttpResponse &resp) const
         result.error.message = "HTTP " + std::to_string(resp.status);
         if (!resp.body.empty()) {
             try {
-                auto j = nlohmann::json::parse(resp.body);
+                // 错误消息同样来自服务端，可能是非法 UTF-8（见 SanitizeUtf8 的说明）
+                auto j = nlohmann::json::parse(SanitizeUtf8(resp.body));
                 if (j.contains("message") && j["message"].is_string()) {
                     result.error.message = j["message"].get<std::string>();
                 } else if (j.is_string()) {
@@ -80,7 +81,10 @@ ApiResult JellyfinApiClient::interpret(const HttpResponse &resp) const
         return result;
     }
     try {
-        result.data = nlohmann::json::parse(resp.body);
+        // 解析前收敛非法 UTF-8：音乐库的 GBK 标签、GBK 字幕等会让 `parse()` 直接抛
+        // （`parse_error.101`），那会把**整份响应**变成 "JSON parse error" —— 一个条目的
+        // 名字乱码就导致整个列表打不开。清洗后非法字节显示成 �，其余内容照常可用。
+        result.data = nlohmann::json::parse(SanitizeUtf8(resp.body));
     } catch (const std::exception &ex) {
         result.error.statusCode = 0;
         result.error.message = std::string("JSON parse error: ") + ex.what();
